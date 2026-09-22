@@ -57,7 +57,7 @@ export function render(ctx, W, H, doc, ui) {
   for (const t of doc.tracks) drawTrackEnds(ctx, cam, doc, t);
   if (doc.settings.showJunctions && ui.graphRev !== false) drawJunctions(ctx, cam, doc, ui);
   if (doc.settings.showFormations) for (const t of doc.tracks) drawFormations(ctx, cam, doc, t, ui);
-  if (ui.simTrain) drawMovingTrain(ctx, cam, doc, ui.simTrain);
+  for (const tr of (ui.simTrains || [])) drawMovingTrain(ctx, cam, doc, tr);
   for (const o of above) drawObject(ctx, cam, doc, o, ui);
   if (ui._graph) drawTurnoutPositions(ctx, cam, doc, ui._graph);
   if (doc.settings.showLabels) for (const t of doc.tracks) drawTrackLabel(ctx, cam, doc, t);

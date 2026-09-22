@@ -142,6 +142,12 @@ export function sampleDoc() {
   const stM = station('みどりが丘', 360);
   const stH = station('東川', 2420);
   const stK = station('海岸', 4400);
+  // 駅の番線（配線と連携）
+  const trackId = nm => (t.find(x => x.name === nm) || {}).id;
+  stW.tracks = [mainLine.id];
+  stM.tracks = [trackId('駅1番線'), trackId('駅2番線')].filter(Boolean);
+  stH.tracks = [mainLine.id, trackId('東川1番線')].filter(Boolean);
+  stK.tracks = [mainLine.id];
 
   /* ---- 信号機を線路に紐づける ---- */
   const attachSignal = (type, trackName, atFromEnd, dir, label) => {
@@ -241,13 +247,21 @@ export function sampleDoc() {
     stations: [stW.id, stM.id, stH.id, stK.id],
   };
   const trains = [];
-  const addTrain = (number, type, dir, departSec, speedKmh) => {
+  const addTrain = (number, type, dir, departSec, speedKmh, extra = {}) => {
     const last = line.stations.length - 1;
+    const down = dir === 'down';
     trains.push({
       id: uid('tr'), lineId: line.id, number, name: '', type, dir,
-      fromIdx: dir === 'down' ? 0 : last,
-      toIdx: dir === 'down' ? last : 0,
-      departSec, speedKmh, dwellSec: 30, skip: [], color: null, formationId: null, note: '',
+      fromIdx: extra.fromIdx ?? (down ? 0 : last),
+      toIdx: extra.toIdx ?? (down ? last : 0),
+      departSec, speedKmh, dwellSec: 30, skip: [], cars: extra.cars ?? 10,
+      // 東川は交換駅：下りは本線、上りは1番線に入る
+      platforms: extra.platforms ?? {
+        1: down ? trackId('駅1番線') : trackId('駅2番線'),
+        2: down ? mainLine.id : trackId('東川1番線'),
+      },
+      toDepot: !!extra.toDepot, depotTrackId: extra.depotTrackId || null,
+      color: null, formationId: extra.formationId || null, note: '',
     });
   };
   addTrain('101M', 'local', 'down', 6 * 3600, 60);
@@ -255,7 +269,9 @@ export function sampleDoc() {
   addTrain('103M', 'rapid', 'down', 6 * 3600 + 1800, 80);
   addTrain('104M', 'local', 'up', 6 * 3600 + 2400, 60);
   addTrain('105M', 'local', 'down', 6 * 3600 + 3600, 60);
-  addTrain('回1', 'deadhead', 'down', 6 * 3600 + 900, 45);
+  addTrain('回1', 'deadhead', 'down', 6 * 3600 + 900, 45, {
+    fromIdx: 0, toIdx: 1, cars: 10, toDepot: true, depotTrackId: trackId('8番線'),
+  });
 
   doc.tracks = t; doc.objects = o; doc.formations = f;
   doc.lines = [line];

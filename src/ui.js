@@ -13,10 +13,11 @@ import { getGraph, findRoute, validateLayout, END_TYPES, endType, nodeRoutes, cu
 import { signalAspects, signalDetails, ASPECT_NAMES, ASPECT_SHORT, ASPECT_COLORS, routeStatus, isSignal } from './interlocking.js';
 import { layoutChecks } from './checks.js';
 import { entryAnalysis, stablingSummary } from './analysis.js';
-import { sim, simStart, simPause, simReset, planAdd, planRemove, planClear, simState, PHASE_NAMES } from './sim.js';
+import { sim, simStart, simPause, simReset, setSimMode, planAdd, planRemove, planClear, simState, simClockText, PHASE_NAMES } from './sim.js';
 import {
   TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
-  timetableConflicts, fmtHM, parseHM,
+  timetableConflicts, platformConflicts, platformDemand, stationTracks, trainPlatform,
+  nearbyTracks, fmtHM, parseHM,
 } from './timetable.js';
 import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
@@ -451,6 +452,48 @@ export function initUI(api) {
               }, r.name))),
               h('p', { class: 'note' }, '図上では開通している側が明るく表示されます（定位＝緑、反位＝黄）。'),
             ),
+      ));
+    }
+
+    // 駅（停車場）
+    if (def.station) {
+      const assigned = (o.tracks || []).filter(id => store.doc.tracks.some(t => t.id === id));
+      const near = nearbyTracks(store.doc, o, 90).filter(x => !assigned.includes(x.track.id));
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '駅の番線（発着線）', h('span', { class: 'tag' }, `${assigned.length} 線`)),
+        assigned.length
+          ? h('div', {}, ...assigned.map((id, i) => {
+            const t = findTrack(id);
+            return h('div', { class: 'listrow' },
+              h('span', { class: 'num' }, `${i + 1}`),
+              h('span', { class: 'nm' }, t ? t.name : '?'),
+              h('button', {
+                class: 'btn sm danger',
+                onclick: () => updateEntity('object', o.id, { tracks: assigned.filter(x => x !== id) }),
+              }, '×'));
+          }))
+          : h('p', { class: 'note' }, '番線が未設定です。ダイヤでは駅マーカーが乗っている線路を使います。'),
+        near.length
+          ? h('div', { class: 'field', style: 'margin-top:8px' }, h('label', {}, '番線を追加'),
+            (() => {
+              const sel = h('select', {}, h('option', { value: '' }, '— 近くの線路 —'),
+                ...near.map(x => h('option', { value: x.track.id }, `${x.track.name}（${x.d.toFixed(0)}m）`)));
+              sel.addEventListener('change', () => {
+                if (sel.value) updateEntity('object', o.id, { tracks: [...assigned, sel.value] });
+              });
+              return sel;
+            })())
+          : null,
+        h('button', {
+          class: 'btn sm wide', style: 'margin-top:6px',
+          onclick: () => {
+            const auto = nearbyTracks(store.doc, o, 90)
+              .filter(x => ['platform', 'main', 'entryexit', 'entry', 'exit'].includes(x.track.kind))
+              .map(x => x.track.id);
+            updateEntity('object', o.id, { tracks: [...new Set(auto)] });
+            setMessage(`${auto.length} 本の線路を番線に設定しました`);
+          },
+        }, '近くの線路から自動設定'),
       ));
     }
 
@@ -965,60 +1008,90 @@ export function initUI(api) {
     const out = [];
 
     out.push(h('div', { class: 'card' },
-      h('h4', {}, '入換シミュレーション',
-        h('span', { class: 'tag', style: sim.running ? 'color:#3ddc84' : '' }, PHASE_NAMES[stt.phase] || stt.phase)),
-      h('div', { class: 'kv' }, h('span', {}, '時刻'), h('b', {}, stt.time)),
-      stt.move
-        ? h('div', { class: 'kv' }, h('span', {}, '実行中'),
-          h('b', {}, `${stt.move.formation ? stt.move.formation.name : '?'} → ${stt.move.to ? stt.move.to.name : '?'}`))
+      h('h4', {}, '運転', h('span', { class: 'tag', style: sim.running ? 'color:#3ddc84' : '' }, sim.running ? '運転中' : '停止中')),
+      field('モード', selectInput('sim.mode', sim.mode,
+        [{ value: 'plan', label: '入換（手動計画）' }, { value: 'timetable', label: 'ダイヤ運転（時刻どおり）' }],
+        v => { setSimMode(v); emit('sim'); })),
+      h('div', { class: 'kv' }, h('span', {}, '時計'), h('b', { style: 'font-size:15px' }, stt.clock)),
+      sim.mode === 'timetable'
+        ? field('開始時刻', (() => {
+          const i = h('input', { type: 'text', value: fmtHM(sim.startClock), placeholder: '05:30' });
+          i.dataset.key = 'sim.start';
+          i.addEventListener('change', () => {
+            const v = parseHM(i.value);
+            if (v != null) { sim.startClock = v; if (!sim.running) sim.clock = v; emit('sim'); }
+          });
+          return i;
+        })())
         : null,
-      stt.legs ? h('div', { class: 'kv' }, h('span', {}, '区間'), h('b', {}, `${stt.legIndex + 1} / ${stt.legs}`)) : null,
-      meter(stt.progress, false),
-      h('div', { class: 'kv' }, h('span', {}, '残り'), h('b', {}, `${stt.remain.toFixed(0)} m`)),
-      h('div', { class: 'kv' }, h('span', {}, '進捗'), h('b', {}, `${stt.index} / ${stt.total} 件`)),
       h('div', { class: 'btn-row', style: 'margin-top:8px' },
-        h('button', { class: 'btn sm primary', onclick: () => { simStart(); emit('sim'); } }, sim.running ? '▶ 実行中' : '▶ 開始'),
+        h('button', { class: 'btn sm primary', onclick: () => { simStart(); emit('sim'); } }, sim.running ? '▶ 運転中' : '▶ 開始'),
         h('button', { class: 'btn sm', onclick: () => { simPause(); emit('sim'); } }, '⏸ 一時停止'),
         h('button', { class: 'btn sm danger', onclick: () => { simReset(); emit('sim'); } }, '⏹ リセット'),
       ),
-      h('div', { class: 'field', style: 'margin-top:8px' }, h('label', {}, '再生速度'),
-        selectInput('sim.speed', String(sim.speed),
-          [1, 2, 4, 8, 16, 32].map(v => ({ value: String(v), label: `×${v}` })),
-          v => { sim.speed = Number(v); emit('sim'); })),
+      field('再生速度', selectInput('sim.speed', String(sim.speed),
+        [1, 2, 4, 8, 16, 32, 60].map(v => ({ value: String(v), label: `×${v}` })),
+        v => { sim.speed = Number(v); emit('sim'); })),
     ));
 
+    // 走行中の列車
     out.push(h('div', { class: 'card' },
-      h('h4', {}, '移動の計画', h('span', { class: 'tag' }, `${sim.plan.length} 件`)),
-      h('div', { class: 'row' },
-        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '編成'),
-          selectInput('sim.f', simForm.formationId,
-            [{ value: '', label: '— 選択 —' }, ...doc.formations.map(f => ({ value: f.id, label: `${f.name}（${f.cars}両）` }))],
-            v => { simForm.formationId = v; emit('sim'); })),
-        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '行先'),
-          selectInput('sim.t', simForm.toTrackId,
-            [{ value: '', label: '— 選択 —' }, ...doc.tracks.map(t => ({ value: t.id, label: t.name }))],
-            v => { simForm.toTrackId = v; emit('sim'); })),
-      ),
-      h('div', { class: 'btn-row', style: 'margin-top:6px' },
-        h('button', {
-          class: 'btn sm primary',
-          onclick: () => { planAdd(simForm.formationId, simForm.toTrackId); emit('sim'); },
-        }, '＋ 移動を追加'),
-        h('button', { class: 'btn sm', onclick: () => { planClear(); emit('sim'); } }, '計画をクリア'),
-      ),
-      sim.plan.length
-        ? h('div', { style: 'margin-top:6px' }, ...sim.plan.map((m, i) => {
-          const f = doc.formations.find(x => x.id === m.formationId);
-          const t = doc.tracks.find(x => x.id === m.toTrackId);
-          const done = i < sim.cursor;
-          const active = i === sim.cursor && sim.phase !== 'idle' && sim.phase !== 'done';
-          return h('div', { class: 'listrow' + (active ? ' sel' : ''), style: done ? 'opacity:.5' : '' },
-            h('span', { class: 'dot', style: `background:${done ? '#3ddc84' : (f ? f.color : '#5d6577')}` }),
-            h('span', { class: 'nm' }, `${i + 1}. ${f ? f.name : '?'} → ${t ? t.name : '?'}`),
-            h('button', { class: 'btn sm', onclick: () => { planRemove(m.id); emit('sim'); } }, '×'));
-        }))
-        : h('p', { class: 'note' }, '編成と行先を選んで「移動を追加」してください。開始すると、進路の構成・分岐器の転換・信号現示が連動して動きます。'),
+      h('h4', {}, '走行中', h('span', { class: 'tag' }, `${stt.movements.length} 本`)),
+      stt.movements.length
+        ? h('div', {}, ...stt.movements.map(mv => h('div', { style: 'margin-bottom:8px' },
+          h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: `background:${mv.color}` }),
+            h('span', { class: 'nm' }, mv.name, h('small', { class: 'desc' }, `${PHASE_NAMES[mv.phase] || mv.phase} ／ ${mv.to} へ（区間 ${mv.leg}/${mv.legs}）`)),
+            h('span', { class: 'num' }, `${mv.remain.toFixed(0)}m`)),
+          meter(mv.progress, mv.phase === 'waiting'),
+        )))
+        : h('p', { class: 'note' }, '走行中の列車はありません。'),
     ));
+
+    // 次に発車する列車 / 計画
+    if (sim.mode === 'timetable') {
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '発車待ち', h('span', { class: 'tag' }, `${stt.pending.length} 本`)),
+        stt.pending.length
+          ? h('div', {}, ...stt.pending.slice(0, 10).map(t => {
+            const tt = trainType(t.type);
+            return h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${t.color || tt.color}` }),
+              h('span', { class: 'nm' }, `${t.number || tt.name}`, h('small', { class: 'desc' }, tt.name)),
+              h('span', { class: 'num' }, fmtHM(t.departSec)));
+          }))
+          : h('p', { class: 'note' }, 'ダイヤタブで列車を作ると、発車時刻になった順に走り出します。'),
+      ));
+    } else {
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '移動の計画', h('span', { class: 'tag' }, `${sim.plan.length} 件`)),
+        h('div', { class: 'row' },
+          h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '編成'),
+            selectInput('sim.f', simForm.formationId,
+              [{ value: '', label: '— 選択 —' }, ...doc.formations.map(f => ({ value: f.id, label: `${f.name}（${f.cars}両）` }))],
+              v => { simForm.formationId = v; emit('sim'); })),
+          h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '行先'),
+            selectInput('sim.t', simForm.toTrackId,
+              [{ value: '', label: '— 選択 —' }, ...doc.tracks.map(t => ({ value: t.id, label: t.name }))],
+              v => { simForm.toTrackId = v; emit('sim'); })),
+        ),
+        h('div', { class: 'btn-row', style: 'margin-top:6px' },
+          h('button', { class: 'btn sm primary', onclick: () => { planAdd(simForm.formationId, simForm.toTrackId); emit('sim'); } }, '＋ 移動を追加'),
+          h('button', { class: 'btn sm', onclick: () => { planClear(); emit('sim'); } }, '計画をクリア'),
+        ),
+        sim.plan.length
+          ? h('div', { style: 'margin-top:6px' }, ...sim.plan.map((m, i) => {
+            const f = doc.formations.find(x => x.id === m.formationId);
+            const t = doc.tracks.find(x => x.id === m.toTrackId);
+            const done = i < sim.planCursor;
+            return h('div', { class: 'listrow', style: done ? 'opacity:.5' : '' },
+              h('span', { class: 'dot', style: `background:${done ? '#3ddc84' : (f ? f.color : '#5d6577')}` }),
+              h('span', { class: 'nm' }, `${i + 1}. ${f ? f.name : '?'} → ${t ? t.name : '?'}`),
+              h('button', { class: 'btn sm', onclick: () => { planRemove(m.id); emit('sim'); } }, '×'));
+          }))
+          : h('p', { class: 'note' }, '編成と行先を選んで「移動を追加」してください。'),
+      ));
+    }
 
     out.push(h('div', { class: 'card' },
       h('h4', {}, '実行ログ'),
@@ -1037,6 +1110,8 @@ export function initUI(api) {
         v => { snapshot(); doc.settings.reversalMinutes = Math.max(0, v || 0); commit('settings'); }, { min: 0, step: .5 })),
       field('進路構成の所要（秒）', numberInput('sim.line', doc.settings.liningSeconds ?? 20,
         v => { snapshot(); doc.settings.liningSeconds = Math.max(0, v || 0); commit('settings'); }, { min: 0, step: 5 })),
+      field('同時運転の上限（本）', numberInput('sim.max', sim.maxConcurrent,
+        v => { sim.maxConcurrent = Math.max(1, Math.min(20, v || 6)); emit('sim'); }, { min: 1, max: 20 })),
     ));
     return out;
   }
@@ -1083,7 +1158,8 @@ export function initUI(api) {
           h('span', {
             class: 'nm', style: 'cursor:pointer',
             onclick: () => { if (st.object) { store.ui.sel = { kind: 'object', id: st.object.id }; api.focusOn(st.object); emit('select'); } },
-          }, st.name, h('small', { class: 'desc' }, `${(st.km / 1000).toFixed(2)} km`)),
+          }, st.name, h('small', { class: 'desc' },
+            `${(st.km / 1000).toFixed(2)} km ／ 番線 ${st.object ? stationTracks(doc, st.object).length : 0}`)),
           h('button', { class: 'btn sm', onclick: () => { lineMoveStation(line.id, st.id, -1); emit('diagram'); } }, '↑'),
           h('button', { class: 'btn sm', onclick: () => { lineMoveStation(line.id, st.id, 1); emit('diagram'); } }, '↓'),
           h('button', { class: 'btn sm danger', onclick: () => { lineRemoveStation(line.id, st.id); emit('diagram'); } }, '×'),
@@ -1167,8 +1243,27 @@ export function initUI(api) {
           field('表定速度（km/h）', numberInput(`tr.${sel.id}.spd`, sel.speedKmh,
             v => updateTrain(sel.id, { speedKmh: Math.max(5, v || 60) }), { min: 5, step: 5 })),
         ),
-        field('停車時分（秒）', numberInput(`tr.${sel.id}.dwell`, sel.dwellSec,
-          v => updateTrain(sel.id, { dwellSec: Math.max(0, v || 0) }), { min: 0, step: 10 })),
+        h('div', { class: 'row' },
+          field('停車時分（秒）', numberInput(`tr.${sel.id}.dwell`, sel.dwellSec,
+            v => updateTrain(sel.id, { dwellSec: Math.max(0, v || 0) }), { min: 0, step: 10 })),
+          field('両数', numberInput(`tr.${sel.id}.cars`, sel.cars,
+            v => updateTrain(sel.id, { cars: Math.max(1, Math.round(v || 1)) }), { min: 1, max: 30 })),
+        ),
+        field('使用編成', selectInput(`tr.${sel.id}.form`, sel.formationId || '',
+          [{ value: '', label: '— 始発番線にいる編成を使う —' }, ...doc.formations.map(f => ({ value: f.id, label: `${f.name}（${f.cars}両）` }))],
+          v => updateTrain(sel.id, { formationId: v || null }))),
+        h('div', { class: 'checkline' },
+          (() => {
+            const i = h('input', { type: 'checkbox', checked: !!sel.toDepot });
+            i.addEventListener('change', () => updateTrain(sel.id, { toDepot: i.checked }));
+            return i;
+          })(),
+          h('span', {}, '終着後に入庫する（留置線へ）')),
+        sel.toDepot
+          ? field('入庫先の留置線', selectInput(`tr.${sel.id}.depot`, sel.depotTrackId || '',
+            [{ value: '', label: '— 選択 —' }, ...doc.tracks.filter(t => trackKind(t.kind).stabling).map(t => ({ value: t.id, label: `${t.name}（${trackUsage(doc, t).capacity}両）` }))],
+            v => updateTrain(sel.id, { depotTrackId: v || null })))
+          : null,
         h('div', { class: 'btn-row' },
           h('button', { class: 'btn sm', onclick: () => { duplicateTrain(sel.id); emit('diagram'); } }, '複製'),
           h('button', {
@@ -1185,12 +1280,58 @@ export function initUI(api) {
           h('button', { class: 'btn sm danger', onclick: () => { deleteTrain(sel.id); emit('diagram'); } }, '削除'),
         ),
         h('hr', { class: 'sepline' }),
-        h('div', { class: 'kv' }, h('span', {}, '駅'), h('b', {}, '着 / 発')),
-        ...stops.map(st => h('div', { class: 'kv' },
-          h('span', {}, sts[st.idx] ? sts[st.idx].name : '?'),
-          h('b', {}, `${st.arr != null ? fmtHM(st.arr) : '　—'} / ${st.dep != null ? fmtHM(st.dep) : '　—'}${st.skip ? '（通過）' : ''}`))),
+        h('div', { class: 'kv' }, h('span', {}, '駅'), h('b', {}, '着 / 発 ・ 番線')),
+        ...stops.map(st => {
+          const station = sts[st.idx];
+          const list = station && station.object ? stationTracks(doc, station.object) : [];
+          const cur = trainPlatform(doc, sel, sts, st.idx);
+          return h('div', { style: 'margin-bottom:4px' },
+            h('div', { class: 'kv' },
+              h('span', {}, station ? station.name : '?'),
+              h('b', {}, `${st.arr != null ? fmtHM(st.arr) : '　—'} / ${st.dep != null ? fmtHM(st.dep) : '　—'}${st.skip ? '（通過）' : ''}`)),
+            list.length > 1
+              ? selectInput(`tr.${sel.id}.pf.${st.idx}`, cur || '',
+                list.map(id => ({ value: id, label: (doc.tracks.find(t => t.id === id) || {}).name || '?' })),
+                v => updateTrain(sel.id, { platforms: { ...sel.platforms, [st.idx]: v } }))
+              : h('p', { class: 'note', style: 'margin:0' }, list.length ? `番線: ${(doc.tracks.find(t => t.id === list[0]) || {}).name}` : '番線未設定'),
+          );
+        }),
       ));
     }
+
+    // 配線との整合（番線数・留置本数）
+    const demand = platformDemand(doc, sts, trains);
+    const pfIssues = platformConflicts(doc, sts, trains);
+    const stabling = doc.tracks.filter(t => trackKind(t.kind).stabling);
+    const inbound = trains.filter(t => t.toDepot);
+    const inboundCars = inbound.reduce((s2, t) => s2 + (t.cars || 10), 0);
+    const freeCars = stabling.reduce((s2, t) => {
+      const u = trackUsage(doc, t);
+      return s2 + Math.max(0, u.capacity - u.cars);
+    }, 0);
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '配線との整合'),
+      h('div', { class: 'kv' }, h('span', {}, '留置線（配線）'), h('b', {}, `${stabling.length} 本・空き ${freeCars} 両`)),
+      h('div', { class: 'kv' }, h('span', {}, '入庫する列車（ダイヤ）'), h('b', {}, `${inbound.length} 本・${inboundCars} 両`)),
+      inbound.length > stabling.length || inboundCars > freeCars
+        ? h('div', { class: 'warnbox' }, `⚠ 留置能力が不足しています（${inbound.length}本 ${inboundCars}両 ＞ ${stabling.length}本 ${freeCars}両）`)
+        : h('p', { class: 'note' }, '✓ 入庫する列車は留置線に収まります'),
+      h('hr', { class: 'sepline' }),
+      h('div', { class: 'kv' }, h('span', {}, '駅'), h('b', {}, '必要 / 配線の番線')),
+      ...demand.map(d2 => h('div', { class: 'listrow' },
+        h('span', { class: 'dot', style: `background:${d2.short ? '#ff5f56' : (d2.available ? '#3ddc84' : '#5d6577')}` }),
+        h('span', { class: 'nm' }, d2.station.name,
+          d2.peakAt != null ? h('small', { class: 'desc' }, `ピーク ${fmtHM(d2.peakAt)}`) : null),
+        h('span', { class: 'num' }, `${d2.peak} / ${d2.available || '—'}`))),
+      demand.some(d2 => d2.short)
+        ? h('div', { class: 'warnbox' }, '⚠ 番線が足りない駅があります。配線で着発線を増やすか、ダイヤの時刻をずらしてください。')
+        : null,
+      pfIssues.length
+        ? h('div', { style: 'margin-top:6px' }, ...pfIssues.slice(0, 8).map(i => h('div', { class: 'listrow' },
+          h('span', { class: 'dot', style: 'background:#ff5f56' }),
+          h('span', { class: 'nm', style: 'white-space:normal' }, i.message))))
+        : h('p', { class: 'note' }, '✓ 同じ番線の二重使用はありません'),
+    ));
 
     const issues = timetableConflicts(doc, line, sts, trains);
     out.push(h('div', { class: 'card' },

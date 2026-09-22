@@ -147,6 +147,88 @@ export function timetableConflicts(doc, line, stations, trains) {
   return issues.filter(i => (seen.has(i.message) ? false : (seen.add(i.message), true)));
 }
 
+/** 駅マーカーの近くを通る線路（番線の候補） */
+export function nearbyTracks(doc, stationObj, radius = 80) {
+  const out = [];
+  for (const t of doc.tracks) {
+    if (!t.points || t.points.length < 2) continue;
+    const r = distToPolyline(stationObj.x, stationObj.y, t.points);
+    if (r.d <= radius) out.push({ track: t, d: r.d, at: r.at });
+  }
+  return out.sort((a, b) => a.d - b.d);
+}
+
+/** 駅の発着線（未設定なら駅マーカーが乗っている線路） */
+export function stationTracks(doc, stationObj) {
+  const ids = (stationObj.tracks || []).filter(id => doc.tracks.some(t => t.id === id));
+  if (ids.length) return ids;
+  return stationObj.trackId ? [stationObj.trackId] : [];
+}
+
+/** 列車がその駅で使う番線 */
+export function trainPlatform(doc, train, stations, idx) {
+  const st = stations[idx];
+  if (!st) return null;
+  const assigned = train.platforms && train.platforms[idx];
+  if (assigned && doc.tracks.some(t => t.id === assigned)) return assigned;
+  const list = st.object ? stationTracks(doc, st.object) : [];
+  return list[0] || st.trackId || null;
+}
+
+/**
+ * 番線（発着線）の競合を検出する。
+ * 同じ番線を、停車時間（＋続行時隔）が重なる複数の列車が使っていれば支障。
+ */
+export function platformConflicts(doc, stations, trains, headwaySec = 60) {
+  const uses = [];
+  for (const tr of trains) {
+    const stops = computeSchedule(doc, stations, tr);
+    for (const st of stops) {
+      const trackId = trainPlatform(doc, tr, stations, st.idx);
+      if (!trackId) continue;
+      const a = (st.arr ?? st.dep) - headwaySec / 2;
+      const b = (st.dep ?? st.arr) + headwaySec / 2;
+      uses.push({ train: tr, idx: st.idx, trackId, from: a, to: b, skip: st.skip });
+    }
+  }
+  const issues = [];
+  for (let i = 0; i < uses.length; i++) {
+    for (let j = i + 1; j < uses.length; j++) {
+      const A = uses[i], B = uses[j];
+      if (A.trackId !== B.trackId || A.train.id === B.train.id) continue;
+      if (Math.min(A.to, B.to) - Math.max(A.from, B.from) <= 0) continue;
+      const tr = doc.tracks.find(t => t.id === A.trackId);
+      issues.push({
+        level: 'error',
+        message: `${stations[A.idx] ? stations[A.idx].name : ''}「${tr ? tr.name : '番線'}」を ${A.train.number} と ${B.train.number} が同時に使用します（${fmtHM(Math.max(A.from, B.from))}頃）`,
+        trackId: A.trackId, trains: [A.train, B.train],
+      });
+    }
+  }
+  const seen = new Set();
+  return issues.filter(i => (seen.has(i.message) ? false : (seen.add(i.message), true)));
+}
+
+/** 各駅で同時に必要になる番線数のピーク */
+export function platformDemand(doc, stations, trains, headwaySec = 60) {
+  return stations.map((st, idx) => {
+    const spans = [];
+    for (const tr of trains) {
+      const stops = computeSchedule(doc, stations, tr);
+      const s2 = stops.find(x => x.idx === idx);
+      if (!s2) continue;
+      spans.push([(s2.arr ?? s2.dep) - headwaySec / 2, (s2.dep ?? s2.arr) + headwaySec / 2]);
+    }
+    let peak = 0, peakAt = null;
+    for (const [a] of spans) {
+      const n = spans.filter(([x, y]) => a >= x && a < y).length;
+      if (n > peak) { peak = n; peakAt = a; }
+    }
+    const available = st.object ? stationTracks(doc, st.object).length : 0;
+    return { idx, station: st, peak, peakAt, available, short: peak > available && available > 0 };
+  });
+}
+
 export const fmtHM = sec => {
   const s = ((sec % 86400) + 86400) % 86400;
   return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;

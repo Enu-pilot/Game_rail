@@ -138,6 +138,7 @@ export function migrate(doc) {
       mirror: !!o.mirror,
       position: Number.isFinite(o.position) ? o.position : 0,   // 分岐器の開通方向（0=定位）
       dir: o.dir === 'ba' ? 'ba' : 'ab',                        // 信号機が防護する進行方向
+      tracks: Array.isArray(o.tracks) ? o.tracks.slice() : [],  // 駅の発着線（番線）
       xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
       label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
     };
@@ -185,6 +186,10 @@ export function migrate(doc) {
     speedKmh: Number.isFinite(t.speedKmh) ? t.speedKmh : 60,
     dwellSec: Number.isFinite(t.dwellSec) ? t.dwellSec : 30,
     skip: Array.isArray(t.skip) ? t.skip.slice() : [],
+    cars: Number.isFinite(t.cars) ? t.cars : 10,
+    platforms: (t.platforms && typeof t.platforms === 'object') ? { ...t.platforms } : {},
+    toDepot: !!t.toDepot,
+    depotTrackId: t.depotTrackId || null,
     color: t.color || null,
     formationId: t.formationId || null,
     note: t.note || '',
