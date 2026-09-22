@@ -1,0 +1,545 @@
+// サイドパネル UI（パレット / 線路一覧 / プロパティ / 編成 / 設定）
+
+import {
+  store, subscribe, emit, snapshot, commit, setMessage,
+  trackLength, trackCapacity, trackUsage, trackCarLength, formationLength, summary,
+  findTrack, findObject, findFormation,
+} from './store.js';
+import { TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS } from './catalog.js';
+import {
+  addFormation, deleteSelected, duplicateSelected, assignFormation,
+  updateEntity, reverseTrack,
+} from './actions.js';
+
+/* ---------------- DOM ヘルパ ---------------- */
+export function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'html') e.innerHTML = v;
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+    else if (k === 'dataset') Object.assign(e.dataset, v);
+    else if (k in e && k !== 'list' && k !== 'type') { try { e[k] = v; } catch { e.setAttribute(k, v); } }
+    else e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    e.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return e;
+}
+
+const fmtM = m => `${Math.round(m).toLocaleString('ja-JP')} m`;
+
+/** 入力欄: フォーカス時にスナップショット、入力中は履歴なしで即時反映 */
+function bindEdit(input, key, apply) {
+  input.dataset.key = key;
+  input.addEventListener('focus', () => snapshot());
+  input.addEventListener('input', () => apply(input, false));
+  input.addEventListener('change', () => apply(input, false));
+  return input;
+}
+
+function field(label, input) { return h('div', { class: 'field' }, h('label', {}, label), input); }
+
+function numberInput(key, value, onApply, opts = {}) {
+  const inp = h('input', { type: 'number', value: value ?? '', step: opts.step ?? 1, min: opts.min ?? undefined, max: opts.max });
+  return bindEdit(inp, key, i => {
+    const v = i.value === '' ? null : Number(i.value);
+    if (v !== null && Number.isNaN(v)) return;
+    onApply(v);
+  });
+}
+
+function textInput(key, value, onApply, placeholder = '') {
+  const inp = h('input', { type: 'text', value: value ?? '', placeholder });
+  return bindEdit(inp, key, i => onApply(i.value));
+}
+
+function selectInput(key, value, options, onApply) {
+  const sel = h('select', {}, ...options.map(o => h('option', { value: o.value, selected: o.value === value }, o.label)));
+  sel.dataset.key = key;
+  sel.addEventListener('change', () => { snapshot(); onApply(sel.value); });
+  return sel;
+}
+
+function checkbox(label, checked, onApply) {
+  const inp = h('input', { type: 'checkbox', checked });
+  inp.addEventListener('change', () => onApply(inp.checked));
+  return h('label', { class: 'checkline' }, inp, h('span', {}, label));
+}
+
+function meter(ratio, over) {
+  const cls = over ? 'meter over' : ratio > 0.85 ? 'meter warn' : 'meter';
+  return h('div', { class: cls }, h('i', { style: `width:${Math.min(100, ratio * 100).toFixed(1)}%` }));
+}
+
+/* ---------------- 初期化 ---------------- */
+export function initUI(api) {
+  const els = {
+    palette: document.getElementById('panel-palette'),
+    tracklist: document.getElementById('panel-tracklist'),
+    inspector: document.getElementById('panel-inspector'),
+    formations: document.getElementById('panel-formations'),
+    settings: document.getElementById('panel-settings'),
+    statusPos: document.getElementById('status-pos'),
+    statusSummary: document.getElementById('status-summary'),
+    statusMsg: document.getElementById('status-msg'),
+    zoomLabel: document.getElementById('zoom-label'),
+  };
+
+  // タブ切替
+  for (const nav of document.querySelectorAll('.tabs')) {
+    nav.addEventListener('click', e => {
+      const btn = e.target.closest('.tab'); if (!btn) return;
+      const side = btn.closest('.side');
+      side.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === btn));
+      side.querySelectorAll('.tabpanel').forEach(p => p.classList.toggle('active', p.dataset.panel === btn.dataset.tab));
+    });
+  }
+
+  function showTab(side, name) {
+    const aside = document.querySelector(`.side.${side}`);
+    aside.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    aside.querySelectorAll('.tabpanel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
+  }
+
+  /* --- フォーカス保持付き再描画 --- */
+  function withFocus(container, build) {
+    const active = document.activeElement;
+    const key = container.contains(active) ? active.dataset.key : null;
+    const selStart = key && active.selectionStart !== undefined ? active.selectionStart : null;
+    container.replaceChildren(...build());
+    if (key) {
+      const next = container.querySelector(`[data-key="${CSS.escape(key)}"]`);
+      if (next) {
+        next.focus();
+        if (selStart !== null && next.setSelectionRange) {
+          try { next.setSelectionRange(selStart, selStart); } catch { }
+        }
+      }
+    }
+  }
+
+  /* ---------------- パレット ---------------- */
+  const paletteOpen = new Set(['tracks', 'station', 'equipment']);
+
+  function paletteGroup(id, title, count, items) {
+    const d = h('details', { open: paletteOpen.has(id) },
+      h('summary', {}, title, h('span', { class: 'cnt' }, count)),
+      h('div', { class: 'plist' }, ...items));
+    d.addEventListener('toggle', () => { d.open ? paletteOpen.add(id) : paletteOpen.delete(id); });
+    return d;
+  }
+
+  function buildPalette() {
+    const out = [];
+    out.push(paletteGroup('tracks', '線路（クリックして敷設）', TRACK_KINDS.length, TRACK_KINDS.map(k =>
+      h('button', {
+        class: 'pitem' + (store.ui.tool === 'track' && store.ui.trackKindId === k.id ? ' active' : ''),
+        title: k.desc,
+        onclick: () => { store.ui.trackKindId = k.id; api.setTool('track'); },
+      },
+        h('span', { class: 'swatch', style: `background:${k.color}` }),
+        h('span', { class: 'nm' }, k.name, h('small', { class: 'desc' }, k.desc)),
+        k.stabling ? h('span', { class: 'sz' }, '留置') : null,
+      )
+    )));
+
+    for (const g of OBJECT_GROUPS) {
+      if (store.ui.tool === 'place' && g.items.some(i => i.id === store.ui.placeType)) paletteOpen.add(g.id);
+      out.push(paletteGroup(g.id, g.name, g.items.length, g.items.map(it =>
+        h('button', {
+          class: 'pitem' + (store.ui.tool === 'place' && store.ui.placeType === it.id ? ' active' : ''),
+          title: `${it.name}（${it.w}×${it.h}m）${it.onTrack ? ' / 最寄りの線路にスナップ' : ''}`,
+          onclick: () => api.setTool('place', it.id),
+        },
+          h('span', { class: 'swatch', style: `background:${it.color}` }),
+          h('span', { class: 'nm' }, it.name),
+          h('span', { class: 'sz' }, `${it.w}×${it.h}`),
+        )
+      )));
+    }
+    return out;
+  }
+
+  /* ---------------- 線路一覧 ---------------- */
+  function buildTrackList() {
+    const doc = store.doc;
+    const s = summary(doc);
+    const out = [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '基地全体'),
+      h('div', { class: 'kv' }, h('span', {}, '線路本数'), h('b', {}, `${s.tracks} 本（留置系 ${s.stablingTracks}）`)),
+      h('div', { class: 'kv' }, h('span', {}, '総延長'), h('b', {}, fmtM(s.totalLength))),
+      h('div', { class: 'kv' }, h('span', {}, '留置可能両数'), h('b', {}, `${s.capacity} 両`)),
+      h('div', { class: 'kv' }, h('span', {}, '留置中'), h('b', {}, `${s.cars} 両`)),
+      meter(s.rate, s.cars > s.capacity),
+      h('div', { class: 'kv' }, h('span', {}, '使用率'), h('b', {}, `${(s.rate * 100).toFixed(0)} %`)),
+      s.unassigned ? h('div', { class: 'warnbox' }, `未留置の編成が ${s.unassigned} 本（${s.unassignedCars} 両）あります`) : null,
+    ));
+
+    if (!doc.tracks.length) {
+      out.push(h('div', { class: 'empty' }, '線路がまだありません。パレットから線路種別を選んで敷設してください。'));
+      return out;
+    }
+
+    const byKind = new Map();
+    for (const t of doc.tracks) {
+      if (!byKind.has(t.kind)) byKind.set(t.kind, []);
+      byKind.get(t.kind).push(t);
+    }
+    for (const kind of TRACK_KINDS) {
+      const list = byKind.get(kind.id);
+      if (!list) continue;
+      out.push(h('div', { class: 'group' },
+        h('h3', {}, `${kind.name}（${list.length}）`),
+        ...list.map(t => {
+          const u = trackUsage(doc, t);
+          const sel = store.ui.sel && store.ui.sel.kind === 'track' && store.ui.sel.id === t.id;
+          return h('div', {
+            class: 'listrow' + (sel ? ' sel' : ''),
+            onclick: () => { store.ui.sel = { kind: 'track', id: t.id }; api.focusOn(t); emit('select'); showTab('right', 'inspector'); },
+          },
+            h('span', { class: 'dot', style: `background:${kind.color}` }),
+            h('span', { class: 'nm' }, t.name),
+            h('span', { class: 'num' }, `${Math.round(trackLength(t))}m`),
+            kind.stabling ? h('span', { class: 'badge' + (u.over ? ' over' : u.cars ? ' ok' : '') }, `${u.cars}/${u.capacity}両`) : null,
+          );
+        })
+      ));
+    }
+    return out;
+  }
+
+  /* ---------------- プロパティ ---------------- */
+  function buildInspector() {
+    const sel = store.ui.sel;
+    if (!sel) {
+      return [h('div', { class: 'card' },
+        h('h4', {}, '選択なし'),
+        h('p', { class: 'note' }, 'キャンバス上の線路・構造物をクリックすると、ここで詳細を編集できます。'),
+        h('hr', { class: 'sepline' }),
+        h('p', { class: 'note', html: '<b>操作</b><br>' +
+          'パレット → 線路種別 → クリックで折線を敷設（ダブルクリックで確定）<br>' +
+          '構造物はパレットから選んでキャンバスをクリック<br>' +
+          '洗車機・検査台などは最寄りの線路に自動スナップします' }),
+      )];
+    }
+    if (sel.kind === 'track') return buildTrackInspector(findTrack(sel.id));
+    if (sel.kind === 'object') return buildObjectInspector(findObject(sel.id));
+    if (sel.kind === 'formation') return buildFormationInspector(findFormation(sel.id));
+    return [];
+  }
+
+  function buildTrackInspector(t) {
+    if (!t) return [h('div', { class: 'empty' }, '選択が失われました')];
+    const doc = store.doc;
+    const kind = trackKind(t.kind);
+    const u = trackUsage(doc, t);
+    const len = trackLength(t);
+    const equipment = doc.objects.filter(o => o.trackId === t.id);
+    const free = doc.formations.filter(f => !f.trackId);
+
+    const out = [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, h('span', { class: 'dot', style: `width:10px;height:10px;border-radius:50%;background:${kind.color};display:inline-block` }), '線路', h('span', { class: 'tag' }, kind.name)),
+      field('線路名', textInput(`track.${t.id}.name`, t.name, v => updateEntity('track', t.id, { name: v }, { history: false }), '例: 3番留置線')),
+      field('種別', selectInput(`track.${t.id}.kind`, t.kind, TRACK_KINDS.map(k => ({ value: k.id, label: k.name })),
+        v => updateEntity('track', t.id, { kind: v }, { history: false }))),
+      h('div', { class: 'kv' }, h('span', {}, '延長'), h('b', {}, `${len.toFixed(1)} m`)),
+      h('div', { class: 'kv' }, h('span', {}, '有効長（端部余裕控除）'), h('b', {}, `${Math.max(0, len - doc.settings.clearanceM).toFixed(1)} m`)),
+      h('div', { class: 'kv' }, h('span', {}, '折点数'), h('b', {}, `${t.points.length}`)),
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm', onclick: () => reverseTrack(t.id), title: '留置の詰め方向（始端）を入れ替えます' }, '⇄ 向きを反転'),
+        h('button', { class: 'btn sm', onclick: () => api.focusOn(t) }, '◎ 表示'),
+        h('button', { class: 'btn sm', onclick: () => duplicateSelected() }, '複製'),
+        h('button', { class: 'btn sm danger', onclick: () => deleteSelected() }, '削除'),
+      ),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '留置可能両数'),
+      field('算出方法', selectInput(`track.${t.id}.capmode`, t.capacityMode,
+        [{ value: 'auto', label: '自動（有効長 ÷ 1両長）' }, { value: 'manual', label: '手入力' }],
+        v => updateEntity('track', t.id, { capacityMode: v, capacity: v === 'manual' ? trackCapacity(doc, t) : t.capacity }, { history: false }))),
+      h('div', { class: 'row' },
+        field('留置可能両数', t.capacityMode === 'manual'
+          ? numberInput(`track.${t.id}.cap`, t.capacity, v => updateEntity('track', t.id, { capacity: Math.max(0, v || 0) }, { history: false }), { min: 0 })
+          : h('input', { type: 'number', value: trackCapacity(doc, t), disabled: true })),
+        field('1両長（m）', numberInput(`track.${t.id}.carlen`, t.carLengthM ?? '', v => updateEntity('track', t.id, { carLengthM: v }, { history: false }), { min: 1, step: 0.5 })),
+      ),
+      h('p', { class: 'note' }, `1両長が空欄のときは全体設定（${doc.settings.carLengthM}m）を使用します。`),
+      meter(u.capacity ? u.cars / u.capacity : 0, u.over),
+      h('div', { class: 'kv' }, h('span', {}, '留置中'), h('b', {}, `${u.cars} / ${u.capacity} 両`)),
+      h('div', { class: 'kv' }, h('span', {}, '使用長'), h('b', {}, `${u.lengthUsed.toFixed(0)} / ${u.usable.toFixed(0)} m`)),
+      u.over ? h('div', { class: 'warnbox' }, '⚠ 留置両数が有効長を超えています') : null,
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '留置中の編成', h('span', { class: 'tag' }, `${u.list.length} 本`)),
+      u.list.length
+        ? h('div', {}, ...u.list.map(f => h('span', { class: 'chip' },
+          h('span', { class: 'dot', style: `background:${f.color}` }),
+          h('span', {
+            style: 'cursor:pointer', onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); },
+          }, `${f.name} ${f.cars}両`),
+          h('button', { title: '留置解除', onclick: () => assignFormation(f.id, null) }, '×'),
+        )))
+        : h('p', { class: 'note' }, 'この線路に留置中の編成はありません。'),
+      free.length
+        ? h('div', { class: 'field', style: 'margin-top:8px' },
+          h('label', {}, '未留置の編成を入線させる'),
+          (() => {
+            const sel = h('select', {}, h('option', { value: '' }, '— 編成を選択 —'),
+              ...free.map(f => h('option', { value: f.id }, `${f.name}（${f.cars}両）`)));
+            sel.addEventListener('change', () => { if (sel.value) assignFormation(sel.value, t.id); });
+            return sel;
+          })())
+        : null,
+      h('button', {
+        class: 'btn sm wide', style: 'margin-top:6px',
+        onclick: () => { const f = addFormation({ trackId: t.id }); setMessage(`${f.name} を ${t.name} に新規留置`); },
+      }, '＋ この線路に編成を新規作成'),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '線路上の設備', h('span', { class: 'tag' }, `${equipment.length} 件`)),
+      equipment.length
+        ? h('div', {}, ...equipment.map(o => h('div', {
+          class: 'listrow',
+          onclick: () => { store.ui.sel = { kind: 'object', id: o.id }; emit('select'); },
+        },
+          h('span', { class: 'dot', style: `background:${objectDef(o.type).color}` }),
+          h('span', { class: 'nm' }, o.label || objectDef(o.type).name),
+        )))
+        : h('p', { class: 'note' }, '洗車機・検査台・清掃台などを線路上に配置すると、ここに表示されます。'),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, 'メモ'),
+      bindEdit(h('textarea', { value: t.note || '', placeholder: '検査周期、入換手順など' }), `track.${t.id}.note`,
+        i => updateEntity('track', t.id, { note: i.value }, { history: false })),
+    ));
+    return out;
+  }
+
+  function buildObjectInspector(o) {
+    if (!o) return [h('div', { class: 'empty' }, '選択が失われました')];
+    const def = objectDef(o.type);
+    const track = o.trackId ? findTrack(o.trackId) : null;
+    const out = [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, def.name, h('span', { class: 'tag' }, def.groupName || '')),
+      field('表示名', textInput(`obj.${o.id}.label`, o.label, v => updateEntity('object', o.id, { label: v }, { history: false }), def.name)),
+      h('div', { class: 'row' },
+        field('幅 W（m）', numberInput(`obj.${o.id}.w`, o.w, v => updateEntity('object', o.id, { w: Math.max(1, v || 1) }, { history: false }), { min: 1 })),
+        field('奥行 D（m）', numberInput(`obj.${o.id}.h`, o.h, v => updateEntity('object', o.id, { h: Math.max(1, v || 1) }, { history: false }), { min: 1 })),
+      ),
+      h('div', { class: 'row' },
+        field('X（m）', numberInput(`obj.${o.id}.x`, Math.round(o.x), v => updateEntity('object', o.id, { x: v || 0 }, { history: false }))),
+        field('Y（m）', numberInput(`obj.${o.id}.y`, Math.round(o.y), v => updateEntity('object', o.id, { y: v || 0 }, { history: false }))),
+      ),
+      field('回転（度）', numberInput(`obj.${o.id}.rot`, Math.round((o.rot || 0) * 180 / Math.PI),
+        v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn sm', onclick: () => { snapshot(); o.rot = ((o.rot || 0) + Math.PI / 4) % (Math.PI * 2); commit('rotate'); } }, '↻ 45°回転'),
+        h('button', { class: 'btn sm', onclick: () => api.focusOn(o) }, '◎ 表示'),
+        h('button', { class: 'btn sm', onclick: () => duplicateSelected() }, '複製'),
+        h('button', { class: 'btn sm danger', onclick: () => deleteSelected() }, '削除'),
+      ),
+      def.onTrack ? h('p', { class: 'note' }, track ? `紐づく線路: ${track.name}` : '線路に紐づいていません（線路の近くへドラッグするとスナップします）') : null,
+    ));
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, 'メモ'),
+      bindEdit(h('textarea', { value: o.note || '', placeholder: '能力、設置年、補足など' }), `obj.${o.id}.note`,
+        i => updateEntity('object', o.id, { note: i.value }, { history: false })),
+    ));
+    return out;
+  }
+
+  function buildFormationInspector(f) {
+    if (!f) return [h('div', { class: 'empty' }, '選択が失われました')];
+    const doc = store.doc;
+    const t = f.trackId ? findTrack(f.trackId) : null;
+    const len = formationLength(doc, f);
+    return [h('div', { class: 'card' },
+      h('h4', {}, h('span', { class: 'dot', style: `width:10px;height:10px;border-radius:50%;background:${f.color};display:inline-block` }), '編成'),
+      field('編成名', textInput(`f.${f.id}.name`, f.name, v => updateEntity('formation', f.id, { name: v }, { history: false }), '例: 第12編成')),
+      field('形式', textInput(`f.${f.id}.series`, f.series, v => updateEntity('formation', f.id, { series: v }, { history: false }), '例: E233系')),
+      h('div', { class: 'row' },
+        field('両数', numberInput(`f.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),
+        field('1両長（m）', numberInput(`f.${f.id}.carlen`, f.carLengthM ?? '', v => updateEntity('formation', f.id, { carLengthM: v }, { history: false }), { min: 1, step: .5 })),
+      ),
+      field('留置線', selectInput(`f.${f.id}.track`, f.trackId || '',
+        [{ value: '', label: '— 未留置 —' }, ...doc.tracks.map(tt => ({ value: tt.id, label: `${tt.name}（${trackKind(tt.kind).name}）` }))],
+        v => updateEntity('formation', f.id, { trackId: v || null }, { history: false }))),
+      field('色', (() => {
+        const wrap = h('div', { class: 'btn-row' });
+        for (const c of FORMATION_COLORS) {
+          wrap.append(h('button', {
+            class: 'btn sm', style: `background:${c};border-color:${c};width:22px;height:22px;padding:0` + (f.color === c ? ';outline:2px solid #fff' : ''),
+            title: c, onclick: () => updateEntity('formation', f.id, { color: c }),
+          }));
+        }
+        return wrap;
+      })()),
+      h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${len.toFixed(0)} m`)),
+      t ? h('div', { class: 'kv' }, h('span', {}, '留置先'), h('b', {}, t.name)) : null,
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm', onclick: () => duplicateSelected() }, '複製'),
+        h('button', { class: 'btn sm danger', onclick: () => deleteSelected() }, '削除'),
+      ),
+      h('div', { class: 'field', style: 'margin-top:8px' }, h('label', {}, 'メモ'),
+        bindEdit(h('textarea', { value: f.note || '' }), `f.${f.id}.note`, i => updateEntity('formation', f.id, { note: i.value }, { history: false }))),
+    )];
+  }
+
+  /* ---------------- 編成パネル ---------------- */
+  function buildFormations() {
+    const doc = store.doc;
+    const s = summary(doc);
+    const out = [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '編成の管理'),
+      h('div', { class: 'kv' }, h('span', {}, '編成数'), h('b', {}, `${s.formations} 本`)),
+      h('div', { class: 'kv' }, h('span', {}, '留置中 / 可能'), h('b', {}, `${s.cars} / ${s.capacity} 両`)),
+      h('div', { class: 'kv' }, h('span', {}, '未留置'), h('b', {}, `${s.unassigned} 本（${s.unassignedCars} 両）`)),
+      meter(s.rate, s.cars > s.capacity),
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm primary', onclick: () => addFormation({}) }, '＋ 編成を追加'),
+        h('button', { class: 'btn sm', onclick: () => autoAssign() }, '自動で留置線へ割付'),
+        h('button', {
+          class: 'btn sm', onclick: () => {
+            snapshot(); for (const f of doc.formations) f.trackId = null; commit('unassign-all');
+          }
+        }, '全て留置解除'),
+      ),
+    ));
+
+    if (!doc.formations.length) {
+      out.push(h('div', { class: 'empty' }, '編成がありません。「＋ 編成を追加」から作成してください。'));
+      return out;
+    }
+
+    for (const f of doc.formations) {
+      const sel = store.ui.sel && store.ui.sel.kind === 'formation' && store.ui.sel.id === f.id;
+      const t = f.trackId ? findTrack(f.trackId) : null;
+      const over = t ? trackUsage(doc, t).over : false;
+      out.push(h('div', { class: 'card', style: sel ? 'border-color:#4f8cff' : '' },
+        h('div', { class: 'listrow' + (sel ? ' sel' : ''), onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); } },
+          h('span', { class: 'dot', style: `background:${f.color}` }),
+          h('span', { class: 'nm' }, f.name, f.series ? h('small', { class: 'desc' }, f.series) : null),
+          h('span', { class: 'num' }, `${f.cars}両 / ${formationLength(doc, f).toFixed(0)}m`),
+        ),
+        h('div', { class: 'row', style: 'margin-top:6px' },
+          h('div', { class: 'field', style: 'margin:0' },
+            h('label', {}, '両数'),
+            numberInput(`fl.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),
+          h('div', { class: 'field', style: 'margin:0' },
+            h('label', {}, '留置線'),
+            selectInput(`fl.${f.id}.track`, f.trackId || '',
+              [{ value: '', label: '— 未留置 —' }, ...doc.tracks.map(tt => ({ value: tt.id, label: tt.name }))],
+              v => updateEntity('formation', f.id, { trackId: v || null }, { history: false }))),
+        ),
+        over ? h('div', { class: 'warnbox' }, `⚠ ${t.name} は容量超過です`) : null,
+      ));
+    }
+    return out;
+  }
+
+  /** 未留置の編成を、空きのある留置系の線路へ順に割り付ける */
+  function autoAssign() {
+    const doc = store.doc;
+    snapshot();
+    const targets = doc.tracks.filter(t => trackKind(t.kind).stabling);
+    let placed = 0;
+    for (const f of doc.formations) {
+      if (f.trackId) continue;
+      for (const t of targets) {
+        const u = trackUsage(doc, t);
+        const cl = trackCarLength(doc, t);
+        const need = formationLength(doc, f) + (u.list.length ? 3 : 0);
+        if (u.cars + f.cars <= u.capacity && u.lengthUsed + need <= u.usable + 1e-6) {
+          f.trackId = t.id; placed++; break;
+        }
+      }
+    }
+    commit('auto-assign');
+    setMessage(placed ? `${placed} 本の編成を自動割付しました` : '割付できる空き線路がありません');
+  }
+
+  /* ---------------- 設定 ---------------- */
+  function buildSettings() {
+    const st = store.doc.settings;
+    const setS = (k, v) => { snapshot(); st[k] = v; commit('settings'); };
+    return [
+      h('div', { class: 'card' },
+        h('h4', {}, 'プロジェクト'),
+        field('名称', textInput('doc.name', store.doc.name, v => { store.doc.name = v; commit('rename'); }, '例: ○○車両センター')),
+      ),
+      h('div', { class: 'card' },
+        h('h4', {}, '寸法・縮尺'),
+        field('グリッド間隔（m）', numberInput('set.grid', st.gridM, v => setS('gridM', Math.max(1, v || 1)), { min: 1 })),
+        field('標準 1両長（m）', numberInput('set.carlen', st.carLengthM, v => setS('carLengthM', Math.max(1, v || 20)), { min: 1, step: .5 })),
+        field('線路端部の余裕長（m）', numberInput('set.clear', st.clearanceM, v => setS('clearanceM', Math.max(0, v || 0)), { min: 0 })),
+        h('p', { class: 'note' }, '留置可能両数 =（線路延長 − 余裕長）÷ 1両長 の切り捨て'),
+      ),
+      h('div', { class: 'card' },
+        h('h4', {}, '表示'),
+        checkbox('グリッドを表示', st.showGrid, v => setS('showGrid', v)),
+        checkbox('線路名・両数を表示', st.showLabels, v => setS('showLabels', v)),
+        checkbox('留置編成を表示', st.showFormations, v => setS('showFormations', v)),
+        checkbox('スケールバーを表示', st.showRuler, v => setS('showRuler', v)),
+        h('hr', { class: 'sepline' }),
+        checkbox('グリッドにスナップ（Altで一時解除）', st.snap, v => setS('snap', v)),
+        checkbox('線路を45°刻みで敷設（Shiftで一時解除）', st.angle45, v => setS('angle45', v)),
+      ),
+      h('div', { class: 'card' },
+        h('h4', {}, 'ショートカット'),
+        h('p', {
+          class: 'note', html:
+            '<kbd>V</kbd> 選択 ／ <kbd>T</kbd> 線路 ／ <kbd>H</kbd> 画面移動<br>' +
+            '<kbd>スペース</kbd>+ドラッグ / ホイールでズーム<br>' +
+            '<kbd>R</kbd> 45°回転 ／ <kbd>F</kbd> 全体表示 ／ <kbd>G</kbd> グリッド<br>' +
+            '<kbd>Enter</kbd> 敷設確定 ／ <kbd>Esc</kbd> 取消 ／ <kbd>Delete</kbd> 削除<br>' +
+            '<kbd>Ctrl+Z</kbd> 元に戻す ／ <kbd>Ctrl+Shift+Z</kbd> やり直し ／ <kbd>Ctrl+D</kbd> 複製<br>' +
+            '選択中の線路をダブルクリックで折点追加、折点をダブルクリックで削除'
+        }),
+      ),
+    ];
+  }
+
+  /* ---------------- ステータスバー ---------------- */
+  function buildStatus() {
+    const s = summary(store.doc);
+    const c = store.ui.cursor;
+    els.statusPos.textContent = c ? `X ${c.x.toFixed(0)} m / Y ${c.y.toFixed(0)} m` : '— / —';
+    els.statusSummary.textContent =
+      `線路 ${s.tracks} 本・総延長 ${fmtM(s.totalLength)}／留置 ${s.cars}/${s.capacity} 両（${(s.rate * 100).toFixed(0)}%）／構造物 ${s.objects} 件`;
+    els.statusMsg.textContent = store.ui.message || '';
+    els.zoomLabel.textContent = `${Math.round(store.ui.camera.zoom * 100)}%`;
+  }
+
+  /* ---------------- 再描画 ---------------- */
+  let raf = 0;
+  function renderAll(reason) {
+    if (reason === 'cursor') { buildStatus(); return; }
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      withFocus(els.palette, buildPalette);
+      withFocus(els.tracklist, buildTrackList);
+      withFocus(els.inspector, buildInspector);
+      withFocus(els.formations, buildFormations);
+      withFocus(els.settings, buildSettings);
+      buildStatus();
+      document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));
+    });
+  }
+
+  subscribe(renderAll);
+  renderAll('init');
+  return { renderAll, showTab };
+}

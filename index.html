@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>車両基地レイアウトデザイナー</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🚆</text></svg>" />
+<link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">🚆</span><span>車両基地レイアウトデザイナー</span></div>
+
+    <div class="toolgroup" id="tools">
+      <button class="tool" data-tool="select" title="選択 / 移動 (V)">▶<span>選択</span></button>
+      <button class="tool" data-tool="track" title="線路を敷設 (T)">╱<span>線路</span></button>
+      <button class="tool" data-tool="pan" title="画面移動 (H / スペース)">✋<span>移動</span></button>
+    </div>
+
+    <div class="toolgroup">
+      <button class="btn" id="btn-undo" title="元に戻す (Ctrl+Z)">↶</button>
+      <button class="btn" id="btn-redo" title="やり直し (Ctrl+Shift+Z)">↷</button>
+      <button class="btn" id="btn-delete" title="削除 (Delete)">🗑</button>
+    </div>
+
+    <div class="toolgroup">
+      <button class="btn" id="btn-zoom-out" title="縮小 (-)">－</button>
+      <span class="zoomlabel" id="zoom-label">100%</span>
+      <button class="btn" id="btn-zoom-in" title="拡大 (+)">＋</button>
+      <button class="btn" id="btn-zoom-fit" title="全体表示 (F)">全体</button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="toolgroup">
+      <button class="btn" id="btn-new">新規</button>
+      <button class="btn" id="btn-sample">サンプル</button>
+      <button class="btn" id="btn-import">読込</button>
+      <button class="btn" id="btn-export">保存</button>
+      <button class="btn" id="btn-png">PNG</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside class="side left">
+      <nav class="tabs" data-tabs="left">
+        <button class="tab active" data-tab="palette">パレット</button>
+        <button class="tab" data-tab="tracklist">線路一覧</button>
+      </nav>
+      <div class="tabpanel active" data-panel="palette" id="panel-palette"></div>
+      <div class="tabpanel" data-panel="tracklist" id="panel-tracklist"></div>
+    </aside>
+
+    <main class="stage" id="stage">
+      <canvas id="board"></canvas>
+      <div class="hint" id="hint"></div>
+    </main>
+
+    <aside class="side right">
+      <nav class="tabs" data-tabs="right">
+        <button class="tab active" data-tab="inspector">プロパティ</button>
+        <button class="tab" data-tab="formations">編成</button>
+        <button class="tab" data-tab="settings">設定</button>
+      </nav>
+      <div class="tabpanel active" data-panel="inspector" id="panel-inspector"></div>
+      <div class="tabpanel" data-panel="formations" id="panel-formations"></div>
+      <div class="tabpanel" data-panel="settings" id="panel-settings"></div>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span id="status-pos">— / —</span>
+    <span class="sep"></span>
+    <span id="status-summary"></span>
+    <span class="spacer"></span>
+    <span id="status-msg" class="muted"></span>
+  </footer>
+
+  <input type="file" id="file-input" accept="application/json,.json" hidden />
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

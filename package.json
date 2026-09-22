@@ -1,0 +1,11 @@
+{
+  "name": "game-rail-depot-designer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "鉄道車両基地・駅ホームのレイアウトを設計できるブラウザアプリ",
+  "type": "module",
+  "scripts": {
+    "start": "node serve.mjs",
+    "dev": "node serve.mjs"
+  }
+}
