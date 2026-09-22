@@ -90,12 +90,13 @@ export const OBJECT_GROUPS = [
   },
   {
     id: 'signal', name: '分岐器・信号', items: [
-      { id: 'turnout_single', name: 'ポイント（片開き）', w: 27, h: 2.7, color: '#ffe08a', shape: 'turnout', variant: 'single', frog: 10 },
-      { id: 'turnout_double', name: 'ポイント（両開き）', w: 27, h: 5.4, color: '#ffe08a', shape: 'turnout', variant: 'double', frog: 10 },
-      { id: 'turnout_three',  name: 'ポイント（三枝）',   w: 27, h: 5.4, color: '#ffe08a', shape: 'turnout', variant: 'three',  frog: 10 },
-      { id: 'scissors',       name: 'シーサスクロッシング', w: 54, h: 4.5, color: '#ffe08a', shape: 'turnout', variant: 'scissors', frog: 10 },
-      { id: 'crossover',      name: '渡り線',            w: 54, h: 4.5, color: '#ffe08a', shape: 'turnout', variant: 'crossover', frog: 10 },
-      { id: 'diamond',        name: 'ダイヤモンドクロッシング', w: 30, h: 18, color: '#ffc04d', shape: 'turnout', variant: 'diamond' },
+      // 分岐器は「結節点の記号」として扱い、画面上は一定の大きさで描画する（w/h は当たり判定の目安）
+      { id: 'turnout_single', name: 'ポイント（片開き）', w: 12, h: 5, color: '#ffe08a', shape: 'turnout', variant: 'single' },
+      { id: 'turnout_double', name: 'ポイント（両開き）', w: 12, h: 6, color: '#ffe08a', shape: 'turnout', variant: 'double' },
+      { id: 'turnout_three',  name: 'ポイント（三枝）',   w: 12, h: 6, color: '#ffe08a', shape: 'turnout', variant: 'three' },
+      { id: 'scissors',       name: 'シーサスクロッシング', w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'scissors' },
+      { id: 'crossover',      name: '渡り線',            w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'crossover' },
+      { id: 'diamond',        name: 'ダイヤモンドクロッシング', w: 12, h: 8, color: '#ffc04d', shape: 'turnout', variant: 'diamond' },
       { id: 'point_machine',  name: '転轍機',            w: 6,  h: 6,  color: '#ff9f43', shape: 'pointmachine' },
       { id: 'signal_start',   name: '出発信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4 },
       { id: 'signal_home',    name: '場内信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4 },
@@ -122,25 +123,11 @@ export const OBJECT_MAP = {};
 for (const g of OBJECT_GROUPS) for (const it of g.items) OBJECT_MAP[it.id] = { ...it, group: g.id, groupName: g.name };
 export const objectDef = id => OBJECT_MAP[id] || { id, name: id, w: 20, h: 20, color: '#9aa4bb', shape: 'building' };
 
-/** 分岐器の形状 → カタログID */
+/** 分岐器の形状 → カタログID（分岐器は結節点の記号として扱う） */
 export const TURNOUT_TYPE_BY_VARIANT = {
   single: 'turnout_single', double: 'turnout_double', three: 'turnout_three',
   scissors: 'scissors', crossover: 'crossover', diamond: 'diamond',
 };
-
-/** 分岐器の番数（#N）— 全長 L ≒ 2.5N+2 [m]、開き量 ≒ L/N [m] */
-export const TURNOUT_NUMBERS = [6, 8, 10, 12, 16, 20];
-
-export function turnoutSize(variant, frog) {
-  const n = Math.max(4, frog || 10);
-  const L = Math.round((2.5 * n + 2) * 10) / 10;
-  const off = Math.round((L / n) * 10) / 10;
-  switch (variant) {
-    case 'double': case 'three': return { w: L, h: off * 2 };
-    case 'scissors': case 'crossover': return { w: L * 2, h: 4.5 };
-    default: return { w: L, h: off };
-  }
-}
 
 /**
  * 車種マスタ

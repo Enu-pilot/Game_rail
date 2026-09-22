@@ -2,7 +2,7 @@
 
 import { store, emit, snapshot, commit, setMessage, subscribe } from './store.js';
 import { objectDef, trackKind } from './catalog.js';
-import { render, toWorld, toScreen, contentBounds } from './render.js';
+import { render, toWorld, toScreen, contentBounds, turnoutSymbolSize } from './render.js';
 import { snap, snapAngle, distToPolyline, hitRect, dist } from './geom.js';
 import { addTrack, addObject, deleteSelected, snapToTrack, turnoutNear, placeTurnoutFromSpec, placeCrossingFrom } from './actions.js';
 import { getGraph, junctionNodes, turnoutSpecAt } from './topology.js';
@@ -90,6 +90,7 @@ export function initCanvas(canvas, stage) {
     if (!sel || sel.kind !== 'object') return null;
     const o = store.doc.objects.find(x => x.id === sel.id);
     if (!o) return null;
+    if (objectDef(o.type).shape === 'turnout') return null;   // 分岐器は記号なのでサイズ変更しない
     const z = ui.camera.zoom;
     const c = toScreen(ui.camera, o.x, o.y);
     const hw = Math.max(o.w * z, 10) / 2 + 3, hh = Math.max(o.h * z, 10) / 2 + 3;
@@ -108,8 +109,13 @@ export function initCanvas(canvas, stage) {
     for (let i = list.length - 1; i >= 0; i--) {
       const o = list[i];
       const def = objectDef(o.type);
-      const w = Math.max(o.w, 10 / ui.camera.zoom);
-      const h = Math.max(o.h, 10 / ui.camera.zoom);
+      let w = Math.max(o.w, 10 / ui.camera.zoom);
+      let h = Math.max(o.h, 10 / ui.camera.zoom);
+      if (def.shape === 'turnout') {          // 記号の見た目どおりに拾う
+        const sz = turnoutSymbolSize(ui.camera.zoom);
+        w = Math.max(sz.w, 14) / ui.camera.zoom;
+        h = Math.max(sz.h, 12) / ui.camera.zoom;
+      }
       if (hitRect(p.x, p.y, o.x, o.y, w, h, o.rot || 0)) return o;
       if (def.shape === 'signal' || def.shape === 'marker' || def.shape === 'pointmachine') {
         if (dist(p.x, p.y, o.x, o.y) < tolM()) return o;
@@ -281,7 +287,6 @@ export function initCanvas(canvas, stage) {
         o.w = nw; o.h = nh;
         o.x = drag.x0 + cxl * cos - cyl * sin;
         o.y = drag.y0 + cxl * sin + cyl * cos;
-        if (objectDef(o.type).shape === 'turnout') o.frog = null;          // 手動サイズに切替
         drag.moved = true;
         invalidate(); emit('geometry');
       } else if (drag.type === 'moveTrack') {

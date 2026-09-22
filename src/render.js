@@ -10,6 +10,12 @@ const GAUGE = 1.435;      // 軌間[m]
 const BALLAST_W = 4.2;    // 道床幅[m]
 const CAR_W = 2.95;       // 車体幅[m]
 
+/** 分岐器記号の画面上の大きさ（実寸ではなく結節点のマーク） */
+export function turnoutSymbolSize(zoom) {
+  const L = Math.max(15, Math.min(30, 17 * Math.sqrt(Math.max(0.05, zoom))));
+  return { w: L, h: L * 0.42 };
+}
+
 /** ワールド→スクリーン */
 export const toScreen = (cam, x, y) => ({ x: (x - cam.x) * cam.zoom, y: (y - cam.y) * cam.zoom });
 export const toWorld = (cam, sx, sy) => ({ x: sx / cam.zoom + cam.x, y: sy / cam.zoom + cam.y });
@@ -333,7 +339,11 @@ function drawObject(ctx, cam, doc, o, ui) {
   const def = objectDef(o.type);
   const s = toScreen(cam, o.x, o.y);
   const z = cam.zoom;
-  const w = o.w * z, h = o.h * z;
+  let w = o.w * z, h = o.h * z;
+  if (def.shape === 'turnout') {           // 分岐器はズームによらず一定サイズの記号
+    const sz = turnoutSymbolSize(z);
+    w = sz.w; h = sz.h;
+  }
   if (s.x + Math.max(w, h) < -50 || s.y + Math.max(w, h) < -50) { /* 粗いカリング */ }
   const selected = ui.sel && ui.sel.kind === 'object' && ui.sel.id === o.id;
 
@@ -558,8 +568,9 @@ function drawObject(ctx, cam, doc, o, ui) {
 
   // ラベル（小さな記号類は既定名を表示しない）
   const minM = Math.min(o.w, o.h);
+  const labelMin = shape === 'turnout' ? 18 : 26;     // 分岐器の番号は小さくても表示する
   const showText = (shape === 'label') || selected ||
-    (o.label ? Math.max(w, h) > 26 : (minM >= 10 && z > 0.35 && Math.min(w, h) > 12));
+    (o.label ? Math.max(w, h) > labelMin : (minM >= 10 && z > 0.35 && Math.min(w, h) > 12));
   if (showText && label) {
     let ang = 0;
     const rot = normRot(o.rot || 0);
@@ -567,13 +578,16 @@ function drawObject(ctx, cam, doc, o, ui) {
     ctx.save();
     ctx.rotate(ang);
     if (Math.abs(normRot((o.rot || 0) + ang)) > Math.PI / 2 + 1e-6) ctx.rotate(Math.PI);
-    const fs = shape === 'label' ? Math.max(11, o.h * z * .8) : Math.min(14, Math.max(9, Math.min(w, h) * .45));
+    const fs = shape === 'label' ? Math.max(11, o.h * z * .8)
+      : shape === 'turnout' ? 10.5
+        : Math.min(14, Math.max(9, Math.min(w, h) * .45));
+    const dy = shape === 'turnout' ? -(h / 2 + 7) : 0;   // 記号に重ねず脇に出す
     ctx.font = `600 ${fs}px ${FONT}`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.8)';
-    ctx.strokeText(label, 0, 0);
+    ctx.strokeText(label, 0, dy);
     ctx.fillStyle = shape === 'label' ? (o.color || '#e6eaf3') : '#eef2fa';
-    ctx.fillText(label, 0, 0);
+    ctx.fillText(label, 0, dy);
     ctx.restore();
   }
 

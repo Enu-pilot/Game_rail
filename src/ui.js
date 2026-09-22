@@ -7,7 +7,7 @@ import {
 } from './store.js';
 import {
   TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS,
-  TURNOUT_NUMBERS, turnoutSize, VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
+  VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
 } from './catalog.js';
 import { getGraph, findRoute, validateLayout, END_TYPES, endType } from './topology.js';
 import { layoutChecks } from './checks.js';
@@ -380,11 +380,16 @@ export function initUI(api) {
     if (!o) return [h('div', { class: 'empty' }, '選択が失われました')];
     const def = objectDef(o.type);
     const track = o.trackId ? findTrack(o.trackId) : null;
+    const isTurnout = def.shape === 'turnout';
+    const turnoutTypes = OBJECT_GROUPS.flatMap(g => g.items).filter(i => i.shape === 'turnout');
     const out = [];
     out.push(h('div', { class: 'card' },
-      h('h4', {}, def.name, h('span', { class: 'tag' }, def.groupName || '')),
+      h('h4', {}, def.name, h('span', { class: 'tag' }, isTurnout ? '結節点の記号' : (def.groupName || ''))),
       field('表示名', textInput(`obj.${o.id}.label`, o.label, v => updateEntity('object', o.id, { label: v }, { history: false }), def.name)),
-      h('div', { class: 'row' },
+      isTurnout ? field('種類', selectInput(`obj.${o.id}.type`, o.type,
+        turnoutTypes.map(i => ({ value: i.id, label: i.name })),
+        v => updateEntity('object', o.id, { type: v, w: objectDef(v).w, h: objectDef(v).h }, { history: false }))) : null,
+      isTurnout ? null : h('div', { class: 'row' },
         field('幅 W（m）', numberInput(`obj.${o.id}.w`, o.w, v => updateEntity('object', o.id, { w: Math.max(0.5, v || 1) }, { history: false }), { min: 0.5, step: 0.5 })),
         field('奥行 D（m）', numberInput(`obj.${o.id}.h`, o.h, v => updateEntity('object', o.id, { h: Math.max(0.5, v || 1) }, { history: false }), { min: 0.5, step: 0.5 })),
       ),
@@ -396,25 +401,10 @@ export function initUI(api) {
         v => { const d = Math.max(4, v || 25); updateEntity('object', o.id, { w: d, h: d }, { history: false }); }, { min: 4, step: 0.5 })) : null,
       def.shape === 'roundhouse' ? h('p', { class: 'note' }, '幅Wが扇形庫の外径になります。転車台の中心に合わせて配置し、回転で向きを調整してください。') : null,
       def.variant === 'diamond' ? field('交差角（度）', numberInput(`obj.${o.id}.xang`,
-        Math.round((o.xang ?? Math.atan2(o.h, o.w)) * 180 / Math.PI),
-        v => {
-          const a = Math.max(5, Math.min(90, v || 45)) * Math.PI / 180;
-          updateEntity('object', o.id, { xang: a, h: Math.max(4, Math.round(Math.abs(o.w * Math.sin(a)) * 10) / 10) }, { history: false });
-        }, { min: 5, max: 90, step: 5 })) : null,
-      def.shape === 'turnout' && def.variant !== 'diamond' ? h('div', { class: 'field' },
-        h('label', {}, '分岐器の番数'),
-        selectInput(`obj.${o.id}.frog`, String(o.frog ?? ''),
-          [{ value: '', label: '手動サイズ' }, ...TURNOUT_NUMBERS.map(n => ({ value: String(n), label: `#${n}（全長 ${turnoutSize(def.variant, n).w}m）` }))],
-          v => {
-            if (!v) { updateEntity('object', o.id, { frog: null }, { history: false }); return; }
-            const n = Number(v);
-            const sz = turnoutSize(def.variant, n);
-            updateEntity('object', o.id, { frog: n, w: sz.w, h: sz.h }, { history: false });
-          }),
-        h('p', { class: 'note' }, o.frog
-          ? `#${o.frog}：全長 ${o.w}m・開き ${o.h}m（分岐角 約${(180 / Math.PI * Math.atan(1 / o.frog)).toFixed(1)}°）`
-          : '幅・奥行を直接編集するか、キャンバス上の四隅をドラッグして変形できます'),
-      ) : null,
+        Math.round((o.xang ?? Math.PI / 4) * 180 / Math.PI),
+        v => updateEntity('object', o.id, { xang: Math.max(5, Math.min(90, v || 45)) * Math.PI / 180 }, { history: false }),
+        { min: 5, max: 90, step: 5 })) : null,
+      isTurnout ? h('p', { class: 'note' }, '分岐器は線路の結節点を示す記号です。実寸は持たず、拡大率によらず同じ大きさで表示されます（位置・向き・開く側のみ編集できます）。') : null,
       field('回転（度）', numberInput(`obj.${o.id}.rot`, Math.round((o.rot || 0) * 180 / Math.PI),
         v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
       h('div', { class: 'btn-row' },

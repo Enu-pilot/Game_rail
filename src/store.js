@@ -1,7 +1,7 @@
 // アプリケーション状態（ドキュメント + UI状態）と派生計算
 
 import { polylineLength } from './geom.js';
-import { trackKind, vehicleDef } from './catalog.js';
+import { trackKind, vehicleDef, objectDef } from './catalog.js';
 
 export const STORAGE_KEY = 'game_rail.depot.v1';
 export const DOC_VERSION = 1;
@@ -117,14 +117,22 @@ export function migrate(doc) {
     ends: { a: (t.ends && t.ends.a) || 'open', b: (t.ends && t.ends.b) || 'open' },
     note: t.note || '',
   }));
-  d.objects = (doc.objects || []).map(o => ({
-    id: o.id || uid('b'), type: o.type || 'station_bldg',
-    x: +o.x || 0, y: +o.y || 0, w: +o.w || 20, h: +o.h || 10, rot: +o.rot || 0,
-    frog: Number.isFinite(o.frog) ? o.frog : null,
-    mirror: !!o.mirror,
-    xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
-    label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
-  }));
+  d.objects = (doc.objects || []).map(o => {
+    const type = o.type || 'station_bldg';
+    const def = objectDef(type);
+    const isTurnout = def.shape === 'turnout';
+    return {
+      id: o.id || uid('b'), type,
+      x: +o.x || 0, y: +o.y || 0,
+      // 分岐器は結節点の記号なので寸法はカタログの公称値に統一する
+      w: isTurnout ? def.w : (+o.w || 20),
+      h: isTurnout ? def.h : (+o.h || 10),
+      rot: +o.rot || 0,
+      mirror: !!o.mirror,
+      xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
+      label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
+    };
+  });
   d.formations = (doc.formations || []).map(f => ({
     id: f.id || uid('f'), name: f.name || '編成', series: f.series || '',
     vehicle: f.vehicle || 'emu',

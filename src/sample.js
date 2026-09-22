@@ -2,7 +2,7 @@
 // 線路どうしが実際に接続しているため、入換経路の検証をそのまま試せる
 
 import { newDoc, uid } from './store.js';
-import { objectDef, FORMATION_COLORS, turnoutSize, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
+import { objectDef, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
 import { buildGraph, junctionNodes, turnoutSpecAt } from './topology.js';
 
 const T = (name, kind, points, extra = {}) => ({
@@ -13,13 +13,10 @@ const T = (name, kind, points, extra = {}) => ({
 });
 const O = (type, x, y, extra = {}) => {
   const d = objectDef(type);
-  const frog = extra.frog ?? d.frog ?? null;
-  const sz = (d.shape === 'turnout' && frog) ? turnoutSize(d.variant, frog) : null;
   return {
     id: uid('b'), type, x, y,
-    w: extra.w ?? (sz ? sz.w : d.w), h: extra.h ?? (sz ? sz.h : d.h),
+    w: extra.w ?? d.w, h: extra.h ?? d.h,
     rot: (extra.rot ?? 0) * Math.PI / 180,
-    frog: extra.frog ?? d.frog ?? null,
     label: extra.label ?? '', note: extra.note ?? '', trackId: null,
   };
 };
@@ -135,24 +132,18 @@ export function sampleDoc() {
   for (const nd of junctions) {
     const spec = turnoutSpecAt(tmp, g, nd.id);
     if (!spec) continue;
-    const involvesStabling = nd.edges
-      .map(eid => t.find(x => x.id === g.edgeById.get(eid).trackId))
-      .some(x => x && x.kind === 'stabling');
-    const frog = involvesStabling ? 8 : 10;
     const type = TURNOUT_TYPE_BY_VARIANT[spec.variant] || 'turnout_single';
     const d = objectDef(type);
-    const sz = d.frog ? turnoutSize(d.variant, frog) : { w: d.w, h: d.h };
     o.push({
-      id: uid('b'), type, x: spec.x, y: spec.y, w: sz.w, h: sz.h, rot: spec.rot,
-      frog: d.frog ? frog : null, mirror: !!spec.mirror,
-      label: `${++no}号`, note: '', trackId: null,
+      id: uid('b'), type, x: spec.x, y: spec.y, w: d.w, h: d.h, rot: spec.rot,
+      mirror: !!spec.mirror, label: `${++no}号`, note: '', trackId: null,
     });
     // 転轍機は基準線の側方に配置
     o.push({
       id: uid('b'), type: 'point_machine',
       x: spec.x + Math.sin(spec.rot) * (spec.mirror ? -7 : 7) * -1,
       y: spec.y + Math.cos(spec.rot) * (spec.mirror ? -7 : 7),
-      w: 6, h: 6, rot: spec.rot, frog: null, mirror: false, label: '', note: '', trackId: null,
+      w: 6, h: 6, rot: spec.rot, mirror: false, label: '', note: '', trackId: null,
     });
   }
 
