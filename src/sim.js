@@ -6,6 +6,7 @@
 import { store, emit, commit, snapshot, uid, setMessage, formationLength } from './store.js';
 import { getGraph, findRoute, trackGaps } from './topology.js';
 import { routeFromLeg, findConflicts } from './interlocking.js';
+import { runTimeForPath, speedAt } from './runcurve.js';
 import { lineStations, computeSchedule, trainType, fmtHM, trainPlatform } from './timetable.js';
 import { distToPolyline } from './geom.js';
 
@@ -120,7 +121,31 @@ function legGaps(doc, leg) {
 }
 
 /** 2地点を結ぶ走行区間を作る（同一線路内ならそのまま1区間） */
-function buildLegs(doc, { fromTrackId, toTrackId, trainLength, fromAt, toAt }) {
+/** 区間に省略距離と走行曲線を付ける */
+function attachCurve(doc, leg, maxKmh) {
+  leg.gaps = legGaps(doc, leg);
+  leg.runLength = leg.length + leg.gaps.reduce((s2, g) => s2 + g.extraM, 0);
+  leg.curve = runTimeForPath(doc, leg.path, {
+    trainMax: maxKmh || (doc.settings.shuntSpeedKmh ?? 25),
+    turnouts: leg.turnouts || [],
+    startKmh: 0, endKmh: 0,
+  });
+}
+
+/** 走行距離（省略区間を含む）から、図上の位置を求める */
+function geoFromRun(leg, run) {
+  let prev = 0, r = Math.max(0, run);
+  for (const g of leg.gaps || []) {
+    const before = g.at - prev;
+    if (r <= before) return { geo: prev + r, inGap: false };
+    r -= before; prev = g.at;
+    if (r <= g.extraM) return { geo: g.at, inGap: true };
+    r -= g.extraM;
+  }
+  return { geo: Math.min(leg.length, prev + r), inGap: false };
+}
+
+function buildLegs(doc, { fromTrackId, toTrackId, trainLength, fromAt, toAt, maxKmh }) {
   if (fromTrackId === toTrackId && Number.isFinite(fromAt) && Number.isFinite(toAt)) {
     const t = doc.tracks.find(x => x.id === fromTrackId);
     const leg = {
@@ -131,8 +156,8 @@ function buildLegs(doc, { fromTrackId, toTrackId, trainLength, fromAt, toAt }) {
       length: Math.abs(toAt - fromAt),
     };
     if (leg.length < 1) return null;
-    leg.gaps = legGaps(doc, leg);
-    return { legs: [leg], distance: leg.length };
+    attachCurve(doc, leg, maxKmh);
+    return { legs: [leg], distance: leg.runLength };
   }
   const g = getGraph(doc, store.rev);
   const r = findRoute(doc, g, { fromTrackId, toTrackId, trainLength });
@@ -154,18 +179,18 @@ function buildLegs(doc, { fromTrackId, toTrackId, trainLength, fromAt, toAt }) {
 
   for (const lg of legs) {
     lg.length = lg.path.reduce((s2, p) => s2 + Math.abs(p.toAt - p.fromAt), 0);
-    lg.gaps = legGaps(doc, lg);
+    attachCurve(doc, lg, maxKmh);
   }
   const usable = legs.filter(l => l.length > 0.5);
   if (!usable.length) return null;
-  return { legs: usable, distance: usable.reduce((s2, l) => s2 + l.length, 0) };
+  return { legs: usable, distance: usable.reduce((s2, l) => s2 + l.runLength, 0) };
 }
 
 /** 走行を開始する（journey = 停車駅ごとの区切り） */
 function createMovement({ formationId, name, color, trainLength, trainId, speedKmh, journey }) {
   const doc = store.doc;
   const hop = journey[0];
-  const built = buildLegs(doc, { ...hop, trainLength });
+  const built = buildLegs(doc, { ...hop, trainLength, maxKmh: speedKmh });
   if (!built) {
     logLine(`${name}：経路がありません（${trackName(hop.fromTrackId)} → ${trackName(hop.toTrackId)}）`, 'error');
     return null;
@@ -182,7 +207,7 @@ function createMovement({ formationId, name, color, trainLength, trainId, speedK
     trainLength, speedKmh: speedKmh || null,
     journey, hopIndex: 0,
     fromTrackId: hop.fromTrackId, toTrackId: journey[total - 1].toTrackId,
-    legs: built.legs, legIndex: 0, dist: 0, gapIndex: 0, gapRemain: 0,
+    legs: built.legs, legIndex: 0, dist: 0, runDist: 0, speedNow: 0, inGap: false,
     phase: 'lining', phaseT: 0, routeId: null, dwellUntil: 0,
     startedAt: sim.clock,
   };
@@ -325,20 +350,18 @@ export function simTick(dtReal) {
       }
       mv.phaseT += dt;
       if (mv.phaseT >= liningSec) { mv.phase = 'running'; mv.phaseT = 0; }
-    } else if (mv.phase === 'running') {
+    } else if (mv.phase === 'running' || mv.phase === 'gap') {
       const leg = mv.legs[mv.legIndex];
       if (!leg) { finishHop(mv); continue; }
-      const vms = mv.speedKmh ? (mv.speedKmh * 1000) / 3600 : shuntMs;
-      mv.dist += vms * dt;
-      // 省略した駅間にさしかかったら、その距離ぶんの時間だけ走る
-      const gaps = leg.gaps || [];
-      if (mv.gapIndex < gaps.length && mv.dist >= gaps[mv.gapIndex].at) {
-        mv.dist = gaps[mv.gapIndex].at;
-        mv.gapRemain = gaps[mv.gapIndex].extraM / Math.max(0.1, vms);
-        mv.phase = 'gap';
-        continue;
-      }
-      if (mv.dist >= leg.length) {
+      const v = leg.curve ? speedAt(leg.curve, mv.runDist) : (mv.speedKmh ? (mv.speedKmh * 1000) / 3600 : shuntMs);
+      mv.runDist += Math.max(0.5, v) * dt;
+      const pos = geoFromRun(leg, mv.runDist);
+      mv.dist = pos.geo;
+      mv.inGap = pos.inGap;
+      mv.speedNow = Math.max(0, v) * 3.6;
+      mv.phase = pos.inGap ? 'gap' : 'running';
+      if (mv.runDist >= leg.runLength) {
+        mv.runDist = leg.runLength;
         mv.dist = leg.length;
         releaseRoute(mv);
         if (mv.legIndex < mv.legs.length - 1) {
@@ -348,9 +371,6 @@ export function simTick(dtReal) {
           finishHop(mv);
         }
       }
-    } else if (mv.phase === 'gap') {
-      mv.gapRemain -= dt;
-      if (mv.gapRemain <= 0) { mv.gapIndex++; mv.phase = 'running'; }
     } else if (mv.phase === 'dwelling') {
       if (sim.clock >= mv.dwellUntil) startHop(mv);
     } else if (mv.phase === 'reversing') {
@@ -377,14 +397,14 @@ export function simTick(dtReal) {
 function startHop(mv) {
   const doc = store.doc;
   const hop = mv.journey[mv.hopIndex];
-  const built = buildLegs(doc, { ...hop, trainLength: mv.trainLength });
+  const built = buildLegs(doc, { ...hop, trainLength: mv.trainLength, maxKmh: mv.speedKmh });
   if (!built) {
     logLine(`${mv.name}：${hop.stationName || ''} への経路がありません`, 'error');
     finishMovement(mv, true);
     return;
   }
   mv.legs = built.legs;
-  mv.legIndex = 0; mv.dist = 0; mv.gapIndex = 0; mv.gapRemain = 0;
+  mv.legIndex = 0; mv.dist = 0; mv.runDist = 0; mv.speedNow = 0; mv.inGap = false;
   mv.phase = 'lining'; mv.phaseT = 0;
 }
 
@@ -470,8 +490,9 @@ export function simState() {
       const leg = mv.legs[mv.legIndex];
       return {
         id: mv.id, name: mv.name, color: mv.color, phase: mv.phase,
-        progress: leg && leg.length ? Math.min(1, mv.dist / leg.length) : 0,
-        remain: leg ? Math.max(0, leg.length - mv.dist) : 0,
+        progress: leg && leg.runLength ? Math.min(1, mv.runDist / leg.runLength) : 0,
+        remain: leg ? Math.max(0, (leg.runLength || leg.length) - mv.runDist) : 0,
+        speed: Math.round(mv.speedNow || 0),
         leg: mv.legIndex + 1, legs: mv.legs.length,
         hop: mv.hopIndex + 1, hops: mv.journey.length,
         to: (mv.journey[mv.hopIndex] || {}).stationName || trackName(mv.toTrackId),

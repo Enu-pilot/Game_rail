@@ -25,6 +25,10 @@ export function defaultSettings() {
     showRoutes: true,   // 構成済みの進路を図上に表示
     maxTurnDeg: 90,     // 折返しなしで通過できる最大転向角[度]
     shuntSpeedKmh: 25,      // 入換の想定速度[km/h]
+    defaultMaxSpeedKmh: 100,// 線路の既定の最高速度[km/h]
+    divergeSpeedKmh: 35,    // 分岐器の分岐側の制限[km/h]
+    accelMs2: 0.65,         // 加速度[m/s^2]
+    decelMs2: 0.9,          // 減速度[m/s^2]
     reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
@@ -122,6 +126,7 @@ export function migrate(doc) {
     capacity: Number.isFinite(t.capacity) ? t.capacity : 0,
     carLengthM: Number.isFinite(t.carLengthM) ? t.carLengthM : null,
     ends: { a: (t.ends && t.ends.a) || 'open', b: (t.ends && t.ends.b) || 'open' },
+    maxSpeedKmh: Number.isFinite(t.maxSpeedKmh) ? t.maxSpeedKmh : null,
     note: t.note || '',
   }));
   d.objects = (doc.objects || []).map(o => {
@@ -140,6 +145,9 @@ export function migrate(doc) {
       dir: o.dir === 'ba' ? 'ba' : 'ab',                        // 信号機が防護する進行方向
       tracks: Array.isArray(o.tracks) ? o.tracks.slice() : [],  // 駅の発着線（番線）
       extraM: Number.isFinite(o.extraM) ? o.extraM : 2000,      // 駅間省略で足す距離[m]
+      limitKmh: Number.isFinite(o.limitKmh) ? o.limitKmh : 45,  // 速度制限標
+      lengthM: Number.isFinite(o.lengthM) ? o.lengthM : 200,
+      divergeSpeedKmh: Number.isFinite(o.divergeSpeedKmh) ? o.divergeSpeedKmh : null,
       xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
       label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
     };

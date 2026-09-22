@@ -104,6 +104,7 @@ export const OBJECT_GROUPS = [
       { id: 'signal_block',   name: '閉塞信号機',        w: 5,  h: 5,  color: '#ffb020', shape: 'signal', lamps: 3, onTrack: true, signal: true },
       { id: 'signal_shunt',   name: '入換信号機',        w: 5,  h: 5,  color: '#8fe06a', shape: 'signal', lamps: 2, onTrack: true, signal: true, shunt: true },
       { id: 'shunt_marker',   name: '入換標識',          w: 5,  h: 5,  color: '#8fe06a', shape: 'marker', onTrack: true, signal: true, shunt: true },
+      { id: 'speed_limit',    name: '速度制限標',        w: 8,  h: 8,  color: '#ff9f43', shape: 'speedlimit', onTrack: true, speedLimit: true },
       { id: 'buffer_stop',    name: '車止め',            w: 6,  h: 8,  color: '#ff7a6b', shape: 'buffer' },
       { id: 'derailer',       name: '脱線転轍器',        w: 8,  h: 6,  color: '#ff7a6b', shape: 'pointmachine' },
     ]

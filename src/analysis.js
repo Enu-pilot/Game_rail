@@ -3,6 +3,7 @@
 import { trackKind } from './catalog.js';
 import { findRoute, pathExtra } from './topology.js';
 import { formationLength, trackUsage } from './store.js';
+import { runTimeForPath } from './runcurve.js';
 
 /** 2つの経路が同時に成立しないか（分岐器の共用・線路区間の重複） */
 function conflict(a, b) {
@@ -79,10 +80,12 @@ export function entryAnalysis(doc, g, opts = {}) {
     const turnoutIds = new Set();
     for (const lg of r.legs || []) for (const to of lg.turnouts) turnoutIds.add(to.objectId);
     const dist = r.distance + pathExtra(doc, r.path);
+    const turnouts = (r.legs || []).flatMap(lg => lg.turnouts || []);
+    const run = runTimeForPath(doc, r.path, { trainMax: speedKmh, turnouts });
     routes.push({
       track: t, path: r.path, turnoutIds,
       distance: dist, reversals: r.reversals,
-      minutes: (dist / 1000) / speedKmh * 60 + r.reversals * reversalMin,
+      minutes: run.time / 60 + r.reversals * reversalMin,
       warnings: r.warnings,
     });
   }

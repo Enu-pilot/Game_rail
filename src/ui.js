@@ -292,6 +292,10 @@ export function initUI(api) {
       field('線路名', textInput(`track.${t.id}.name`, t.name, v => updateEntity('track', t.id, { name: v }, { history: false }), '例: 3番留置線')),
       field('種別', selectInput(`track.${t.id}.kind`, t.kind, TRACK_KINDS.map(k => ({ value: k.id, label: k.name })),
         v => updateEntity('track', t.id, { kind: v }, { history: false }))),
+      field('最高速度（km/h）', numberInput(`track.${t.id}.vmax`, t.maxSpeedKmh ?? '',
+        v => updateEntity('track', t.id, { maxSpeedKmh: v }, { history: false }),
+        { min: 5, step: 5, allowEmpty: true })),
+      h('p', { class: 'note' }, `空欄のときは全体設定（${doc.settings.defaultMaxSpeedKmh ?? 100} km/h）を使います。`),
       h('div', { class: 'kv' }, h('span', {}, '延長'), h('b', {}, `${len.toFixed(1)} m`)),
       h('div', { class: 'kv' }, h('span', {}, '有効長（端部余裕控除）'), h('b', {}, `${Math.max(0, len - doc.settings.clearanceM).toFixed(1)} m`)),
       h('div', { class: 'kv' }, h('span', {}, '折点数'), h('b', {}, `${t.points.length}`)),
@@ -417,7 +421,10 @@ export function initUI(api) {
         Math.round((o.xang ?? Math.PI / 4) * 180 / Math.PI),
         v => updateEntity('object', o.id, { xang: Math.max(5, Math.min(90, v || 45)) * Math.PI / 180 }, { history: false }),
         { min: 5, max: 90, step: 5 })) : null,
-      isTurnout ? h('p', { class: 'note' }, '分岐器は線路の結節点を示す記号です。実寸は持たず、拡大率によらず同じ大きさで表示されます。') : null,
+      isTurnout ? field('分岐側の制限速度（km/h）', numberInput(`obj.${o.id}.div`, o.divergeSpeedKmh ?? '',
+        v => updateEntity('object', o.id, { divergeSpeedKmh: v }, { history: false }),
+        { min: 5, step: 5, allowEmpty: true })) : null,
+      isTurnout ? h('p', { class: 'note' }, `反位（分岐側）を通るときの制限です。空欄のときは全体設定（${store.doc.settings.divergeSpeedKmh ?? 35} km/h）。分岐器は結節点の記号なので寸法は持ちません。`) : null,
       field('回転（度）', numberInput(`obj.${o.id}.rot`, Math.round((o.rot || 0) * 180 / Math.PI),
         v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
       h('div', { class: 'btn-row' },
@@ -452,6 +459,21 @@ export function initUI(api) {
               }, r.name))),
               h('p', { class: 'note' }, '図上では開通している側が明るく表示されます（定位＝緑、反位＝黄）。'),
             ),
+      ));
+    }
+
+    // 速度制限標
+    if (def.speedLimit) {
+      const tr = o.trackId ? findTrack(o.trackId) : null;
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '速度制限', h('span', { class: 'tag' }, tr ? tr.name : '線路に未接続')),
+        h('div', { class: 'row' },
+          field('制限速度（km/h）', numberInput(`obj.${o.id}.lim`, o.limitKmh ?? 45,
+            v => updateEntity('object', o.id, { limitKmh: Math.max(5, v || 45) }, { history: false }), { min: 5, step: 5 })),
+          field('区間長（m）', numberInput(`obj.${o.id}.len`, o.lengthM ?? 200,
+            v => updateEntity('object', o.id, { lengthM: Math.max(10, v || 100) }, { history: false }), { min: 10, step: 10 })),
+        ),
+        h('p', { class: 'note' }, '標識を中心に、この区間長のあいだ制限速度がかかります（曲線・踏切・分岐部などを表現）。ダイヤの所要時間と運転シミュレーションに反映されます。'),
       ));
     }
 
@@ -1055,7 +1077,7 @@ export function initUI(api) {
           h('div', { class: 'listrow' },
             h('span', { class: 'dot', style: `background:${mv.color}` }),
             h('span', { class: 'nm' }, mv.name, h('small', { class: 'desc' }, `${PHASE_NAMES[mv.phase] || mv.phase} ／ ${mv.to} へ（区間 ${mv.leg}/${mv.legs}）`)),
-            h('span', { class: 'num' }, `${mv.remain.toFixed(0)}m`)),
+            h('span', { class: 'num' }, `${mv.speed ? `${mv.speed}km/h ` : ''}${mv.remain.toFixed(0)}m`)),
           meter(mv.progress, mv.phase === 'waiting'),
         )))
         : h('p', { class: 'note' }, '走行中の列車はありません。'),
@@ -1253,7 +1275,7 @@ export function initUI(api) {
             });
             return i;
           })()),
-          field('表定速度（km/h）', numberInput(`tr.${sel.id}.spd`, sel.speedKmh,
+          field('最高速度（km/h）', numberInput(`tr.${sel.id}.spd`, sel.speedKmh,
             v => updateTrain(sel.id, { speedKmh: Math.max(5, v || 60) }), { min: 5, step: 5 })),
         ),
         h('div', { class: 'row' },
@@ -1301,7 +1323,8 @@ export function initUI(api) {
           return h('div', { style: 'margin-bottom:4px' },
             h('div', { class: 'kv' },
               h('span', {}, station ? station.name : '?'),
-              h('b', {}, `${st.arr != null ? fmtHM(st.arr) : '　—'} / ${st.dep != null ? fmtHM(st.dep) : '　—'}${st.skip ? '（通過）' : ''}`)),
+              h('b', {}, `${st.arr != null ? fmtHM(st.arr) : '　—'} / ${st.dep != null ? fmtHM(st.dep) : '　—'}${st.skip ? '（通過）' : ''}` +
+                (st.runKmh ? `　最高 ${Math.round(st.runKmh)}km/h` : ''))),
             list.length > 1
               ? selectInput(`tr.${sel.id}.pf.${st.idx}`, cur || '',
                 list.map(id => ({ value: id, label: (doc.tracks.find(t => t.id === id) || {}).name || '?' })),
@@ -1375,6 +1398,15 @@ export function initUI(api) {
         field('標準 1両長（m）', numberInput('set.carlen', st.carLengthM, v => setS('carLengthM', Math.max(1, v || 20)), { min: 1, step: .5 })),
         field('線路端部の余裕長（m）', numberInput('set.clear', st.clearanceM, v => setS('clearanceM', Math.max(0, v || 0)), { min: 0 })),
         h('p', { class: 'note' }, '留置可能両数 =（線路延長 − 余裕長）÷ 1両長 の切り捨て'),
+        field('線路の既定の最高速度（km/h）', numberInput('set.vmax', st.defaultMaxSpeedKmh ?? 100,
+          v => setS('defaultMaxSpeedKmh', Math.max(10, v || 100)), { min: 10, step: 5 })),
+        field('分岐側の既定制限（km/h）', numberInput('set.vdiv', st.divergeSpeedKmh ?? 35,
+          v => setS('divergeSpeedKmh', Math.max(5, v || 35)), { min: 5, step: 5 })),
+        field('加速度（m/s²）', numberInput('set.acc', st.accelMs2 ?? 0.65,
+          v => setS('accelMs2', Math.max(0.05, v || 0.65)), { min: 0.05, step: 0.05 })),
+        field('減速度（m/s²）', numberInput('set.dec', st.decelMs2 ?? 0.9,
+          v => setS('decelMs2', Math.max(0.05, v || 0.9)), { min: 0.05, step: 0.05 })),
+        h('p', { class: 'note' }, 'ダイヤの所要時間と運転は、これらと区間ごとの制限から走行計算で求めます。'),
         field('線路中心間隔の最小値（m）', numberInput('set.sp', st.minTrackSpacingM, v => setS('minTrackSpacingM', Math.max(0, v || 0)), { min: 0, step: .1 })),
         field('建築限界の片側幅（m）', numberInput('set.cl', st.clearanceHalfM, v => setS('clearanceHalfM', Math.max(0, v || 0)), { min: 0, step: .1 })),
         h('p', { class: 'note' }, '線路どうしの離隔・構造物の支障の判定に使います（在来線の標準は中心間隔 4.0m 前後）。'),

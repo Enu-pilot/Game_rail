@@ -1,8 +1,10 @@
 // 路線（駅の並び）とダイヤ（列車のスジ）の計算
 
 import { objectDef } from './catalog.js';
+import { store } from './store.js';
 import { findRoute, segmentExtra, pathExtra } from './topology.js';
 import { distToPolyline } from './geom.js';
+import { runTimeForPath } from './runcurve.js';
 
 export const TRAIN_TYPES = [
   { id: 'local',   name: '普通',   color: '#7fd1ff', speed: 60 },
@@ -35,61 +37,113 @@ export function stationAt(doc, o) {
  * 路線の各駅のキロ程を求める。
  * 隣り合う駅の距離は、線路の接続をたどった経路長（折返しを含まない最短）で計算する。
  */
+const _lineCache = new Map();
+
 export function lineStations(doc, g, line) {
+  const sig = `${store.rev}|${(line.stations || []).join(',')}`;
+  const hit = _lineCache.get(line.id);
+  if (hit && hit.sig === sig) return hit.value;
   const out = [];
   let km = 0;
   const ids = line.stations || [];
   for (let i = 0; i < ids.length; i++) {
     const o = doc.objects.find(x => x.id === ids[i]);
     if (!o) { out.push({ id: ids[i], name: '（削除された駅）', km, missing: true }); continue; }
+    let path = null, turnouts = [];
     if (i > 0) {
       const prev = doc.objects.find(x => x.id === ids[i - 1]);
       let d = 0;
       if (prev && prev.trackId && o.trackId) {
         if (prev.trackId === o.trackId) {
           const a = stationAt(doc, prev), b = stationAt(doc, o);
-          d = (a != null && b != null) ? Math.abs(b - a) + segmentExtra(doc, o.trackId, a, b) : 0;
+          if (a != null && b != null) {
+            d = Math.abs(b - a) + segmentExtra(doc, o.trackId, a, b);
+            path = [{ trackId: o.trackId, fromAt: a, toAt: b }];
+          }
         } else {
           const r = findRoute(doc, g, { fromTrackId: prev.trackId, toTrackId: o.trackId, trainLength: 0 });
-          d = r.found ? r.distance + pathExtra(doc, r.path) : 0;   // 省略した駅間の距離を加える
+          if (r.found) {
+            d = r.distance + pathExtra(doc, r.path);   // 省略した駅間の距離を加える
+            path = r.path;
+            turnouts = (r.legs || []).flatMap(lg => lg.turnouts || []);
+          }
         }
       }
       km += d;
     }
-    out.push({ id: o.id, object: o, name: o.label || '駅', trackId: o.trackId, km, missing: false });
+    out.push({ id: o.id, object: o, name: o.label || '駅', trackId: o.trackId, km, missing: false, path, turnouts });
   }
+  _lineCache.set(line.id, { sig, value: out });
   return out;
 }
 
-/** 列車の時刻を計算する（各駅の着・発） */
+const reversePath = path => (path || []).slice().reverse().map(p => ({ trackId: p.trackId, fromAt: p.toAt, toAt: p.fromAt }));
+
+/** 隣り合う駅の間の経路（進行方向に合わせる） */
+function hopPath(stations, from, to) {
+  if (to > from) {
+    const st = stations[to];
+    return { path: st && st.path ? st.path : null, turnouts: (st && st.turnouts) || [] };
+  }
+  const st = stations[from];
+  return { path: st && st.path ? reversePath(st.path) : null, turnouts: (st && st.turnouts) || [] };
+}
+
+const _schedCache = new Map();
+
+/**
+ * 列車の時刻を計算する（各駅の着・発）。
+ * 駅間は走行計算（線路の最高速度・速度制限・分岐制限＋加減速）で所要時間を求める。
+ */
 export function computeSchedule(doc, stations, train) {
+  const key = train.id;
+  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}`;
+  const hit = _schedCache.get(key);
+  if (hit && hit.sig === sig) return hit.stops;
+
   const from = Math.max(0, Math.min(stations.length - 1, train.fromIdx));
   const to = Math.max(0, Math.min(stations.length - 1, train.toIdx));
   const step = to >= from ? 1 : -1;
-  const speed = Math.max(5, train.speedKmh || 60);
   const dwell = Math.max(0, train.dwellSec ?? 30);
+  const trainMax = Math.max(10, train.speedKmh || 60);
   const stops = [];
   let t = train.departSec || 0;
-  for (let i = from; ; i += step) {
-    const st = stations[i];
-    const skipped = train.skip.includes(i) && i !== from && i !== to;
-    if (i === from) {
-      stops.push({ idx: i, arr: null, dep: t, skip: false, km: st.km });
-    } else {
-      const prev = stations[i - step];
-      const dist = Math.abs(st.km - prev.km);
-      t += (dist / 1000) / speed * 3600;
-      const arr = t;
-      if (i === to) { stops.push({ idx: i, arr, dep: null, skip: false, km: st.km }); break; }
-      if (skipped) {
-        stops.push({ idx: i, arr, dep: arr, skip: true, km: st.km });
-      } else {
-        t += dwell;
-        stops.push({ idx: i, arr, dep: t, skip: false, km: st.km });
-      }
-    }
-    if (i === to) break;
+
+  if (from === to) {
+    stops.push({ idx: from, arr: null, dep: t, skip: false, km: stations[from] ? stations[from].km : 0 });
+    _schedCache.set(key, { sig, stops });
+    return stops;
   }
+
+  stops.push({ idx: from, arr: null, dep: t, skip: false, km: stations[from].km, runKmh: null });
+  let segPath = [];
+  let segTurnouts = [];
+  let pendingSkips = [];   // 通過した駅（あとで時刻を按分する）
+  for (let i = from + step; ; i += step) {
+    const hop = hopPath(stations, i - step, i);
+    if (hop.path) { segPath = segPath.concat(hop.path); segTurnouts = segTurnouts.concat(hop.turnouts); }
+    const isEnd = i === to;
+    const skipped = !isEnd && train.skip.includes(i);
+    if (skipped) { pendingSkips.push(i); continue; }
+
+    const run = runTimeForPath(doc, segPath, { trainMax, turnouts: segTurnouts, startKmh: 0, endKmh: 0 });
+    const t0 = t;
+    t += run.time;
+    // 通過駅は距離で按分した時刻を入れる
+    const startKm = stops[stops.length - 1].km;
+    for (const sk of pendingSkips) {
+      const f = Math.abs(stations[sk].km - startKm) / Math.max(1, Math.abs(stations[i].km - startKm));
+      const tt = t0 + run.time * f;
+      stops.push({ idx: sk, arr: tt, dep: tt, skip: true, km: stations[sk].km, runKmh: run.vmax });
+    }
+    pendingSkips = [];
+    const arr = t;
+    if (isEnd) { stops.push({ idx: i, arr, dep: null, skip: false, km: stations[i].km, runKmh: run.vmax }); break; }
+    t += dwell;
+    stops.push({ idx: i, arr, dep: t, skip: false, km: stations[i].km, runKmh: run.vmax });
+    segPath = []; segTurnouts = [];
+  }
+  _schedCache.set(key, { sig, stops });
   return stops;
 }
 

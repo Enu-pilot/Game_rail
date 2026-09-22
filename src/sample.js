@@ -4,6 +4,7 @@
 import { newDoc, uid } from './store.js';
 import { objectDef, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
 import { buildGraph, junctionNodes, turnoutSpecAt } from './topology.js';
+import { TRACK_KIND_MAP } from './catalog.js';
 import { polylineLength, pointAt, distToPolyline } from './geom.js';
 
 const T = (name, kind, points, extra = {}) => ({
@@ -20,6 +21,11 @@ const O = (type, x, y, extra = {}) => {
     rot: (extra.rot ?? 0) * Math.PI / 180,
     label: extra.label ?? '', note: extra.note ?? '', trackId: null,
   };
+};
+
+const trackKindIsDepot = kind => {
+  const k = TRACK_KIND_MAP[kind];
+  return !!(k && k.stabling);
 };
 
 export function sampleDoc() {
@@ -249,6 +255,30 @@ export function sampleDoc() {
     id: uid('f'), name: 'W01', series: 'モーターカー', vehicle: 'mowcar', cars: 2, carLengthM: null, loco: null,
     color: '#c8a24a', trackId: t.find(x => x.kind === 'mow').id, note: '',
   });
+
+  /* ---- 速度条件 ---- */
+  const setSpeed = (name, kmh) => { const tr = t.find(x => x.name === name); if (tr) tr.maxSpeedKmh = kmh; };
+  setSpeed('本線', 110);
+  setSpeed('駅1番線', 85);
+  setSpeed('駅2番線', 85);
+  setSpeed('東川1番線', 60);
+  setSpeed('入出区線', 45);
+  setSpeed('出区線', 45);
+  setSpeed('入区線', 45);
+  setSpeed('ラダー線', 25);
+  setSpeed('引上線', 25);
+  setSpeed('連絡線', 25);
+  setSpeed('機関区連絡線', 25);
+  for (const tr of t) if (trackKindIsDepot(tr.kind)) tr.maxSpeedKmh = tr.maxSpeedKmh || 25;
+  // 曲線の速度制限（東川の前後）
+  const speedSign = (x, y, kmh, lenM, trackName2) => o.push({
+    id: uid('b'), type: 'speed_limit', x, y, w: 8, h: 8, rot: 0,
+    mirror: false, position: 0, dir: 'ab', tracks: [], extraM: 0,
+    limitKmh: kmh, lengthM: lenM, divergeSpeedKmh: null,
+    label: '', note: '', trackId: (t.find(v => v.name === trackName2) || {}).id || null,
+  });
+  speedSign(900, 40, 75, 400, '本線');     // 曲線制限
+  speedSign(1670, 75, 45, 240, '東川1番線'); // 交換設備の副本線
 
   /* ---- 路線とダイヤ ---- */
   const line = {
