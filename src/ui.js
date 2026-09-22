@@ -10,8 +10,10 @@ import {
   VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
 } from './catalog.js';
 import { getGraph, findRoute, validateLayout, END_TYPES, endType, nodeRoutes, currentNodeRoute } from './topology.js';
-import { signalAspects, ASPECT_NAMES, ASPECT_COLORS, routeStatus, isSignal } from './interlocking.js';
+import { signalAspects, signalDetails, ASPECT_NAMES, ASPECT_SHORT, ASPECT_COLORS, routeStatus, isSignal } from './interlocking.js';
 import { layoutChecks } from './checks.js';
+import { entryAnalysis, stablingSummary } from './analysis.js';
+import { sim, simStart, simPause, simReset, planAdd, planRemove, planClear, simState, PHASE_NAMES } from './sim.js';
 import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
@@ -96,6 +98,7 @@ export function initUI(api) {
     inspector: document.getElementById('panel-inspector'),
     formations: document.getElementById('panel-formations'),
     route: document.getElementById('panel-route'),
+    sim: document.getElementById('panel-sim'),
     settings: document.getElementById('panel-settings'),
     statusPos: document.getElementById('status-pos'),
     statusSummary: document.getElementById('status-summary'),
@@ -447,18 +450,35 @@ export function initUI(api) {
     // 信号機
     if (isSignal(o)) {
       const g = graph();
-      const aspects = signalAspects(store.doc, g);
-      const asp = aspects.get(o.id) || 'stop';
+      const det = signalDetails(store.doc, g, store.rev).get(o.id) || {};
+      const asp = det.aspect || 'stop';
+      const blk = det.block;
+      const nextSig = blk && blk.nextSignalId ? store.doc.objects.find(x => x.id === blk.nextSignalId) : null;
+      const endText = {
+        signal: '次の信号機', buffer: '車止め', boundary: '場外', deadend: '線路の終端',
+        notlined: '分岐器が開通していない', turntable: '転車台', unknown: '不明',
+      };
       const tr = o.trackId ? findTrack(o.trackId) : null;
       const usedBy = (store.doc.routes || []).filter(r => r.signalId === o.id);
       out.push(h('div', { class: 'card' },
         h('h4', {}, '信号現示',
-          h('span', { class: 'tag', style: `color:${ASPECT_COLORS[asp]}` }, ASPECT_NAMES[asp] || '停止')),
+          h('span', { class: 'tag', style: `color:${ASPECT_COLORS[asp]}` }, `${ASPECT_NAMES[asp] || '停止'}（${ASPECT_SHORT[asp] || 'R'}）`)),
         h('div', { class: 'kv' }, h('span', {}, '防護する線路'), h('b', {}, tr ? tr.name : '未設定')),
         field('進行方向', selectInput(`obj.${o.id}.dir`, o.dir || 'ab',
           [{ value: 'ab', label: 'A端 → B端 方向' }, { value: 'ba', label: 'B端 → A端 方向' }],
           v => updateEntity('object', o.id, { dir: v }, { history: false }))),
-        h('p', { class: 'note' }, '進路を構成すると、その進路の入口になっている信号機が進行を現示します。'),
+        blk ? h('div', {},
+          h('div', { class: 'kv' }, h('span', {}, '閉塞区間長'), h('b', {}, `${blk.length.toFixed(0)} m`)),
+          h('div', { class: 'kv' }, h('span', {}, '区間の終わり'), h('b', {}, endText[blk.endKind] || blk.endKind)),
+          h('div', { class: 'kv' }, h('span', {}, '次の信号機'),
+            h('b', {}, nextSig ? `${nextSig.label || objectDef(nextSig.type).name}（${ASPECT_NAMES[(signalAspects(store.doc, g, store.rev).get(nextSig.id)) || 'stop']}）` : 'なし')),
+          h('div', { class: 'kv' }, h('span', {}, '区間内の在線'), h('b', {}, blk.occupied.length ? blk.occupied.join('・') : 'なし')),
+          nextSig ? h('button', {
+            class: 'btn sm wide', style: 'margin-top:6px',
+            onclick: () => { store.ui.sel = { kind: 'object', id: nextSig.id }; api.focusOn(nextSig); emit('select'); },
+          }, '次の信号機を選択') : null,
+        ) : null,
+        h('p', { class: 'note' }, '選択中は閉塞区間が図上に帯で表示されます。次の信号機の現示が連鎖して、停止→注意→（4灯なら減速）→進行と上がります。'),
         usedBy.length
           ? h('div', {}, ...usedBy.map(r => h('div', { class: 'listrow' },
             h('span', { class: 'dot', style: `background:${r.set ? '#3ddc84' : '#5d6577'}` }),
@@ -829,6 +849,9 @@ export function initUI(api) {
         : h('p', { class: 'note' }, '経路を探索して「進路を構成」すると、分岐器が転換され、入口の信号機が進行を現示します。'),
     ));
 
+    // 入線効率の解析
+    out.push(buildAnalysisCard(doc, g));
+
     // レイアウト検証（接続＋物理チェック）
     const issues = [...validateLayout(doc, g), ...layoutChecks(doc, g, store.rev)];
     store.ui.issueMarks = doc.settings.showIssues
@@ -854,6 +877,159 @@ export function initUI(api) {
           h('span', { class: 'nm', style: 'white-space:normal' }, is.message),
         )))
         : h('p', { class: 'note' }, '✓ 未接続の端点・孤立した線路はありません'),
+    ));
+    return out;
+  }
+
+  /* ---------------- 入線効率 ---------------- */
+  const anaForm = { sourceId: '', reverse: false, cars: 10 };
+  let anaResult = null;
+
+  function buildAnalysisCard(doc, g) {
+    const kids = [
+      h('h4', {}, '同時入線の効率', anaResult ? h('span', { class: 'tag' }, `同時 ${anaResult.simultaneous} 本`) : null),
+      h('div', { class: 'field' }, h('label', {}, '起点'),
+        selectInput('ana.src', anaForm.sourceId,
+          [{ value: '', label: '— 場外接続の線路（自動） —' }, ...doc.tracks.map(t => ({ value: t.id, label: t.name }))],
+          v => { anaForm.sourceId = v; emit('route'); })),
+      h('div', { class: 'row' },
+        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '想定両数'),
+          (() => {
+            const i = h('input', { type: 'number', value: anaForm.cars, min: 1, max: 30 });
+            i.dataset.key = 'ana.cars';
+            i.addEventListener('input', () => { anaForm.cars = Math.max(1, Number(i.value) || 1); });
+            return i;
+          })()),
+        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '方向'),
+          selectInput('ana.dir', anaForm.reverse ? 'out' : 'in',
+            [{ value: 'in', label: '入区（起点→各線）' }, { value: 'out', label: '出区（各線→起点）' }],
+            v => { anaForm.reverse = v === 'out'; emit('route'); })),
+      ),
+      h('button', {
+        class: 'btn sm primary wide', style: 'margin-top:8px',
+        onclick: () => {
+          anaResult = entryAnalysis(doc, g, {
+            sourceTrackId: anaForm.sourceId || null,
+            trainLength: anaForm.cars * doc.settings.carLengthM,
+            reverse: anaForm.reverse,
+          });
+          setMessage(anaResult.ok ? `同時入線数 ${anaResult.simultaneous} 本（対象 ${anaResult.routes.length} 線）` : anaResult.reason);
+          emit('route');
+        },
+      }, '効率を解析'),
+    ];
+
+    if (anaResult && anaResult.ok) {
+      const a = anaResult;
+      kids.push(
+        h('hr', { class: 'sepline' }),
+        h('div', { class: 'kv' }, h('span', {}, '起点'), h('b', {}, a.source.name)),
+        h('div', { class: 'kv' }, h('span', {}, '経路のある線'), h('b', {}, `${a.routes.length} / ${a.targets.length} 線`)),
+        h('div', { class: 'kv' }, h('span', {}, '同時に動かせる数'), h('b', {}, `${a.simultaneous} 本`)),
+        meter(a.parallelism, false),
+        h('div', { class: 'kv' }, h('span', {}, '並列度'), h('b', {}, `${(a.parallelism * 100).toFixed(0)} %`)),
+        h('div', { class: 'kv' }, h('span', {}, '平均走行'), h('b', {}, `${a.avgDistance.toFixed(0)} m / ${a.avgReversals.toFixed(1)} 回折返し`)),
+        h('div', { class: 'kv' }, h('span', {}, '1本あたり所要'), h('b', {}, `約 ${a.avgMinutes.toFixed(1)} 分`)),
+        h('div', { class: 'kv' }, h('span', {}, `${a.trains} 本を捌く時間`), h('b', {}, `${a.batches} 回・約 ${a.totalMinutes.toFixed(0)} 分`)),
+        a.bestSet.length ? h('p', { class: 'note' }, `同時に構成できる組み合わせ例: ${a.bestSet.map(t => t.name).join('・')}`) : null,
+        a.unreachable.length ? h('div', { class: 'warnbox' }, `到達できない線: ${a.unreachable.map(t => t.name).join('・')}`) : null,
+        a.bottlenecks.length
+          ? h('div', { style: 'margin-top:6px' },
+            h('div', { class: 'kv' }, h('span', {}, 'ボトルネック'), h('b', {}, '')),
+            ...a.bottlenecks.map(b => h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${b.share > .8 ? '#ff5f56' : '#ffb020'}` }),
+              h('span', { class: 'nm' }, `${b.name}（${b.kind}）`),
+              h('span', { class: 'num' }, `${b.count}経路 ${(b.share * 100).toFixed(0)}%`))))
+          : null,
+        h('p', { class: 'note' }, '同時入線数は、分岐器と線路区間を共用しない進路の最大本数です（＝同時に構成できる進路の数）。'),
+      );
+    } else if (anaResult && !anaResult.ok) {
+      kids.push(h('div', { class: 'warnbox' }, anaResult.reason));
+    }
+    return h('div', { class: 'card' }, ...kids);
+  }
+
+  /* ---------------- 運転（入換シミュレーション） ---------------- */
+  const simForm = { formationId: '', toTrackId: '' };
+
+  function buildSim() {
+    const doc = store.doc;
+    const stt = simState();
+    const out = [];
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '入換シミュレーション',
+        h('span', { class: 'tag', style: sim.running ? 'color:#3ddc84' : '' }, PHASE_NAMES[stt.phase] || stt.phase)),
+      h('div', { class: 'kv' }, h('span', {}, '時刻'), h('b', {}, stt.time)),
+      stt.move
+        ? h('div', { class: 'kv' }, h('span', {}, '実行中'),
+          h('b', {}, `${stt.move.formation ? stt.move.formation.name : '?'} → ${stt.move.to ? stt.move.to.name : '?'}`))
+        : null,
+      stt.legs ? h('div', { class: 'kv' }, h('span', {}, '区間'), h('b', {}, `${stt.legIndex + 1} / ${stt.legs}`)) : null,
+      meter(stt.progress, false),
+      h('div', { class: 'kv' }, h('span', {}, '残り'), h('b', {}, `${stt.remain.toFixed(0)} m`)),
+      h('div', { class: 'kv' }, h('span', {}, '進捗'), h('b', {}, `${stt.index} / ${stt.total} 件`)),
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm primary', onclick: () => { simStart(); emit('sim'); } }, sim.running ? '▶ 実行中' : '▶ 開始'),
+        h('button', { class: 'btn sm', onclick: () => { simPause(); emit('sim'); } }, '⏸ 一時停止'),
+        h('button', { class: 'btn sm danger', onclick: () => { simReset(); emit('sim'); } }, '⏹ リセット'),
+      ),
+      h('div', { class: 'field', style: 'margin-top:8px' }, h('label', {}, '再生速度'),
+        selectInput('sim.speed', String(sim.speed),
+          [1, 2, 4, 8, 16, 32].map(v => ({ value: String(v), label: `×${v}` })),
+          v => { sim.speed = Number(v); emit('sim'); })),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '移動の計画', h('span', { class: 'tag' }, `${sim.plan.length} 件`)),
+      h('div', { class: 'row' },
+        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '編成'),
+          selectInput('sim.f', simForm.formationId,
+            [{ value: '', label: '— 選択 —' }, ...doc.formations.map(f => ({ value: f.id, label: `${f.name}（${f.cars}両）` }))],
+            v => { simForm.formationId = v; emit('sim'); })),
+        h('div', { class: 'field', style: 'margin:0' }, h('label', {}, '行先'),
+          selectInput('sim.t', simForm.toTrackId,
+            [{ value: '', label: '— 選択 —' }, ...doc.tracks.map(t => ({ value: t.id, label: t.name }))],
+            v => { simForm.toTrackId = v; emit('sim'); })),
+      ),
+      h('div', { class: 'btn-row', style: 'margin-top:6px' },
+        h('button', {
+          class: 'btn sm primary',
+          onclick: () => { planAdd(simForm.formationId, simForm.toTrackId); emit('sim'); },
+        }, '＋ 移動を追加'),
+        h('button', { class: 'btn sm', onclick: () => { planClear(); emit('sim'); } }, '計画をクリア'),
+      ),
+      sim.plan.length
+        ? h('div', { style: 'margin-top:6px' }, ...sim.plan.map((m, i) => {
+          const f = doc.formations.find(x => x.id === m.formationId);
+          const t = doc.tracks.find(x => x.id === m.toTrackId);
+          const done = i < sim.cursor;
+          const active = i === sim.cursor && sim.phase !== 'idle' && sim.phase !== 'done';
+          return h('div', { class: 'listrow' + (active ? ' sel' : ''), style: done ? 'opacity:.5' : '' },
+            h('span', { class: 'dot', style: `background:${done ? '#3ddc84' : (f ? f.color : '#5d6577')}` }),
+            h('span', { class: 'nm' }, `${i + 1}. ${f ? f.name : '?'} → ${t ? t.name : '?'}`),
+            h('button', { class: 'btn sm', onclick: () => { planRemove(m.id); emit('sim'); } }, '×'));
+        }))
+        : h('p', { class: 'note' }, '編成と行先を選んで「移動を追加」してください。開始すると、進路の構成・分岐器の転換・信号現示が連動して動きます。'),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '実行ログ'),
+      sim.log.length
+        ? h('div', {}, ...sim.log.slice(0, 20).map(l => h('div', { class: 'kv' },
+          h('span', {}, l.time),
+          h('b', { style: `font-weight:400;color:${l.level === 'error' ? '#ff8b84' : l.level === 'warn' ? '#ffd48a' : l.level === 'ok' ? '#8fe06a' : ''}` }, l.text))))
+        : h('p', { class: 'note' }, 'まだログはありません。'),
+    ));
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '運転条件'),
+      field('入換速度（km/h）', numberInput('sim.spd', doc.settings.shuntSpeedKmh ?? 25,
+        v => { snapshot(); doc.settings.shuntSpeedKmh = Math.max(1, v || 25); commit('settings'); }, { min: 1, step: 1 })),
+      field('折返し時間（分）', numberInput('sim.rev', doc.settings.reversalMinutes ?? 2,
+        v => { snapshot(); doc.settings.reversalMinutes = Math.max(0, v || 0); commit('settings'); }, { min: 0, step: .5 })),
+      field('進路構成の所要（秒）', numberInput('sim.line', doc.settings.liningSeconds ?? 20,
+        v => { snapshot(); doc.settings.liningSeconds = Math.max(0, v || 0); commit('settings'); }, { min: 0, step: 5 })),
     ));
     return out;
   }
@@ -922,6 +1098,11 @@ export function initUI(api) {
   let raf = 0;
   function renderAll(reason) {
     if (reason === 'cursor') { buildStatus(); return; }
+    if (reason === 'sim-tick') {
+      withFocus(els.sim, buildSim, 'sim');
+      buildStatus();
+      return;
+    }
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
@@ -932,6 +1113,7 @@ export function initUI(api) {
       withFocus(els.inspector, buildInspector, selKey);
       withFocus(els.formations, buildFormations, selKey);
       withFocus(els.route, buildRoute, selKey);
+      withFocus(els.sim, buildSim, 'sim');
       withFocus(els.settings, buildSettings, 'settings');
       buildStatus();
       document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));

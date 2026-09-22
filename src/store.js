@@ -24,6 +24,9 @@ export function defaultSettings() {
     showIssues: true,   // 検証結果を図上に表示
     showRoutes: true,   // 構成済みの進路を図上に表示
     maxTurnDeg: 90,     // 折返しなしで通過できる最大転向角[度]
+    shuntSpeedKmh: 25,      // 入換の想定速度[km/h]
+    reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
+    liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
     clearanceHalfM: 1.9,    // 建築限界の片側幅[m]
   };
@@ -218,6 +221,19 @@ export function formationVehicles(doc, f) {
   const cl = formationCarLength(doc, f);
   const v = vehicleDef(f.vehicle);
   for (let i = 0; i < f.cars; i++) out.push({ type: f.vehicle, len: cl, color: f.color || v.color, loco: false });
+  return out;
+}
+
+/** 線路上での各編成の占有範囲（始端からの距離[m]） */
+export function formationRangesOn(doc, trackId) {
+  const list = formationsOn(doc, trackId);
+  const out = [];
+  let cursor = (doc.settings.clearanceM || 0) / 2;
+  for (const f of list) {
+    const len = formationLength(doc, f);
+    out.push({ formation: f, start: cursor, end: cursor + len });
+    cursor += len + 3;
+  }
   return out;
 }
 

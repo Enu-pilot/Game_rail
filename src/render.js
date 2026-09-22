@@ -1,10 +1,10 @@
 // Canvas 2D レンダラ（ワールド単位 = メートル）
 
 import { trackKind, objectDef, vehicleDef } from './catalog.js';
-import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength, formationVehicles, formationCars } from './store.js';
+import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength, formationVehicles, formationCars, formationRangesOn } from './store.js';
 import { pointAt, subPolyline, polylineLength } from './geom.js';
 import { getGraph, endType, currentNodeRoute } from './topology.js';
-import { signalAspects, ASPECT_COLORS } from './interlocking.js';
+import { signalAspects, signalDetails, ASPECT_COLORS } from './interlocking.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
 const GAUGE = 1.435;      // 軌間[m]
@@ -40,7 +40,7 @@ export function render(ctx, W, H, doc, ui) {
 
   try {
     const g = getGraph(doc, ui.graphRev ?? 0);
-    ui._aspects = signalAspects(doc, g);
+    ui._aspects = signalAspects(doc, g, ui.graphRev ?? 0);
     ui._graph = g;
   } catch { ui._aspects = new Map(); ui._graph = null; }
 
@@ -52,10 +52,12 @@ export function render(ctx, W, H, doc, ui) {
   for (const o of below) drawObject(ctx, cam, doc, o, ui);
   for (const t of doc.tracks) drawTrack(ctx, cam, doc, t, ui);
   if (doc.settings.showRoutes !== false) drawSetRoutes(ctx, cam, doc);
+  if (ui._graph && ui.sel && ui.sel.kind === 'object') drawSelectedBlock(ctx, cam, doc, ui);
   if (ui.route && ui.route.path) drawRoute(ctx, cam, doc, ui.route);
   for (const t of doc.tracks) drawTrackEnds(ctx, cam, doc, t);
   if (doc.settings.showJunctions && ui.graphRev !== false) drawJunctions(ctx, cam, doc, ui);
   if (doc.settings.showFormations) for (const t of doc.tracks) drawFormations(ctx, cam, doc, t, ui);
+  if (ui.simTrain) drawMovingTrain(ctx, cam, doc, ui.simTrain);
   for (const o of above) drawObject(ctx, cam, doc, o, ui);
   if (ui._graph) drawTurnoutPositions(ctx, cam, doc, ui._graph);
   if (doc.settings.showLabels) for (const t of doc.tracks) drawTrackLabel(ctx, cam, doc, t);
@@ -213,12 +215,11 @@ function drawFormations(ctx, cam, doc, t, ui) {
   if (!list.length || !t.points || t.points.length < 2) return;
   const total = polylineLength(t.points);
   const usable = Math.max(0, total - (doc.settings.clearanceM || 0));
-  let cursor = (doc.settings.clearanceM || 0) / 2;
 
-  for (const f of list) {
-    const len = formationLength(doc, f);
-    const start = cursor, end = cursor + len;
-    cursor = end + 3;
+  for (const range of formationRangesOn(doc, t.id)) {
+    const f = range.formation;
+    const len = range.end - range.start;
+    const start = range.start, end = range.end;
     if (start >= total) break;
     const over = end > usable + 1e-6;
     const selected = ui.sel && ui.sel.kind === 'formation' && ui.sel.id === f.id;
@@ -285,6 +286,46 @@ function drawFormations(ctx, cam, doc, t, ui) {
     }
     ctx.restore();
   }
+}
+
+/** シミュレーション中の走行列車 */
+function drawMovingTrain(ctx, cam, doc, train) {
+  if (!train.pieces || !train.pieces.length) return;
+  const byId = new Map(doc.tracks.map(t => [t.id, t]));
+  ctx.save();
+  ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+  let head = null;
+  for (const p of train.pieces) {
+    const t = byId.get(p.trackId);
+    if (!t) continue;
+    const from = Math.min(p.from, p.to), to = Math.max(p.from, p.to);
+    const pts = subPolyline(t.points, from, to);
+    if (pts.length < 2) continue;
+    const sp = screenPts(cam, pts);
+    ctx.strokeStyle = 'rgba(255,255,255,.28)';
+    ctx.lineWidth = Math.max(4, CAR_W * cam.zoom + 4);
+    strokePts(ctx, sp);
+    ctx.strokeStyle = train.color || '#4f8cff';
+    ctx.lineWidth = Math.max(2, CAR_W * cam.zoom);
+    strokePts(ctx, sp);
+    head = { t, at: p.to };
+  }
+  if (head) {
+    const p = pointAt(head.t.points, head.at);
+    const s = toScreen(cam, p.x, p.y);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, Math.max(3, 1.2 * cam.zoom), 0, Math.PI * 2); ctx.fill();
+    if (cam.zoom > 0.35) {
+      ctx.font = `600 12px ${FONT}`;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      const label = `${train.name}`;
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.85)';
+      ctx.strokeText(label, s.x + 10, s.y - 10);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, s.x + 10, s.y - 10);
+    }
+  }
+  ctx.restore();
 }
 
 /** 車両ごとの動力表現（パンタ・排気・煙突）と機関車の記号 */
@@ -657,6 +698,8 @@ function drawTurnout(ctx, w, h, color, variant, xang) {
 }
 
 const ASPECT_LAMP = { stop: '#ff4b41', caution: '#ffc233', proceed: '#3ddc84', shunt: '#7fd1ff' };
+/** 減速は黄＋緑の2灯を現示する */
+const LIT_LAMPS = a => (a === 'reduced' ? ['caution', 'proceed'] : [a]);
 
 function drawSignal(ctx, z, def, aspect, o) {
   const lamps = def.lamps || 3;
@@ -672,7 +715,7 @@ function drawSignal(ctx, z, def, aspect, o) {
   const order = shunt ? ['stop', 'shunt'] : (lamps >= 4 ? ['stop', 'caution', 'proceed', 'shunt'] : ['stop', 'caution', 'proceed']);
   for (let i = 0; i < lamps; i++) {
     const kind = order[i % order.length];
-    const lit = kind === aspect;
+    const lit = LIT_LAMPS(aspect).includes(kind);
     const cy = -bh + 2 + r + i * r * 2;
     ctx.fillStyle = lit ? ASPECT_LAMP[kind] : 'rgba(255,255,255,.12)';
     ctx.beginPath(); ctx.arc(0, cy, r * .78, 0, Math.PI * 2); ctx.fill();
@@ -847,6 +890,30 @@ function drawTurnoutPositions(ctx, cam, doc, g) {
     ctx.strokeStyle = cur.fixed ? '#ffc04d' : (cur.index === 0 ? '#8fe06a' : '#ffd166');
     ctx.lineWidth = 2.4;
     strokePts(ctx, pts);
+  }
+  ctx.restore();
+}
+
+/** 選択中の信号機の閉塞区間 */
+function drawSelectedBlock(ctx, cam, doc, ui) {
+  const o = doc.objects.find(x => x.id === ui.sel.id);
+  if (!o || !objectDef(o.type).signal || !o.trackId) return;
+  let det;
+  try { det = signalDetails(doc, ui._graph, ui.graphRev ?? 0).get(o.id); } catch { return; }
+  if (!det || !det.block) return;
+  const byId = new Map(doc.tracks.map(t => [t.id, t]));
+  const col = ASPECT_COLORS[det.aspect] || '#7fd1ff';
+  ctx.save();
+  ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+  for (const seg of det.block.segments) {
+    const t = byId.get(seg.trackId);
+    if (!t) continue;
+    const from = Math.min(seg.from, seg.to), to = Math.max(seg.from, seg.to);
+    const pts = subPolyline(t.points, from, to);
+    if (pts.length < 2) continue;
+    ctx.strokeStyle = hexA(col, .3);
+    ctx.lineWidth = Math.max(10, 11 * cam.zoom);
+    strokePts(ctx, screenPts(cam, pts));
   }
   ctx.restore();
 }

@@ -5,6 +5,7 @@ import { objectDef, trackKind } from './catalog.js';
 import { render, toWorld, toScreen, contentBounds, turnoutSymbolSize } from './render.js';
 import { snap, snapAngle, distToPolyline, hitRect, dist } from './geom.js';
 import { addTrack, addObject, deleteSelected, snapToTrack, turnoutNear, placeTurnoutFromSpec, placeCrossingFrom } from './actions.js';
+import { sim, simTick } from './sim.js';
 import { getGraph, junctionNodes, turnoutSpecAt } from './topology.js';
 import { crossingPoints } from './checks.js';
 
@@ -30,7 +31,15 @@ export function initCanvas(canvas, stage) {
   new ResizeObserver(resize).observe(stage);
   resize();
 
-  function frame() {
+  let lastFrame = 0, uiPulse = 0;
+  function frame(now) {
+    const dt = lastFrame ? Math.min(0.2, (now - lastFrame) / 1000) : 0;
+    lastFrame = now;
+    if (sim.running && simTick(dt)) {
+      needsRender = true;
+      uiPulse += dt;
+      if (uiPulse > 0.25) { uiPulse = 0; emit('sim-tick'); }
+    }
     if (needsRender) { ui.graphRev = store.rev; render(ctx, W, H, store.doc, ui); needsRender = false; }
     requestAnimationFrame(frame);
   }

@@ -2,8 +2,8 @@
 
 import { objectDef } from './catalog.js';
 import { distToPolyline, polylineLength } from './geom.js';
-import { formationsOn } from './store.js';
-import { nodeRoutes, currentNodeRoute } from './topology.js';
+import { formationsOn, formationRangesOn } from './store.js';
+import { nodeRoutes, currentNodeRoute, endType, DEFAULT_MAX_TURN } from './topology.js';
 
 /** 信号機・入換標識のオブジェクトか */
 export const isSignal = o => !!objectDef(o.type).signal;
@@ -116,6 +116,112 @@ export function routeAligned(doc, g, route) {
   return true;
 }
 
+/* ---------------- 閉塞区間（ブロック）の追跡 ---------------- */
+
+const normAng = a => { let v = a % (Math.PI * 2); if (v > Math.PI) v -= Math.PI * 2; if (v < -Math.PI) v += Math.PI * 2; return v; };
+const angleDiff = (a, b) => Math.abs(normAng(a - b));
+
+/** 線路上の距離 at を含む区間を返す */
+function edgeAt(g, trackId, at) {
+  const edges = g.trackEdges(trackId);
+  for (const e of edges) if (at >= e.fromAt - 1e-6 && at <= e.toAt + 1e-6) return e;
+  return edges[0] || null;
+}
+
+/** 区間を走る向き（'ab' = 始端→終端）で見た、進入ノードと退出ノード */
+function edgeEnds(e, dir) {
+  return dir === 'ab' ? { from: e.a, to: e.b } : { from: e.b, to: e.a };
+}
+
+/**
+ * 信号機の内方（front）の閉塞区間を追跡する。
+ * 分岐は「構成中の進路」→「分岐器の開通方向」→（分岐器がなければ）最も直進に近い方向 の順で決める。
+ */
+export function traceBlock(doc, g, signal, { maxEdges = 60, maxLength = 8000 } = {}) {
+  const track = doc.tracks.find(t => t.id === signal.trackId);
+  if (!track) return null;
+  const at0 = signalAt(doc, signal);
+  if (at0 == null) return null;
+  const maxTurn = (doc.settings.maxTurnDeg ?? DEFAULT_MAX_TURN) * Math.PI / 180;
+
+  let edge = edgeAt(g, track.id, at0);
+  if (!edge) return null;
+  let dir = signal.dir === 'ba' ? 'ba' : 'ab';
+  let cursor = at0;
+  const segments = [];
+  let nextSignalId = null;
+  let endKind = 'unknown';
+  let endTrackId = track.id;
+  let length = 0;
+
+  for (let step = 0; step < maxEdges && length < maxLength; step++) {
+    const t = g.trackById.get(edge.trackId);
+    const ends = edgeEnds(edge, dir);
+    const spanFrom = step === 0 ? cursor : (dir === 'ab' ? edge.fromAt : edge.toAt);
+    const spanTo = dir === 'ab' ? edge.toAt : edge.fromAt;
+
+    // 区間内で同じ向きの次の信号機を探す
+    let stopAt = null;
+    for (const o of doc.objects) {
+      if (!isSignal(o) || o.id === signal.id || o.trackId !== edge.trackId) continue;
+      if ((o.dir || 'ab') !== dir) continue;
+      const a = signalAt(doc, o);
+      if (a == null) continue;
+      const ahead = dir === 'ab' ? (a > spanFrom + 1e-6 && a <= spanTo + 1e-6) : (a < spanFrom - 1e-6 && a >= spanTo - 1e-6);
+      if (!ahead) continue;
+      if (!stopAt || (dir === 'ab' ? a < stopAt.at : a > stopAt.at)) stopAt = { at: a, id: o.id };
+    }
+    const segEnd = stopAt ? stopAt.at : spanTo;
+    segments.push({ trackId: edge.trackId, from: spanFrom, to: segEnd });
+    length += Math.abs(segEnd - spanFrom);
+    endTrackId = edge.trackId;
+    if (stopAt) { nextSignalId = stopAt.id; endKind = 'signal'; break; }
+
+    // 区間の終わり = ノード。次の区間を決める
+    const node = g.nodeById.get(ends.to);
+    if (!node) { endKind = 'deadend'; break; }
+    if (node.turntable) { endKind = 'turntable'; break; }
+    const others = node.edges.filter(id => id !== edge.id).map(id => g.edgeById.get(id));
+    if (!others.length) {
+      // 線路の端。端点種別を見る
+      const which = (Math.abs(edge.toAt - (dir === 'ab' ? edge.toAt : edge.fromAt)) < 1e-6 && dir === 'ab') ? 'b' : (dir === 'ab' ? 'b' : 'a');
+      endKind = endType(t, which) === 'boundary' ? 'boundary' : (endType(t, which) === 'buffer' ? 'buffer' : 'deadend');
+      break;
+    }
+    const arrive = g.headingOut(edge, ends.to) + Math.PI;
+    let nextEdge = null;
+    if (node.turnout && !node.turnoutFixed) {
+      const cur = currentNodeRoute(doc, g, node.id);
+      const r = cur && cur.route;
+      if (!r || (r.a !== edge.id && r.b !== edge.id)) { endKind = 'notlined'; break; }
+      nextEdge = g.edgeById.get(r.a === edge.id ? r.b : r.a);
+    } else {
+      let best = null;
+      for (const e2 of others) {
+        const turn = angleDiff(arrive, g.headingOut(e2, node.id));
+        if (turn > maxTurn) continue;
+        if (!best || turn < best.turn) best = { e: e2, turn };
+      }
+      if (!best) { endKind = 'deadend'; break; }
+      nextEdge = best.e;
+    }
+    if (!nextEdge) { endKind = 'deadend'; break; }
+    dir = nextEdge.a === node.id ? 'ab' : 'ba';
+    edge = nextEdge;
+    cursor = dir === 'ab' ? edge.fromAt : edge.toAt;
+  }
+
+  // 在線の判定
+  const occupied = [];
+  for (const seg of segments) {
+    const lo = Math.min(seg.from, seg.to), hi = Math.max(seg.from, seg.to);
+    for (const r of formationRangesOn(doc, seg.trackId)) {
+      if (Math.min(hi, r.end) - Math.max(lo, r.start) > 1e-6) occupied.push(r.formation.name);
+    }
+  }
+  return { segments, nextSignalId, endKind, endTrackId, length, occupied: [...new Set(occupied)] };
+}
+
 /**
  * 信号現示の算出
  *  stop     停止（赤）
@@ -123,31 +229,87 @@ export function routeAligned(doc, g, route) {
  *  proceed  進行（緑）
  *  shunt    入換進行（入換信号機・入換標識）
  */
-export function signalAspects(doc, g) {
-  const map = new Map();
-  for (const o of doc.objects) if (isSignal(o)) map.set(o.id, 'stop');
+export function computeSignals(doc, g) {
+  const signals = doc.objects.filter(isSignal);
+  const byId = new Map(signals.map(o => [o.id, o]));
+  const blocks = new Map();
+  for (const o of signals) blocks.set(o.id, o.trackId ? traceBlock(doc, g, o) : null);
+
+  const routeBySignal = new Map();
   for (const r of doc.routes || []) {
-    if (!r.set || !r.signalId || !map.has(r.signalId)) continue;
-    const o = doc.objects.find(x => x.id === r.signalId);
-    const aligned = routeAligned(doc, g, r);
-    const occupied = routeOccupied(doc, r);
-    let aspect;
-    if (!aligned) aspect = 'stop';
-    else if (isShuntSignal(o)) aspect = 'shunt';
-    else aspect = occupied.length ? 'caution' : 'proceed';
-    map.set(r.signalId, aspect);
+    if (r.set && r.signalId) routeBySignal.set(r.signalId, r);
   }
-  return map;
+
+  const memo = new Map();
+  const visiting = new Set();
+  const aspectOf = (id) => {
+    if (memo.has(id)) return memo.get(id);
+    if (visiting.has(id)) return 'caution';      // 環状配線での自己参照は安全側に倒す
+    visiting.add(id);
+    const o = byId.get(id);
+    const def = objectDef(o.type);
+    const block = blocks.get(id);
+    const route = routeBySignal.get(id);
+    const lined = route ? routeAligned(doc, g, route) : false;
+    let aspect;
+    if (!block || !o.trackId) aspect = 'stop';
+    else if (block.endKind === 'notlined') aspect = 'stop';
+    else if (!def.auto && (!route || !lined)) aspect = 'stop';   // 閉塞信号機以外は進路が必要
+    else if (block.occupied.length) aspect = 'stop';
+    else if (def.shunt) aspect = 'shunt';
+    else {
+      const lamps = def.lamps || 3;
+      const nx = block.nextSignalId ? aspectOf(block.nextSignalId) : null;
+      if (!nx) aspect = block.endKind === 'boundary' ? 'proceed' : 'caution';
+      else if (nx === 'stop') aspect = 'caution';
+      else if (nx === 'caution') aspect = lamps >= 4 ? 'reduced' : 'proceed';
+      else aspect = 'proceed';
+    }
+    visiting.delete(id);
+    memo.set(id, aspect);
+    return aspect;
+  };
+
+  const out = new Map();
+  for (const o of signals) {
+    out.set(o.id, {
+      aspect: aspectOf(o.id),
+      block: blocks.get(o.id),
+      route: routeBySignal.get(o.id) || null,
+    });
+  }
+  return out;
+}
+
+let _sigCache = { rev: -1, doc: null, map: null };
+
+/** 信号ID → 現示（描画・UI用。版数が同じなら再利用） */
+export function signalAspects(doc, g, rev) {
+  if (_sigCache.map && _sigCache.rev === rev && _sigCache.doc === doc) return _sigCache.simple;
+  const detail = computeSignals(doc, g);
+  const simple = new Map([...detail].map(([id, v]) => [id, v.aspect]));
+  _sigCache = { rev, doc, map: detail, simple };
+  return simple;
+}
+
+/** 信号ID → { aspect, block, route } */
+export function signalDetails(doc, g, rev) {
+  signalAspects(doc, g, rev);
+  return _sigCache.map;
 }
 
 export const ASPECT_COLORS = {
   stop: '#ff4b41',
   caution: '#ffc233',
+  reduced: '#c8d94a',
   proceed: '#3ddc84',
   shunt: '#7fd1ff',
 };
 export const ASPECT_NAMES = {
-  stop: '停止', caution: '注意', proceed: '進行', shunt: '入換進行',
+  stop: '停止', caution: '注意', reduced: '減速', proceed: '進行', shunt: '入換進行',
+};
+export const ASPECT_SHORT = {
+  stop: 'R', caution: 'Y', reduced: 'YG', proceed: 'G', shunt: '入換',
 };
 
 /** 進路の状態まとめ（UI表示用） */
