@@ -29,7 +29,7 @@ export function initCanvas(canvas, stage) {
   resize();
 
   function frame() {
-    if (needsRender) { render(ctx, W, H, store.doc, ui); needsRender = false; }
+    if (needsRender) { ui.graphRev = store.rev; render(ctx, W, H, store.doc, ui); needsRender = false; }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -58,6 +58,25 @@ export function initCanvas(canvas, stage) {
     const tol = tolM();
     for (let i = 0; i < t.points.length; i++) {
       if (dist(p.x, p.y, t.points[i].x, t.points[i].y) <= tol) return { track: t, index: i };
+    }
+    return null;
+  }
+
+  /** 選択中オブジェクトのリサイズハンドル（画面座標で判定） */
+  function hitHandle(e) {
+    const sel = ui.sel;
+    if (!sel || sel.kind !== 'object') return null;
+    const o = store.doc.objects.find(x => x.id === sel.id);
+    if (!o) return null;
+    const z = ui.camera.zoom;
+    const c = toScreen(ui.camera, o.x, o.y);
+    const hw = Math.max(o.w * z, 10) / 2 + 3, hh = Math.max(o.h * z, 10) / 2 + 3;
+    const sp = evtPos(e);
+    const cos = Math.cos(o.rot || 0), sin = Math.sin(o.rot || 0);
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      const lx = sx * hw, ly = sy * hh;
+      const hx = c.x + lx * cos - ly * sin, hy = c.y + lx * sin + ly * cos;
+      if (Math.hypot(sp.x - hx, sp.y - hy) <= 8) return { obj: o, sx, sy };
     }
     return null;
   }
@@ -150,6 +169,13 @@ export function initCanvas(canvas, stage) {
     }
 
     // select ツール
+    const hh = hitHandle(e);
+    if (hh) {
+      snapshot();
+      drag = { type: 'resize', obj: hh.obj, sx: hh.sx, sy: hh.sy, w0: hh.obj.w, h0: hh.obj.h, x0: hh.obj.x, y0: hh.obj.y, moved: false };
+      canvas.style.cursor = 'nwse-resize';
+      return;
+    }
     const v = hitVertex(p);
     if (v) {
       snapshot();
@@ -203,6 +229,25 @@ export function initCanvas(canvas, stage) {
         drag.obj.x = nx; drag.obj.y = ny;
         drag.moved = true;
         invalidate(); emit('geometry');
+      } else if (drag.type === 'resize') {
+        const o = drag.obj;
+        const cos = Math.cos(o.rot || 0), sin = Math.sin(o.rot || 0);
+        // ポインタを回転前のローカル座標（m）へ
+        const dx = p.x - drag.x0, dy = p.y - drag.y0;
+        const lx = dx * cos + dy * sin, ly = -dx * sin + dy * cos;
+        const fx = -drag.sx * drag.w0 / 2, fy = -drag.sy * drag.h0 / 2;   // 固定する対角点
+        let nw = Math.abs(lx - fx), nh = Math.abs(ly - fy);
+        if (e.shiftKey) { const r = drag.w0 / Math.max(1e-6, drag.h0); if (nw / nh > r) nh = nw / r; else nw = nh * r; }
+        const step = (store.doc.settings.snap && !e.altKey) ? 1 : 0.1;
+        nw = Math.max(1, Math.round(nw / step) * step);
+        nh = Math.max(1, Math.round(nh / step) * step);
+        const cxl = fx + drag.sx * nw / 2, cyl = fy + drag.sy * nh / 2;   // 新しい中心（ローカル）
+        o.w = nw; o.h = nh;
+        o.x = drag.x0 + cxl * cos - cyl * sin;
+        o.y = drag.y0 + cxl * sin + cyl * cos;
+        if (objectDef(o.type).shape === 'turnout') o.frog = null;          // 手動サイズに切替
+        drag.moved = true;
+        invalidate(); emit('geometry');
       } else if (drag.type === 'moveTrack') {
         const g = store.doc.settings.gridM;
         let dx = p.x - drag.px, dy = p.y - drag.py;
@@ -219,6 +264,9 @@ export function initCanvas(canvas, stage) {
       const prev = ui.draft[ui.draft.length - 1];
       cur = snapWorld(snapAngle(prev.x, prev.y, cur.x, cur.y), e);
     }
+    if (!drag && ui.tool === 'select') {
+      canvas.style.cursor = hitHandle(e) ? 'nwse-resize' : 'default';
+    }
     ui.cursor = (ui.tool === 'track' || ui.tool === 'place') ? cur : p;
     if (ui.tool === 'track' || ui.tool === 'place') invalidate();
     emit('cursor');
@@ -226,7 +274,7 @@ export function initCanvas(canvas, stage) {
 
   canvas.addEventListener('pointerup', e => {
     if (drag) {
-      if ((drag.type === 'vertex' || drag.type === 'move' || drag.type === 'moveTrack')) {
+      if ((drag.type === 'vertex' || drag.type === 'move' || drag.type === 'moveTrack' || drag.type === 'resize')) {
         if (drag.moved) commit('drag');
         else { store._history.pop(); }   // 動かなかった場合は履歴を捨てる
       }

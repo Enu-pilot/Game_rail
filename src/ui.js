@@ -5,7 +5,9 @@ import {
   trackLength, trackCapacity, trackUsage, trackCarLength, formationLength, summary,
   findTrack, findObject, findFormation,
 } from './store.js';
-import { TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS } from './catalog.js';
+import { TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS, TURNOUT_NUMBERS, turnoutSize } from './catalog.js';
+import { getGraph, findRoute, validateLayout, END_TYPES, endType } from './topology.js';
+import { layoutChecks } from './checks.js';
 import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack,
@@ -82,12 +84,15 @@ export function initUI(api) {
     tracklist: document.getElementById('panel-tracklist'),
     inspector: document.getElementById('panel-inspector'),
     formations: document.getElementById('panel-formations'),
+    route: document.getElementById('panel-route'),
     settings: document.getElementById('panel-settings'),
     statusPos: document.getElementById('status-pos'),
     statusSummary: document.getElementById('status-summary'),
     statusMsg: document.getElementById('status-msg'),
     zoomLabel: document.getElementById('zoom-label'),
   };
+
+  const graph = () => getGraph(store.doc, store.rev);
 
   // タブ切替
   for (const nav of document.querySelectorAll('.tabs')) {
@@ -259,6 +264,26 @@ export function initUI(api) {
       ),
     ));
 
+    const g = graph();
+    const endNodes = g.endNodesOfTrack(t.id);
+    const connCount = which => {
+      const nid = which === 'a' ? endNodes[0] : endNodes[endNodes.length - 1];
+      const node = nid && g.nodeById.get(nid);
+      if (!node) return 0;
+      return new Set(node.edges.map(eid => g.edgeById.get(eid).trackId)).size - 1;
+    };
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '端点'),
+      ...['a', 'b'].map(which => h('div', { class: 'field' },
+        h('label', {}, which === 'a' ? 'A端（始端）' : 'B端（終端）',
+          h('span', { class: 'badge', style: 'margin-left:6px' },
+            connCount(which) > 0 ? `${connCount(which)}線と接続` : '接続なし')),
+        selectInput(`track.${t.id}.end${which}`, endType(t, which), END_TYPES.map(e => ({ value: e.id, label: e.name })),
+          v => updateEntity('track', t.id, { ends: { ...t.ends, [which]: v } }, { history: false })),
+      )),
+      h('p', { class: 'note' }, 'A端は留置編成を詰める側です。「場外接続」にすると出区経路の探索で基地の出入口として扱われます。'),
+    ));
+
     out.push(h('div', { class: 'card' },
       h('h4', {}, '留置可能両数'),
       field('算出方法', selectInput(`track.${t.id}.capmode`, t.capacityMode,
@@ -341,6 +366,20 @@ export function initUI(api) {
         field('X（m）', numberInput(`obj.${o.id}.x`, Math.round(o.x), v => updateEntity('object', o.id, { x: v || 0 }, { history: false }))),
         field('Y（m）', numberInput(`obj.${o.id}.y`, Math.round(o.y), v => updateEntity('object', o.id, { y: v || 0 }, { history: false }))),
       ),
+      def.shape === 'turnout' ? h('div', { class: 'field' },
+        h('label', {}, '分岐器の番数'),
+        selectInput(`obj.${o.id}.frog`, String(o.frog ?? ''),
+          [{ value: '', label: '手動サイズ' }, ...TURNOUT_NUMBERS.map(n => ({ value: String(n), label: `#${n}（全長 ${turnoutSize(def.variant, n).w}m）` }))],
+          v => {
+            if (!v) { updateEntity('object', o.id, { frog: null }, { history: false }); return; }
+            const n = Number(v);
+            const sz = turnoutSize(def.variant, n);
+            updateEntity('object', o.id, { frog: n, w: sz.w, h: sz.h }, { history: false });
+          }),
+        h('p', { class: 'note' }, o.frog
+          ? `#${o.frog}：全長 ${o.w}m・開き ${o.h}m（分岐角 約${(180 / Math.PI * Math.atan(1 / o.frog)).toFixed(1)}°）`
+          : '幅・奥行を直接編集するか、キャンバス上の四隅をドラッグして変形できます'),
+      ) : null,
       field('回転（度）', numberInput(`obj.${o.id}.rot`, Math.round((o.rot || 0) * 180 / Math.PI),
         v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
       h('div', { class: 'btn-row' },
@@ -470,6 +509,136 @@ export function initUI(api) {
     setMessage(placed ? `${placed} 本の編成を自動割付しました` : '割付できる空き線路がありません');
   }
 
+  /* ---------------- 入換経路 ---------------- */
+  const routeForm = { fromId: '', toId: '', formationId: '', cars: 10 };
+  let routeResult = null;
+
+  function runRouteSearch() {
+    const doc = store.doc;
+    const g = graph();
+    const f = routeForm.formationId ? findFormation(routeForm.formationId) : null;
+    const trainLength = f ? formationLength(doc, f) : Math.max(0, routeForm.cars) * doc.settings.carLengthM;
+    const base = { fromTrackId: routeForm.fromId, toTrackId: routeForm.toId, trainLength };
+    let res = findRoute(doc, g, { ...base, enforceTailFit: true });
+    if (!res.found) {
+      const lenient = findRoute(doc, g, { ...base, enforceTailFit: false });
+      if (lenient.found) {
+        lenient.warnings.unshift('引上げ可能な有効長を満たす経路がないため、長さ制約を無視した経路を表示しています');
+        res = lenient;
+      }
+    }
+    res.trainLength = trainLength;
+    routeResult = res;
+    store.ui.route = res.found ? { path: res.path, reversePoints: res.reversePoints } : null;
+    setMessage(res.found
+      ? `経路を検出: 折返し ${res.reversals} 回 / 走行 ${res.distance.toFixed(0)}m`
+      : '経路が見つかりませんでした');
+  }
+
+  function buildRoute() {
+    const doc = store.doc;
+    const g = graph();
+    const trackOpts = doc.tracks.map(t => ({ value: t.id, label: `${t.name}（${trackKind(t.kind).name}）` }));
+    if (!routeForm.fromId && doc.tracks.length) routeForm.fromId = doc.tracks[0].id;
+    const f = routeForm.formationId ? findFormation(routeForm.formationId) : null;
+    const trainLength = f ? formationLength(doc, f) : Math.max(0, routeForm.cars) * doc.settings.carLengthM;
+
+    const out = [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '入換経路の検証'),
+      h('div', { class: 'field' }, h('label', {}, '対象編成'),
+        selectInput('route.f', routeForm.formationId,
+          [{ value: '', label: '— 両数を直接指定 —' }, ...doc.formations.map(x => ({ value: x.id, label: `${x.name}（${x.cars}両）` }))],
+          v => {
+            routeForm.formationId = v;
+            const ff = v ? findFormation(v) : null;
+            if (ff && ff.trackId) routeForm.fromId = ff.trackId;
+            emit('route');
+          })),
+      routeForm.formationId ? null : h('div', { class: 'field' }, h('label', {}, '両数'),
+        (() => {
+          const i = h('input', { type: 'number', value: routeForm.cars, min: 1, max: 30 });
+          i.dataset.key = 'route.cars';
+          i.addEventListener('input', () => { routeForm.cars = Math.max(1, Number(i.value) || 1); emit('route'); });
+          return i;
+        })()),
+      h('div', { class: 'field' }, h('label', {}, '起点（現在の在線）'),
+        selectInput('route.from', routeForm.fromId, trackOpts, v => { routeForm.fromId = v; emit('route'); })),
+      h('div', { class: 'field' }, h('label', {}, '着点'),
+        selectInput('route.to', routeForm.toId,
+          [{ value: '', label: '— 選択してください —' }, { value: '__ext__', label: '◎ 場外へ出区（出入口）' }, ...trackOpts],
+          v => { routeForm.toId = v; emit('route'); })),
+      h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${trainLength.toFixed(0)} m`)),
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', {
+          class: 'btn sm primary',
+          onclick: () => { if (!routeForm.toId) { setMessage('着点を選択してください'); return; } runRouteSearch(); emit('route'); },
+        }, '経路を探索'),
+        h('button', {
+          class: 'btn sm', onclick: () => { routeResult = null; store.ui.route = null; emit('route'); },
+        }, 'ハイライト解除'),
+      ),
+    ));
+
+    if (routeResult) {
+      if (!routeResult.found) {
+        out.push(h('div', { class: 'card' },
+          h('h4', {}, '結果'),
+          h('div', { class: 'warnbox' }, `⚠ ${routeResult.reason || '経路が見つかりません'}`),
+          h('p', { class: 'note' }, '線路どうしが接続しているか（接続点の表示を確認）、転向角の上限（設定タブ）が厳しすぎないかを確認してください。'),
+        ));
+      } else {
+        const stepRows = routeResult.steps.map((st, i) => st.type === 'reverse'
+          ? h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: 'background:#ffd166' }),
+            h('span', { class: 'nm' }, `${st.name} で折返し`),
+            h('span', { class: 'num' }, `有効長 ${st.len.toFixed(0)}m`))
+          : h('div', { class: 'listrow', onclick: () => { store.ui.sel = { kind: 'track', id: st.trackId }; emit('select'); } },
+            h('span', { class: 'dot', style: `background:${trackKind((store.doc.tracks.find(t => t.id === st.trackId) || {}).kind).color}` }),
+            h('span', { class: 'nm' }, `${i + 1}. ${st.name}`),
+            h('span', { class: 'num' }, `${st.len.toFixed(0)}m`)));
+        out.push(h('div', { class: 'card' },
+          h('h4', {}, '経路', h('span', { class: 'tag' }, routeResult.toExt ? '場外へ出区' : '基地内入換')),
+          h('div', { class: 'kv' }, h('span', {}, '折返し回数'), h('b', {}, `${routeResult.reversals} 回`)),
+          h('div', { class: 'kv' }, h('span', {}, '走行距離'), h('b', {}, `${routeResult.distance.toFixed(0)} m`)),
+          h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${(routeResult.trainLength || 0).toFixed(0)} m`)),
+          h('hr', { class: 'sepline' }),
+          ...stepRows,
+          ...routeResult.warnings.map(w => h('div', { class: 'warnbox' }, `⚠ ${w}`)),
+          !routeResult.warnings.length ? h('p', { class: 'note' }, '✓ 支障となる留置編成・有効長の不足はありません') : null,
+        ));
+      }
+    }
+
+    // レイアウト検証（接続＋物理チェック）
+    const issues = [...validateLayout(doc, g), ...layoutChecks(doc, g, store.rev)];
+    store.ui.issueMarks = doc.settings.showIssues
+      ? issues.filter(i => Number.isFinite(i.x)).map(i => ({ x: i.x, y: i.y, level: i.level }))
+      : [];
+    const junctions = g.nodes.filter(n => new Set(n.edges.map(e => g.edgeById.get(e).trackId)).size > 1).length;
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, 'レイアウト検証', h('span', { class: 'tag' }, `${issues.length} 件`)),
+      h('div', { class: 'kv' }, h('span', {}, '接続点'), h('b', {}, `${junctions} 箇所`)),
+      h('div', { class: 'kv' }, h('span', {}, '線路区間'), h('b', {}, `${g.edges.length} 区間`)),
+      h('div', { class: 'kv' }, h('span', {}, '重大な不具合'), h('b', {}, `${issues.filter(i => i.level === 'error').length} 件`)),
+      issues.length
+        ? h('div', { style: 'margin-top:6px' }, ...issues.map(is => h('div', {
+          class: 'listrow',
+          onclick: () => {
+            if (Number.isFinite(is.x)) api.focusOn({ x: is.x, y: is.y });
+            if (is.trackId) store.ui.sel = { kind: 'track', id: is.trackId };
+            else if (is.objectId) store.ui.sel = { kind: 'object', id: is.objectId };
+            emit('select');
+          },
+        },
+          h('span', { class: 'dot', style: `background:${is.level === 'error' ? '#ff5f56' : '#ffb020'}` }),
+          h('span', { class: 'nm', style: 'white-space:normal' }, is.message),
+        )))
+        : h('p', { class: 'note' }, '✓ 未接続の端点・孤立した線路はありません'),
+    ));
+    return out;
+  }
+
   /* ---------------- 設定 ---------------- */
   function buildSettings() {
     const st = store.doc.settings;
@@ -485,6 +654,11 @@ export function initUI(api) {
         field('標準 1両長（m）', numberInput('set.carlen', st.carLengthM, v => setS('carLengthM', Math.max(1, v || 20)), { min: 1, step: .5 })),
         field('線路端部の余裕長（m）', numberInput('set.clear', st.clearanceM, v => setS('clearanceM', Math.max(0, v || 0)), { min: 0 })),
         h('p', { class: 'note' }, '留置可能両数 =（線路延長 − 余裕長）÷ 1両長 の切り捨て'),
+        field('線路中心間隔の最小値（m）', numberInput('set.sp', st.minTrackSpacingM, v => setS('minTrackSpacingM', Math.max(0, v || 0)), { min: 0, step: .1 })),
+        field('建築限界の片側幅（m）', numberInput('set.cl', st.clearanceHalfM, v => setS('clearanceHalfM', Math.max(0, v || 0)), { min: 0, step: .1 })),
+        h('p', { class: 'note' }, '線路どうしの離隔・構造物の支障の判定に使います（在来線の標準は中心間隔 4.0m 前後）。'),
+        field('接続とみなす転向角の上限（度）', numberInput('set.turn', st.maxTurnDeg, v => setS('maxTurnDeg', Math.max(10, Math.min(170, v || 90))), { min: 10, max: 170, step: 5 })),
+        h('p', { class: 'note' }, 'この角度を超える向きの変更は、経路探索で「折返し」が必要と判定されます。'),
       ),
       h('div', { class: 'card' },
         h('h4', {}, '表示'),
@@ -492,6 +666,8 @@ export function initUI(api) {
         checkbox('線路名・両数を表示', st.showLabels, v => setS('showLabels', v)),
         checkbox('留置編成を表示', st.showFormations, v => setS('showFormations', v)),
         checkbox('スケールバーを表示', st.showRuler, v => setS('showRuler', v)),
+        checkbox('線路の接続点を表示', st.showJunctions, v => setS('showJunctions', v)),
+        checkbox('検証結果を図上に表示', st.showIssues, v => setS('showIssues', v)),
         h('hr', { class: 'sepline' }),
         checkbox('グリッドにスナップ（Altで一時解除）', st.snap, v => setS('snap', v)),
         checkbox('線路を45°刻みで敷設（Shiftで一時解除）', st.angle45, v => setS('angle45', v)),
@@ -533,6 +709,7 @@ export function initUI(api) {
       withFocus(els.tracklist, buildTrackList);
       withFocus(els.inspector, buildInspector);
       withFocus(els.formations, buildFormations);
+      withFocus(els.route, buildRoute);
       withFocus(els.settings, buildSettings);
       buildStatus();
       document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));

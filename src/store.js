@@ -20,6 +20,11 @@ export function defaultSettings() {
     showRuler: true,
     snap: true,
     angle45: true,      // 線路敷設を45度刻みに拘束
+    showJunctions: true,// 線路どうしの接続点を表示
+    showIssues: true,   // 検証結果を図上に表示
+    maxTurnDeg: 90,     // 折返しなしで通過できる最大転向角[度]
+    minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
+    clearanceHalfM: 1.9,    // 建築限界の片側幅[m]
   };
 }
 
@@ -36,6 +41,7 @@ export function newDoc(name = '無題の車両基地') {
 
 export const store = {
   doc: newDoc(),
+  rev: 0,            // ドキュメントの版数（グラフ再構築の判定に使用）
   ui: {
     tool: 'select',          // select | track | place | pan
     trackKindId: 'stabling', // 次に敷設する線路の種別
@@ -63,6 +69,7 @@ export function snapshot() {
 }
 
 export function commit(reason = 'change') {
+  store.rev++;
   scheduleSave();
   emit(reason);
 }
@@ -90,9 +97,11 @@ export function canRedo() { return store._future.length > 0; }
 
 export function loadDoc(doc, { resetHistory = true } = {}) {
   store.doc = migrate(doc);
+  store.rev++;
   if (resetHistory) { store._history.length = 0; store._future.length = 0; }
   store.ui.sel = null;
   store.ui.draft = null;
+  store.ui.route = null;
   commit('load');
 }
 
@@ -105,11 +114,13 @@ export function migrate(doc) {
     capacityMode: t.capacityMode === 'manual' ? 'manual' : 'auto',
     capacity: Number.isFinite(t.capacity) ? t.capacity : 0,
     carLengthM: Number.isFinite(t.carLengthM) ? t.carLengthM : null,
+    ends: { a: (t.ends && t.ends.a) || 'open', b: (t.ends && t.ends.b) || 'open' },
     note: t.note || '',
   }));
   d.objects = (doc.objects || []).map(o => ({
     id: o.id || uid('b'), type: o.type || 'station_bldg',
     x: +o.x || 0, y: +o.y || 0, w: +o.w || 20, h: +o.h || 10, rot: +o.rot || 0,
+    frog: Number.isFinite(o.frog) ? o.frog : null,
     label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
   }));
   d.formations = (doc.formations || []).map(f => ({

@@ -22,6 +22,7 @@ export function addTrack(points, kindId = store.ui.trackKindId, name) {
     capacityMode: 'auto',
     capacity: 0,
     carLengthM: null,
+    ends: { a: 'open', b: 'open' },
     note: '',
   };
   store.doc.tracks.push(t);
@@ -50,6 +51,7 @@ export function addObject(type, x, y, rot = 0) {
   const o = {
     id: uid('b'), type,
     x, y, w: def.w, h: def.h, rot,
+    frog: def.frog ?? null,
     label: '', note: '', trackId: null,
   };
   if (def.onTrack) {

@@ -3,6 +3,7 @@
 import { trackKind, objectDef } from './catalog.js';
 import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength } from './store.js';
 import { pointAt, subPolyline, polylineLength } from './geom.js';
+import { getGraph, endType } from './topology.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
 const GAUGE = 1.435;      // 軌間[m]
@@ -37,11 +38,15 @@ export function render(ctx, W, H, doc, ui) {
 
   for (const o of below) drawObject(ctx, cam, doc, o, ui);
   for (const t of doc.tracks) drawTrack(ctx, cam, doc, t, ui);
+  if (ui.route && ui.route.path) drawRoute(ctx, cam, doc, ui.route);
+  for (const t of doc.tracks) drawTrackEnds(ctx, cam, doc, t);
+  if (doc.settings.showJunctions && ui.graphRev !== false) drawJunctions(ctx, cam, doc, ui);
   if (doc.settings.showFormations) for (const t of doc.tracks) drawFormations(ctx, cam, doc, t, ui);
   for (const o of above) drawObject(ctx, cam, doc, o, ui);
   if (doc.settings.showLabels) for (const t of doc.tracks) drawTrackLabel(ctx, cam, doc, t);
   for (const o of top) drawObject(ctx, cam, doc, o, ui);
 
+  if (ui.issueMarks && ui.issueMarks.length && doc.settings.showIssues) drawIssueMarks(ctx, cam, ui.issueMarks);
   drawSelection(ctx, cam, doc, ui);
   if (ui.draft) drawDraft(ctx, cam, doc, ui);
   if (ui.tool === 'place' && ui.placeType && ui.cursor) drawGhost(ctx, cam, ui);
@@ -399,8 +404,10 @@ function drawObject(ctx, cam, doc, o, ui) {
     }
   }
 
-  // ラベル
-  const showText = (shape === 'label') || (z > 0.35 && Math.min(w, h) > 12) || selected;
+  // ラベル（小さな記号類は既定名を表示しない）
+  const minM = Math.min(o.w, o.h);
+  const showText = (shape === 'label') || selected ||
+    (o.label ? Math.max(w, h) > 26 : (minM >= 10 && z > 0.35 && Math.min(w, h) > 12));
   if (showText && label) {
     let ang = 0;
     const rot = normRot(o.rot || 0);
@@ -431,15 +438,12 @@ function drawObject(ctx, cam, doc, o, ui) {
   ctx.restore();
 }
 
-function drawTurnout(ctx, w, h, color, variant) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = Math.max(1.5, h * .12);
-  ctx.lineCap = 'round';
+function turnoutPath(ctx, w, h, variant) {
   const x0 = -w / 2, x1 = w / 2;
   ctx.beginPath();
   ctx.moveTo(x0, 0); ctx.lineTo(x1, 0);                      // 基準線
-  if (variant === 'double') { ctx.moveTo(0, 0); ctx.lineTo(x1, -h / 2); ctx.moveTo(0, 0); ctx.lineTo(x1, h / 2); }
-  else if (variant === 'three') { ctx.moveTo(x0 / 2, 0); ctx.lineTo(x1, -h / 2); ctx.moveTo(x0 / 2, 0); ctx.lineTo(x1, h / 2); }
+  if (variant === 'double') { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, h / 2); }
+  else if (variant === 'three') { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, h / 2); }
   else if (variant === 'scissors') {
     ctx.moveTo(x0, -h / 2); ctx.lineTo(x1, h / 2);
     ctx.moveTo(x0, h / 2); ctx.lineTo(x1, -h / 2);
@@ -449,8 +453,26 @@ function drawTurnout(ctx, w, h, color, variant) {
     ctx.moveTo(x0, -h / 2); ctx.lineTo(x1, -h / 2);
     ctx.moveTo(x0, h / 2); ctx.lineTo(x1, h / 2);
     ctx.moveTo(x0 + w * .15, -h / 2); ctx.lineTo(x1 - w * .15, h / 2);
-  } else { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); } // 片開き
+  } else { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); }  // 片開き
+}
+
+function drawTurnout(ctx, w, h, color, variant) {
+  const lw = Math.max(1.8, Math.min(4, h * .35));
+  ctx.lineCap = 'round';
+  // 背景の縁取りで軌道上でも見えるように
+  ctx.strokeStyle = 'rgba(8,11,16,.75)';
+  ctx.lineWidth = lw + 2.5;
+  turnoutPath(ctx, w, h, variant);
   ctx.stroke();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  turnoutPath(ctx, w, h, variant);
+  ctx.stroke();
+  // トングレール位置の目印
+  if (variant === 'single' || variant === 'double' || variant === 'three') {
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(-w / 2 + w * .15, 0, Math.max(1.6, lw * .8), 0, Math.PI * 2); ctx.fill();
+  }
 }
 
 function drawSignal(ctx, z, color, lamps) {
@@ -466,6 +488,131 @@ function drawSignal(ctx, z, color, lamps) {
     ctx.fillStyle = cols[i % cols.length];
     ctx.beginPath(); ctx.arc(0, -bh + 2 + r + i * r * 2, r * .8, 0, Math.PI * 2); ctx.fill();
   }
+}
+
+/* ---------------- ends / junctions / route ---------------- */
+
+/** 端点の記号（車止め・場外接続・開放） */
+function drawTrackEnds(ctx, cam, doc, t) {
+  if (!t.points || t.points.length < 2) return;
+  const z = cam.zoom;
+  const total = polylineLength(t.points);
+  const ends = [
+    { p: t.points[0], ang: pointAt(t.points, 0).angle + Math.PI, type: endType(t, 'a') },
+    { p: t.points[t.points.length - 1], ang: pointAt(t.points, total).angle, type: endType(t, 'b') },
+  ];
+  for (const e of ends) {
+    const s = toScreen(cam, e.p.x, e.p.y);
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(e.ang);
+    if (e.type === 'buffer') {
+      const bar = Math.max(5, 2.6 * z);          // 車止め: 直角の梁＋斜材
+      ctx.strokeStyle = '#ff7a6b';
+      ctx.lineWidth = Math.max(2, 0.6 * z);
+      ctx.beginPath(); ctx.moveTo(0, -bar); ctx.lineTo(0, bar); ctx.stroke();
+      ctx.lineWidth = Math.max(1, 0.35 * z);
+      ctx.beginPath();
+      ctx.moveTo(-bar * 0.9, -bar * .7); ctx.lineTo(0, 0); ctx.lineTo(-bar * 0.9, bar * .7);
+      ctx.stroke();
+    } else if (e.type === 'boundary') {
+      const a = Math.max(6, 3 * z);              // 場外接続: 外向きの矢印
+      ctx.strokeStyle = '#8fe06a';
+      ctx.lineWidth = Math.max(1.5, 0.4 * z);
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(a * 1.6, 0); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(a * 1.6, 0); ctx.lineTo(a * 0.9, -a * .45); ctx.lineTo(a * 0.9, a * .45); ctx.closePath();
+      ctx.fillStyle = '#8fe06a'; ctx.fill();
+      if (z > 0.7) {
+        ctx.rotate(Math.abs(normRot(e.ang)) > Math.PI / 2 ? Math.PI : 0);
+        ctx.font = `10px ${FONT}`; ctx.fillStyle = '#8fe06a';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.fillText('場外', 0, -a * .7);
+      }
+    } else if (z > 0.45) {
+      ctx.strokeStyle = '#6c7788';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(0, 0, Math.max(2.5, 1 * z), 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/** 線路どうしの接続点 */
+function drawJunctions(ctx, cam, doc, ui) {
+  if (cam.zoom < 0.3) return;
+  let g;
+  try { g = getGraph(doc, ui.graphRev ?? 0); } catch { return; }
+  ctx.save();
+  for (const n of g.nodes) {
+    const tracks = new Set(n.edges.map(eid => g.edgeById.get(eid).trackId));
+    if (tracks.size < 2) continue;
+    const s = toScreen(cam, n.x, n.y);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, Math.max(2.5, 1.1 * cam.zoom), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(14,18,26,.9)';
+    ctx.fill();
+    ctx.strokeStyle = '#7fd1ff';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** 検証した入換経路のハイライト */
+function drawRoute(ctx, cam, doc, route) {
+  const byId = new Map(doc.tracks.map(t => [t.id, t]));
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const seg of route.path) {
+    const t = byId.get(seg.trackId);
+    if (!t) continue;
+    const from = Math.min(seg.fromAt, seg.toAt), to = Math.max(seg.fromAt, seg.toAt);
+    const pts = subPolyline(t.points, from, to);
+    if (pts.length < 2) continue;
+    const sp = pts.map(p => toScreen(cam, p.x, p.y));
+    ctx.strokeStyle = 'rgba(127,209,255,.28)';
+    ctx.lineWidth = Math.max(8, 9 * cam.zoom);
+    strokePts(ctx, sp);
+    ctx.strokeStyle = '#7fd1ff';
+    ctx.lineWidth = Math.max(2, 1.2 * cam.zoom);
+    ctx.setLineDash([Math.max(8, 6 * cam.zoom), Math.max(5, 4 * cam.zoom)]);
+    strokePts(ctx, sp);
+    ctx.setLineDash([]);
+  }
+  // 折返し地点
+  for (const r of route.reversePoints || []) {
+    const t = byId.get(r.trackId);
+    if (!t) continue;
+    const p = pointAt(t.points, r.at);
+    const s = toScreen(cam, p.x, p.y);
+    ctx.beginPath(); ctx.arc(s.x, s.y, Math.max(5, 2 * cam.zoom), 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd166'; ctx.fill();
+    ctx.strokeStyle = '#0d1015'; ctx.lineWidth = 1.5; ctx.stroke();
+    if (cam.zoom > 0.5) {
+      ctx.font = `600 11px ${FONT}`; ctx.fillStyle = '#ffd166';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText('折返し', s.x, s.y - 8);
+    }
+  }
+  ctx.restore();
+}
+
+/** 検証で見つかった不具合の位置 */
+function drawIssueMarks(ctx, cam, marks) {
+  ctx.save();
+  for (const m of marks) {
+    const s = toScreen(cam, m.x, m.y);
+    const r = Math.max(7, 4 * cam.zoom);
+    const col = m.level === 'error' ? '#ff5f56' : '#ffb020';
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(s.x, s.y, r * .35, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill();
+  }
+  ctx.restore();
 }
 
 /* ---------------- overlays ---------------- */
