@@ -109,6 +109,22 @@ export function buildGraph(doc, tol = JOIN_TOL) {
     }
   }
 
+  // 4) 分岐器オブジェクトを接続点に紐づける
+  for (const o of (doc.objects || [])) {
+    const def = objectDef(o.type);
+    if (def.shape !== 'turnout') continue;
+    let best = null;
+    for (const n of nodes) {
+      if (!n.edges.length) continue;
+      const d = dist(n.x, n.y, o.x, o.y);
+      if (d <= tol * 4 && (!best || d < best.d)) best = { n, d };
+    }
+    if (best) {
+      best.n.turnout = o.id;
+      best.n.turnoutFixed = def.variant === 'diamond';   // 平面交差は転換しない
+    }
+  }
+
   const edgeById = new Map(edges.map(e => [e.id, e]));
   const g = { nodes, edges, nodeById, edgeById, trackById, tol };
 
@@ -152,6 +168,7 @@ export function findRoute(doc, g, opts) {
     fromTrackId, toTrackId, trainLength = 0,
     maxTurnDeg = doc.settings.maxTurnDeg ?? DEFAULT_MAX_TURN,
     enforceTailFit = true,
+    respectPositions = false,      // 現在の分岐器の開通方向に従う
   } = opts;
   const from = g.trackById.get(fromTrackId);
   if (!from) return { found: false, reason: '起点の線路が見つかりません' };
@@ -203,6 +220,7 @@ export function findRoute(doc, g, opts) {
       const out = g.headingOut(e, cur.nodeId);
       const viaTable = !!node.turntable;                          // 転車台はどの向きへも転回できる
       if (!viaTable && angleDiff(arrive, out) > maxTurn) continue;// 急すぎる転向は折返しが必要
+      if (respectPositions && !passable(doc, g, cur.nodeId, cur.edgeId, eid)) continue;
       const nid = g.other(e, cur.nodeId);
       const turns = cur.turns + (viaTable && angleDiff(arrive, out) > 1e-3 ? 1 : 0);
       const st = {
@@ -244,6 +262,31 @@ export function findRoute(doc, g, opts) {
   // 経路の復元
   const chain = [];
   for (let s = goal; s; s = s.prev) chain.unshift(s);
+  // 通過する接続点で必要になる開通方向（折返しごとに別の進路として扱う）
+  const turnoutAt = (nodeId, edgeA, edgeB) => {
+    const node = g.nodeById.get(nodeId);
+    if (!node || !node.turnout || node.turnoutFixed) return null;
+    const routes = nodeRoutes(g, nodeId, maxTurnDeg);
+    const idx = routes.findIndex(r =>
+      (r.a === edgeA && r.b === edgeB) || (r.b === edgeA && r.a === edgeB));
+    if (idx < 0) return null;
+    return { objectId: node.turnout, nodeId, index: idx, name: routes[idx].name, label: routes[idx].label, x: node.x, y: node.y };
+  };
+  const legs = [];
+  const newLeg = (trackId, dir, name) => ({ turnouts: [], path: [], originTrackId: trackId, originDir: dir, fromName: name, toName: name, conflict: false });
+  let leg = null;
+  {
+    const s0 = chain[0];
+    const e0 = s0 ? g.edgeById.get(s0.edgeId) : null;
+    const dir0 = e0 ? (s0.nodeId === e0.b ? 'ab' : 'ba') : 'ab';
+    leg = newLeg(fromTrackId, dir0, from.name);
+  }
+  const pushTurnout = (req) => {
+    if (!req) return;
+    const dup = leg.turnouts.find(x => x.objectId === req.objectId);
+    if (dup) { if (dup.index !== req.index) leg.conflict = true; return; }
+    leg.turnouts.push(req);
+  };
   const path = [];   // {trackId, fromAt, toAt}
   const steps = [];  // 表示用
   const reversePoints = [];
@@ -255,7 +298,19 @@ export function findRoute(doc, g, opts) {
     const t = g.trackById.get(e.trackId);
     if (s.kind === 'start') continue;
     const forward = s.nodeId === e.b;
-    path.push({ trackId: e.trackId, fromAt: forward ? e.fromAt : e.toAt, toAt: forward ? e.toAt : e.fromAt });
+    const entry = { trackId: e.trackId, fromAt: forward ? e.fromAt : e.toAt, toAt: forward ? e.toAt : e.fromAt };
+    path.push(entry);
+    if (s.kind === 'reverse') {
+      // 折返しでいったん進路を区切り、引上げた線路を起点に次の進路が始まる
+      legs.push(leg);
+      leg = newLeg(e.trackId, forward ? 'ab' : 'ba', t.name);
+      leg.afterReversal = true;
+    } else {
+      const prev = chain[i - 1];
+      if (prev && prev.edgeId !== s.edgeId) pushTurnout(turnoutAt(prev.nodeId, prev.edgeId, s.edgeId));
+    }
+    leg.path.push(entry);
+    leg.toName = t.name;
     if (s.kind === 'reverse') {
       reversePoints.push({ trackId: e.trackId, at: forward ? e.fromAt : e.toAt });
       steps.push({ type: 'reverse', trackId: e.trackId, name: t.name, len: e.len, short: s.shortTail });
@@ -272,6 +327,9 @@ export function findRoute(doc, g, opts) {
       else steps.push({ type: 'run', trackId: e.trackId, name: t.name, len: e.len });
     }
   }
+
+  legs.push(leg);
+  const required = legs.length ? legs[0].turnouts : [];
 
   // 支障・容量の確認
   const warnings = [];
@@ -300,7 +358,7 @@ export function findRoute(doc, g, opts) {
 
   return {
     found: true,
-    steps, path, warnings, reversePoints,
+    steps, path, warnings, reversePoints, required, legs,
     distance: goal.dist,
     reversals: goal.rev,
     turntables: goal.turns || 0,
@@ -367,6 +425,59 @@ export function validateLayout(doc, g) {
     if (u.over) issues.push({ level: 'error', trackId: t.id, message: `「${t.name}」は留置両数が有効長を超えています（${u.cars}/${u.capacity}両）` });
   }
   return issues;
+}
+
+/* ---------------- 分岐器の開通方向 ---------------- */
+
+/**
+ * 接続点で成立しうる進路（開通パターン）の一覧。
+ * 直進に近いものから並ぶので、index 0 が定位、以降が反位となる。
+ */
+export function nodeRoutes(g, nodeId, maxTurnDeg) {
+  const node = g.nodeById.get(nodeId);
+  if (!node || node.edges.length < 2) return [];
+  const maxTurn = (maxTurnDeg ?? DEFAULT_MAX_TURN) * Math.PI / 180;
+  const list = [];
+  const eids = node.edges;
+  for (let i = 0; i < eids.length; i++) {
+    for (let j = i + 1; j < eids.length; j++) {
+      const e1 = g.edgeById.get(eids[i]), e2 = g.edgeById.get(eids[j]);
+      const turn = angleDiff(g.headingOut(e1, nodeId) + Math.PI, g.headingOut(e2, nodeId));
+      if (turn > maxTurn) continue;
+      const t1 = g.trackById.get(e1.trackId), t2 = g.trackById.get(e2.trackId);
+      list.push({
+        a: e1.id, b: e2.id, turn,
+        label: `${t1 ? t1.name : '?'} ↔ ${t2 ? t2.name : '?'}`,
+      });
+    }
+  }
+  list.sort((x, y) => x.turn - y.turn);
+  return list.map((r, i) => ({ ...r, index: i, name: i === 0 ? '定位' : (list.length === 2 ? '反位' : `反位${i}`) }));
+}
+
+/** その接続点でいま開通している進路（分岐器がなければ null） */
+export function currentNodeRoute(doc, g, nodeId) {
+  const node = g.nodeById.get(nodeId);
+  if (!node || !node.turnout) return null;
+  const o = (doc.objects || []).find(x => x.id === node.turnout);
+  if (!o) return null;
+  const routes = nodeRoutes(g, nodeId, doc.settings.maxTurnDeg);
+  if (!routes.length) return null;
+  const idx = Math.max(0, Math.min(routes.length - 1, o.position || 0));
+  return { object: o, routes, index: idx, route: routes[idx], fixed: !!node.turnoutFixed };
+}
+
+/** 2つの区間を結ぶ進路が、その接続点で通行できるか */
+export function passable(doc, g, nodeId, edgeIdA, edgeIdB) {
+  const node = g.nodeById.get(nodeId);
+  if (!node) return false;
+  if (node.turntable) return true;
+  if (!node.turnout) return true;                 // 分岐器が置かれていなければ角度判定のみ
+  if (node.turnoutFixed) return true;             // 平面交差は常時開通
+  const cur = currentNodeRoute(doc, g, nodeId);
+  if (!cur || !cur.route) return true;
+  const { a, b } = cur.route;
+  return (a === edgeIdA && b === edgeIdB) || (a === edgeIdB && b === edgeIdA);
 }
 
 /* ---------------- 分岐器の自動生成 ---------------- */

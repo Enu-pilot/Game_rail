@@ -3,6 +3,8 @@
 import { store, snapshot, commit, uid, select, setMessage, trackCapacity, trackLength } from './store.js';
 import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT, vehicleDef } from './catalog.js';
 import { distToPolyline, pointAt } from './geom.js';
+import { routeFromLeg, findConflicts, routeAligned } from './interlocking.js';
+import { getGraph } from './topology.js';
 
 /** 同一種別の連番から線路名を作る */
 export function suggestTrackName(kindId) {
@@ -115,6 +117,105 @@ export function addObject(type, x, y, rot = 0) {
   commit('add-object');
   setMessage(`${def.name} を配置しました`);
   return o;
+}
+
+/* ---------------- 進路（連動） ---------------- */
+
+/** 分岐器の開通方向を変更する */
+export function setTurnoutPosition(objectId, index) {
+  const o = store.doc.objects.find(x => x.id === objectId);
+  if (!o) return;
+  snapshot();
+  o.position = Math.max(0, index | 0);
+  commit('turnout-position');
+}
+
+/** 経路が必要とする開通方向へ一括転換する */
+export function alignTurnouts(required = []) {
+  if (!required.length) { setMessage('転換が必要な分岐器はありません'); return 0; }
+  snapshot();
+  let n = 0;
+  for (const r of required) {
+    const o = store.doc.objects.find(x => x.id === r.objectId);
+    if (!o) continue;
+    if ((o.position || 0) !== r.index) { o.position = r.index; n++; }
+  }
+  commit('align-turnouts');
+  setMessage(n ? `${n} 個の分岐器を転換しました` : 'すでに開通しています');
+  return n;
+}
+
+/**
+ * 探索結果から進路を構成する。
+ * 折返しで区切られた区間ごとに1本の進路を作り、最初の1本だけを構成状態にする
+ * （同じ分岐器を途中で転換するため、同時には構成できない）。
+ */
+export function constructRoute(result, opts = {}) {
+  const doc = store.doc;
+  const legs = result.legs && result.legs.length ? result.legs : [];
+  if (!legs.length) return { ok: false };
+  snapshot();
+  const created = [];
+  legs.forEach((leg, i) => {
+    const isLast = i === legs.length - 1;
+    const r = routeFromLeg(doc, leg, {
+      name: legs.length > 1 ? `${opts.baseName || '入換'}${i + 1}: ${leg.fromName} → ${isLast && opts.toExt ? '場外' : leg.toName}` : undefined,
+      toExt: isLast && opts.toExt,
+    });
+    r.set = false;
+    created.push(r);
+    doc.routes.push(r);
+  });
+  // 先頭の進路だけを構成（競合しなければ）
+  const first = created[0];
+  const conflicts = findConflicts(doc, first);
+  if (!conflicts.length) {
+    first.set = true;
+    for (const t of first.turnouts) {
+      const o = doc.objects.find(x => x.id === t.objectId);
+      if (o) o.position = t.index;
+    }
+  }
+  commit('construct-route');
+  setMessage(conflicts.length
+    ? `進路を ${created.length} 本登録しましたが、競合のため構成できません（${conflicts.map(c => c.route.name).join('・')}）`
+    : `進路を ${created.length} 本登録し、「${first.name}」を構成しました`);
+  return { ok: true, routes: created, conflicts };
+}
+
+/** 進路の構成／解除 */
+export function setRouteState(routeId, set) {
+  const doc = store.doc;
+  const r = (doc.routes || []).find(x => x.id === routeId);
+  if (!r) return { ok: false };
+  if (set) {
+    const conflicts = findConflicts(doc, { ...r, set: true });
+    if (conflicts.length) {
+      setMessage(`進路が競合しています: ${conflicts.map(c => c.route.name).join('・')}`);
+      return { ok: false, conflicts };
+    }
+  }
+  snapshot();
+  r.set = !!set;
+  if (set) {
+    for (const t of r.turnouts) {
+      const o = doc.objects.find(x => x.id === t.objectId);
+      if (o) o.position = t.index;
+    }
+  }
+  commit('route-state');
+  setMessage(set ? `進路「${r.name}」を構成しました` : `進路「${r.name}」を解除しました`);
+  return { ok: true };
+}
+
+export function deleteRoute(routeId) {
+  snapshot();
+  store.doc.routes = (store.doc.routes || []).filter(r => r.id !== routeId);
+  commit('delete-route');
+}
+
+export function isRouteAligned(route) {
+  return routeAligned(store.doc, getGraph(store.doc, store.rev), route);
 }
 
 export function addFormation(partial = {}) {

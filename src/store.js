@@ -22,6 +22,7 @@ export function defaultSettings() {
     angle45: true,      // 線路敷設を45度刻みに拘束
     showJunctions: true,// 線路どうしの接続点を表示
     showIssues: true,   // 検証結果を図上に表示
+    showRoutes: true,   // 構成済みの進路を図上に表示
     maxTurnDeg: 90,     // 折返しなしで通過できる最大転向角[度]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
     clearanceHalfM: 1.9,    // 建築限界の片側幅[m]
@@ -36,6 +37,7 @@ export function newDoc(name = '無題の車両基地') {
     tracks: [],
     objects: [],
     formations: [],
+    routes: [],        // 構成済みの進路（連動）
   };
 }
 
@@ -129,6 +131,8 @@ export function migrate(doc) {
       h: isTurnout ? def.h : (+o.h || 10),
       rot: +o.rot || 0,
       mirror: !!o.mirror,
+      position: Number.isFinite(o.position) ? o.position : 0,   // 分岐器の開通方向（0=定位）
+      dir: o.dir === 'ba' ? 'ba' : 'ab',                        // 信号機が防護する進行方向
       xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
       label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
     };
@@ -142,6 +146,19 @@ export function migrate(doc) {
       ? { type: f.loco.type, count: Math.max(1, Math.min(3, +f.loco.count || 1)) }
       : null,
     color: f.color || '#4f8cff', trackId: f.trackId || null, note: f.note || '',
+  }));
+  d.routes = (doc.routes || []).map(r => ({
+    id: r.id || uid('r'),
+    name: r.name || '進路',
+    fromTrackId: r.fromTrackId || null,
+    toTrackId: r.toTrackId || null,
+    toExt: !!r.toExt,
+    path: (r.path || []).map(p => ({ trackId: p.trackId, fromAt: +p.fromAt || 0, toAt: +p.toAt || 0 })),
+    turnouts: (r.turnouts || []).map(t => ({ objectId: t.objectId, index: +t.index || 0, name: t.name || '' })),
+    signalId: r.signalId || null,
+    reversals: +r.reversals || 0,
+    distance: +r.distance || 0,
+    set: r.set !== false,
   }));
   d.version = DOC_VERSION;
   return d;

@@ -3,7 +3,8 @@
 import { trackKind, objectDef, vehicleDef } from './catalog.js';
 import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength, formationVehicles, formationCars } from './store.js';
 import { pointAt, subPolyline, polylineLength } from './geom.js';
-import { getGraph, endType } from './topology.js';
+import { getGraph, endType, currentNodeRoute } from './topology.js';
+import { signalAspects, ASPECT_COLORS } from './interlocking.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
 const GAUGE = 1.435;      // 軌間[m]
@@ -37,6 +38,12 @@ export function render(ctx, W, H, doc, ui) {
 
   if (doc.settings.showGrid) drawGrid(ctx, W, H, cam, doc.settings.gridM);
 
+  try {
+    const g = getGraph(doc, ui.graphRev ?? 0);
+    ui._aspects = signalAspects(doc, g);
+    ui._graph = g;
+  } catch { ui._aspects = new Map(); ui._graph = null; }
+
   const objs = [...doc.objects];
   const below = objs.filter(o => layerOf(o) === 0);
   const above = objs.filter(o => layerOf(o) === 2);
@@ -44,11 +51,13 @@ export function render(ctx, W, H, doc, ui) {
 
   for (const o of below) drawObject(ctx, cam, doc, o, ui);
   for (const t of doc.tracks) drawTrack(ctx, cam, doc, t, ui);
+  if (doc.settings.showRoutes !== false) drawSetRoutes(ctx, cam, doc);
   if (ui.route && ui.route.path) drawRoute(ctx, cam, doc, ui.route);
   for (const t of doc.tracks) drawTrackEnds(ctx, cam, doc, t);
   if (doc.settings.showJunctions && ui.graphRev !== false) drawJunctions(ctx, cam, doc, ui);
   if (doc.settings.showFormations) for (const t of doc.tracks) drawFormations(ctx, cam, doc, t, ui);
   for (const o of above) drawObject(ctx, cam, doc, o, ui);
+  if (ui._graph) drawTurnoutPositions(ctx, cam, doc, ui._graph);
   if (doc.settings.showLabels) for (const t of doc.tracks) drawTrackLabel(ctx, cam, doc, t);
   for (const o of top) drawObject(ctx, cam, doc, o, ui);
 
@@ -542,11 +551,12 @@ function drawObject(ctx, cam, doc, o, ui) {
       break;
     }
     case 'signal': {
-      drawSignal(ctx, z, color, def.lamps || 3);
+      drawSignal(ctx, z, def, (ui._aspects && ui._aspects.get(o.id)) || 'stop', o);
       break;
     }
     case 'marker': {
-      ctx.fillStyle = color; ctx.strokeStyle = '#0d1015'; ctx.lineWidth = 1;
+      const asp = (ui._aspects && ui._aspects.get(o.id)) || 'stop';
+      ctx.fillStyle = ASPECT_COLORS[asp] || color; ctx.strokeStyle = '#0d1015'; ctx.lineWidth = 1;
       const r = Math.max(4, 2.5 * z);
       ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r, 0); ctx.lineTo(0, r); ctx.lineTo(-r, 0); ctx.closePath();
       ctx.fill(); ctx.stroke();
@@ -646,19 +656,40 @@ function drawTurnout(ctx, w, h, color, variant, xang) {
   }
 }
 
-function drawSignal(ctx, z, color, lamps) {
-  const r = Math.max(2.2, 1.1 * z);
+const ASPECT_LAMP = { stop: '#ff4b41', caution: '#ffc233', proceed: '#3ddc84', shunt: '#7fd1ff' };
+
+function drawSignal(ctx, z, def, aspect, o) {
+  const lamps = def.lamps || 3;
+  const shunt = !!def.shunt;
+  const r = Math.max(2.4, 1.1 * z);
   const poleH = Math.max(10, 5 * z);
   ctx.strokeStyle = '#9aa4bb'; ctx.lineWidth = Math.max(1, .35 * z);
   ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, poleH); ctx.stroke();
-  ctx.fillStyle = '#12161f'; ctx.strokeStyle = color; ctx.lineWidth = 1;
   const bh = r * 2 * lamps + 3;
+  ctx.fillStyle = '#10141c'; ctx.strokeStyle = '#3a4357'; ctx.lineWidth = 1;
   roundRect(ctx, -r - 1.5, -bh, r * 2 + 3, bh, 2); ctx.fill(); ctx.stroke();
-  const cols = ['#ff5f56', '#ffd166', '#8fe06a', '#7fd1ff'];
+  // 上から 停止/注意/進行（入換信号機は 停止/入換進行）
+  const order = shunt ? ['stop', 'shunt'] : (lamps >= 4 ? ['stop', 'caution', 'proceed', 'shunt'] : ['stop', 'caution', 'proceed']);
   for (let i = 0; i < lamps; i++) {
-    ctx.fillStyle = cols[i % cols.length];
-    ctx.beginPath(); ctx.arc(0, -bh + 2 + r + i * r * 2, r * .8, 0, Math.PI * 2); ctx.fill();
+    const kind = order[i % order.length];
+    const lit = kind === aspect;
+    const cy = -bh + 2 + r + i * r * 2;
+    ctx.fillStyle = lit ? ASPECT_LAMP[kind] : 'rgba(255,255,255,.12)';
+    ctx.beginPath(); ctx.arc(0, cy, r * .78, 0, Math.PI * 2); ctx.fill();
+    if (lit) {
+      ctx.strokeStyle = ASPECT_LAMP[kind];
+      ctx.globalAlpha = .45; ctx.lineWidth = Math.max(1.5, r * .6);
+      ctx.beginPath(); ctx.arc(0, cy, r * 1.15, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
+  // 防護する進行方向
+  const sgn = (o && o.dir === 'ba') ? -1 : 1;
+  const a = Math.max(4, 2 * z);
+  ctx.fillStyle = 'rgba(214,222,238,.8)';
+  ctx.beginPath();
+  ctx.moveTo(sgn * a * 1.5, poleH); ctx.lineTo(sgn * a * .4, poleH - a * .45); ctx.lineTo(sgn * a * .4, poleH + a * .45);
+  ctx.closePath(); ctx.fill();
 }
 
 /* ---------------- ends / junctions / route ---------------- */
@@ -790,6 +821,53 @@ function drawHoverJunction(ctx, cam, hj) {
     ctx.moveTo(s.x - r * .45, s.y); ctx.lineTo(s.x + r * .45, s.y);
     ctx.moveTo(s.x, s.y - r * .45); ctx.lineTo(s.x, s.y + r * .45);
     ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** 分岐器の開通方向（いま開通している側を明るく描く） */
+function drawTurnoutPositions(ctx, cam, doc, g) {
+  const L = turnoutSymbolSize(cam.zoom).w * 0.75;
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const n of g.nodes) {
+    if (!n.turnout) continue;
+    const cur = currentNodeRoute(doc, g, n.id);
+    if (!cur || !cur.route) continue;
+    const s = toScreen(cam, n.x, n.y);
+    const legs = [cur.route.a, cur.route.b].map(eid => g.headingOut(g.edgeById.get(eid), n.id));
+    const pts = [
+      { x: s.x + Math.cos(legs[0]) * L, y: s.y + Math.sin(legs[0]) * L },
+      { x: s.x, y: s.y },
+      { x: s.x + Math.cos(legs[1]) * L, y: s.y + Math.sin(legs[1]) * L },
+    ];
+    ctx.strokeStyle = 'rgba(8,11,16,.85)';
+    ctx.lineWidth = 5;
+    strokePts(ctx, pts);
+    ctx.strokeStyle = cur.fixed ? '#ffc04d' : (cur.index === 0 ? '#8fe06a' : '#ffd166');
+    ctx.lineWidth = 2.4;
+    strokePts(ctx, pts);
+  }
+  ctx.restore();
+}
+
+/** 構成済みの進路 */
+function drawSetRoutes(ctx, cam, doc) {
+  const byId = new Map(doc.tracks.map(t => [t.id, t]));
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const r of doc.routes || []) {
+    if (!r.set) continue;
+    for (const seg of r.path) {
+      const t = byId.get(seg.trackId);
+      if (!t) continue;
+      const from = Math.min(seg.fromAt, seg.toAt), to = Math.max(seg.fromAt, seg.toAt);
+      const pts = subPolyline(t.points, from, to);
+      if (pts.length < 2) continue;
+      ctx.strokeStyle = 'rgba(61,220,132,.22)';
+      ctx.lineWidth = Math.max(6, 7 * cam.zoom);
+      strokePts(ctx, screenPts(cam, pts));
+    }
   }
   ctx.restore();
 }

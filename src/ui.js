@@ -9,11 +9,13 @@ import {
   TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS,
   VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
 } from './catalog.js';
-import { getGraph, findRoute, validateLayout, END_TYPES, endType } from './topology.js';
+import { getGraph, findRoute, validateLayout, END_TYPES, endType, nodeRoutes, currentNodeRoute } from './topology.js';
+import { signalAspects, ASPECT_NAMES, ASPECT_COLORS, routeStatus, isSignal } from './interlocking.js';
 import { layoutChecks } from './checks.js';
 import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
-  updateEntity, reverseTrack,
+  updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
+  constructRoute, setRouteState, deleteRoute,
 } from './actions.js';
 
 /* ---------------- DOM ヘルパ ---------------- */
@@ -404,7 +406,7 @@ export function initUI(api) {
         Math.round((o.xang ?? Math.PI / 4) * 180 / Math.PI),
         v => updateEntity('object', o.id, { xang: Math.max(5, Math.min(90, v || 45)) * Math.PI / 180 }, { history: false }),
         { min: 5, max: 90, step: 5 })) : null,
-      isTurnout ? h('p', { class: 'note' }, '分岐器は線路の結節点を示す記号です。実寸は持たず、拡大率によらず同じ大きさで表示されます（位置・向き・開く側のみ編集できます）。') : null,
+      isTurnout ? h('p', { class: 'note' }, '分岐器は線路の結節点を示す記号です。実寸は持たず、拡大率によらず同じ大きさで表示されます。') : null,
       field('回転（度）', numberInput(`obj.${o.id}.rot`, Math.round((o.rot || 0) * 180 / Math.PI),
         v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
       h('div', { class: 'btn-row' },
@@ -418,6 +420,54 @@ export function initUI(api) {
       ),
       def.onTrack ? h('p', { class: 'note' }, track ? `紐づく線路: ${track.name}` : '線路に紐づいていません（線路の近くへドラッグするとスナップします）') : null,
     ));
+    // 分岐器の開通方向
+    if (isTurnout) {
+      const g = graph();
+      const node = g.nodes.find(n => n.turnout === o.id);
+      const routes = node ? nodeRoutes(g, node.id, store.doc.settings.maxTurnDeg) : [];
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '開通方向', h('span', { class: 'tag' }, node ? `${node.edges.length} 方向` : '接続点に未接続')),
+        !node
+          ? h('p', { class: 'note' }, '線路の接続点から離れているため、開通方向を持ちません。接続点の上へ移動してください。')
+          : def.variant === 'diamond'
+            ? h('p', { class: 'note' }, '平面交差は転換しません（両方向とも常時開通）。')
+            : h('div', {},
+              field('いま開通している進路', selectInput(`obj.${o.id}.pos`, String(o.position || 0),
+                routes.map(r => ({ value: String(r.index), label: `${r.name}：${r.label}` })),
+                v => setTurnoutPosition(o.id, Number(v)))),
+              h('div', { class: 'btn-row' }, ...routes.map(r => h('button', {
+                class: 'btn sm' + ((o.position || 0) === r.index ? ' primary' : ''),
+                onclick: () => setTurnoutPosition(o.id, r.index),
+              }, r.name))),
+              h('p', { class: 'note' }, '図上では開通している側が明るく表示されます（定位＝緑、反位＝黄）。'),
+            ),
+      ));
+    }
+
+    // 信号機
+    if (isSignal(o)) {
+      const g = graph();
+      const aspects = signalAspects(store.doc, g);
+      const asp = aspects.get(o.id) || 'stop';
+      const tr = o.trackId ? findTrack(o.trackId) : null;
+      const usedBy = (store.doc.routes || []).filter(r => r.signalId === o.id);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '信号現示',
+          h('span', { class: 'tag', style: `color:${ASPECT_COLORS[asp]}` }, ASPECT_NAMES[asp] || '停止')),
+        h('div', { class: 'kv' }, h('span', {}, '防護する線路'), h('b', {}, tr ? tr.name : '未設定')),
+        field('進行方向', selectInput(`obj.${o.id}.dir`, o.dir || 'ab',
+          [{ value: 'ab', label: 'A端 → B端 方向' }, { value: 'ba', label: 'B端 → A端 方向' }],
+          v => updateEntity('object', o.id, { dir: v }, { history: false }))),
+        h('p', { class: 'note' }, '進路を構成すると、その進路の入口になっている信号機が進行を現示します。'),
+        usedBy.length
+          ? h('div', {}, ...usedBy.map(r => h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: `background:${r.set ? '#3ddc84' : '#5d6577'}` }),
+            h('span', { class: 'nm' }, r.name),
+            h('span', { class: 'num' }, r.set ? '構成中' : '解除'))))
+          : h('p', { class: 'note' }, 'この信号機を入口とする進路はまだありません。'),
+      ));
+    }
+
     out.push(h('div', { class: 'card' },
       h('h4', {}, 'メモ'),
       bindEdit(h('textarea', { value: o.note || '', placeholder: '能力、設置年、補足など' }), `obj.${o.id}.note`,
@@ -572,7 +622,7 @@ export function initUI(api) {
   }
 
   /* ---------------- 入換経路 ---------------- */
-  const routeForm = { fromId: '', toId: '', formationId: '', cars: 10 };
+  const routeForm = { fromId: '', toId: '', formationId: '', cars: 10, respect: false };
   let routeResult = null;
 
   function runRouteSearch() {
@@ -580,7 +630,10 @@ export function initUI(api) {
     const g = graph();
     const f = routeForm.formationId ? findFormation(routeForm.formationId) : null;
     const trainLength = f ? formationLength(doc, f) : Math.max(0, routeForm.cars) * doc.settings.carLengthM;
-    const base = { fromTrackId: routeForm.fromId, toTrackId: routeForm.toId, trainLength };
+    const base = {
+      fromTrackId: routeForm.fromId, toTrackId: routeForm.toId, trainLength,
+      respectPositions: routeForm.respect,
+    };
     let res = findRoute(doc, g, { ...base, enforceTailFit: true });
     if (!res.found) {
       const lenient = findRoute(doc, g, { ...base, enforceTailFit: false });
@@ -631,6 +684,7 @@ export function initUI(api) {
           [{ value: '', label: '— 選択してください —' }, { value: '__ext__', label: '◎ 場外へ出区（出入口）' }, ...trackOpts],
           v => { routeForm.toId = v; emit('route'); })),
       h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${trainLength.toFixed(0)} m`)),
+      checkbox('現在の分岐器の開通方向に従う', routeForm.respect, v => { routeForm.respect = v; emit('route'); }),
       h('div', { class: 'btn-row', style: 'margin-top:8px' },
         h('button', {
           class: 'btn sm primary',
@@ -685,8 +739,95 @@ export function initUI(api) {
           ...routeResult.warnings.map(w => h('div', { class: 'warnbox' }, `⚠ ${w}`)),
           !routeResult.warnings.length ? h('p', { class: 'note' }, '✓ 支障となる留置編成・有効長の不足はありません') : null,
         ));
+
+        // 進路（折返しで区切られた区間ごと）
+        const legs = routeResult.legs || [];
+        out.push(h('div', { class: 'card' },
+          h('h4', {}, '進路（連動）', h('span', { class: 'tag' }, `${legs.length} 区間`)),
+          legs.length > 1
+            ? h('p', { class: 'note' }, '折返しを挟むため、実際の入換と同じように区間ごとの進路になります（同じ分岐器を途中で転換するため同時には構成できません）。')
+            : null,
+          ...legs.map((lg, i) => {
+            const notAligned = lg.turnouts.filter(r => {
+              const o = doc.objects.find(x => x.id === r.objectId);
+              return o && (o.position || 0) !== r.index;
+            });
+            return h('div', { style: 'margin-bottom:10px' },
+              h('div', { class: 'kv' },
+                h('span', {}, legs.length > 1 ? `進路${i + 1}` : '進路'),
+                h('b', {}, `${lg.fromName} → ${lg.toName}`)),
+              lg.turnouts.length
+                ? h('div', {}, ...lg.turnouts.map(r => {
+                  const o = doc.objects.find(x => x.id === r.objectId);
+                  const ok = o && (o.position || 0) === r.index;
+                  return h('div', {
+                    class: 'listrow',
+                    onclick: () => { if (o) { store.ui.sel = { kind: 'object', id: o.id }; api.focusOn(o); emit('select'); } },
+                  },
+                    h('span', { class: 'dot', style: `background:${ok ? '#3ddc84' : '#ffb020'}` }),
+                    h('span', { class: 'nm' }, `${o && o.label ? o.label : '分岐器'}：${r.name}`),
+                    h('span', { class: 'num' }, ok ? '開通済' : '要転換'));
+                }))
+                : h('p', { class: 'note' }, '転換が必要な分岐器はありません'),
+              lg.conflict ? h('div', { class: 'warnbox' }, '⚠ 同じ分岐器に異なる開通方向が必要です（この区間は1つの進路になりません）') : null,
+              lg.turnouts.length ? h('button', {
+                class: 'btn sm' + (notAligned.length ? ' primary' : ''), style: 'margin-top:4px',
+                onclick: () => { alignTurnouts(lg.turnouts); emit('route'); },
+              }, `⇄ この区間の分岐器を転換（${notAligned.length}）`) : null,
+            );
+          }),
+          h('div', { class: 'btn-row', style: 'margin-top:6px' },
+            h('button', {
+              class: 'btn sm primary',
+              onclick: () => {
+                constructRoute(routeResult, {
+                  toExt: routeForm.toId === '__ext__',
+                  baseName: '入換',
+                });
+                emit('route');
+              },
+            }, legs.length > 1 ? `進路を ${legs.length} 本登録` : '進路を構成'),
+          ),
+        ));
       }
     }
+
+    // 構成済みの進路
+    const routes = doc.routes || [];
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '構成済みの進路', h('span', { class: 'tag' }, `${routes.filter(r => r.set).length}/${routes.length}`)),
+      routes.length
+        ? h('div', {}, ...routes.map(r => {
+          const st = routeStatus(doc, g, r);
+          return h('div', { style: 'margin-bottom:8px' },
+            h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${r.set ? ASPECT_COLORS[st.aspect] : '#5d6577'}` }),
+              h('span', { class: 'nm' }, r.name,
+                h('small', { class: 'desc' },
+                  `${r.set ? ASPECT_NAMES[st.aspect] : '解除'} ／ 転てつ${r.turnouts.length} ／ ${r.distance.toFixed(0)}m${r.reversals ? ` ／ 折返し${r.reversals}` : ''}`)),
+            ),
+            r.set && !st.aligned ? h('div', { class: 'warnbox' }, '⚠ 分岐器が進路どおりに開通していません') : null,
+            r.set && st.occupied.length ? h('div', { class: 'warnbox' }, `⚠ 進路内に在線: ${st.occupied.join('・')}`) : null,
+            st.conflicts.length ? h('div', { class: 'warnbox' }, `⚠ 競合: ${st.conflicts.map(c => `${c.route.name}（${c.reasons.join('・')}）`).join(' / ')}`) : null,
+            h('div', { class: 'btn-row' },
+              h('button', { class: 'btn sm' + (r.set ? '' : ' primary'), onclick: () => { setRouteState(r.id, !r.set); emit('route'); } },
+                r.set ? '解除' : '構成'),
+              h('button', {
+                class: 'btn sm', onclick: () => {
+                  store.ui.route = { path: r.path, reversePoints: [] };
+                  const t = findTrack(r.path[0] && r.path[0].trackId); if (t) api.focusOn(t);
+                  emit('route');
+                },
+              }, '図示'),
+              st.signal ? h('button', {
+                class: 'btn sm', onclick: () => { store.ui.sel = { kind: 'object', id: st.signal.id }; api.focusOn(st.signal); emit('select'); },
+              }, '信号') : null,
+              h('button', { class: 'btn sm danger', onclick: () => { deleteRoute(r.id); emit('route'); } }, '削除'),
+            ),
+          );
+        }))
+        : h('p', { class: 'note' }, '経路を探索して「進路を構成」すると、分岐器が転換され、入口の信号機が進行を現示します。'),
+    ));
 
     // レイアウト検証（接続＋物理チェック）
     const issues = [...validateLayout(doc, g), ...layoutChecks(doc, g, store.rev)];
@@ -746,6 +887,7 @@ export function initUI(api) {
         checkbox('スケールバーを表示', st.showRuler, v => setS('showRuler', v)),
         checkbox('線路の接続点を表示', st.showJunctions, v => setS('showJunctions', v)),
         checkbox('検証結果を図上に表示', st.showIssues, v => setS('showIssues', v)),
+        checkbox('構成済みの進路を図上に表示', st.showRoutes !== false, v => setS('showRoutes', v)),
         h('hr', { class: 'sepline' }),
         checkbox('グリッドにスナップ（Altで一時解除）', st.snap, v => setS('snap', v)),
         checkbox('線路を45°刻みで敷設（Shiftで一時解除）', st.angle45, v => setS('angle45', v)),

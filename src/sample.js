@@ -4,6 +4,7 @@
 import { newDoc, uid } from './store.js';
 import { objectDef, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
 import { buildGraph, junctionNodes, turnoutSpecAt } from './topology.js';
+import { polylineLength, pointAt, distToPolyline } from './geom.js';
 
 const T = (name, kind, points, extra = {}) => ({
   id: uid('t'), name, kind, points,
@@ -43,19 +44,14 @@ export function sampleDoc() {
   o.push(O('stairs', 430, 60, { rot: 90, label: '跨線橋 階段' }));
   o.push(O('stairs', 430, 130, { rot: 90 }));
   o.push(O('escalator', 446, 130, { rot: 90 }));
-  o.push(O('signal_start', 505, 72, { label: '出発1L' }));
-  o.push(O('signal_start', 487, 102, { label: '出発2L' }));
 
   /* ---- 入出区線・出区線・引上線 ---- */
   t.push(T('入出区線', 'entryexit', [{ x: 500, y: 110 }, { x: 620, y: 110 }, { x: 720, y: 190 }, { x: 900, y: 190 }]));
   t.push(T('出区線', 'exit', [{ x: 520, y: 80 }, { x: 700, y: 80 }, { x: 760, y: 140 }, { x: 800, y: 190 }]));
   t.push(T('引上線', 'shunting', [{ x: 900, y: 190 }, { x: 1180, y: 190 }], { b: 'buffer', note: '最長編成（10両=200m）が収まる有効長' }));
-  o.push(O('signal_home', 640, 176, { label: '場内' }));
-  o.push(O('signal_shunt', 900, 176, { label: '入換2' }));
 
   /* ---- ラダー線 ---- */
   t.push(T('ラダー線', 'shunting', [{ x: 740, y: 190 }, { x: LAD.x0, y: LAD.y0 }, { x: LAD.x1, y: LAD.y1 }], { b: 'buffer' }));
-  o.push(O('signal_shunt', 726, 206, { label: '入換1' }));
 
   /* ---- 留置線群 ---- */
   const y0 = 250, pitch = 26, n = 8;
@@ -123,6 +119,27 @@ export function sampleDoc() {
     const p1 = { x: Math.round((TT.x + Math.cos(a) * 58) * 10) / 10, y: Math.round((TT.y + Math.sin(a) * 58) * 10) / 10 };
     t.push(T(`扇形庫${i + 1}番線`, 'inspection', [p1, p0], { a: 'buffer' }));
   });
+
+  /* ---- 信号機を線路に紐づける ---- */
+  const attachSignal = (type, trackName, atFromEnd, dir, label) => {
+    const tr = t.find(x => x.name === trackName);
+    if (!tr) return;
+    const len = polylineLength(tr.points);
+    const at = dir === 'ab' ? Math.max(0, len - atFromEnd) : Math.min(len, atFromEnd);
+    const p = pointAt(tr.points, at);
+    o.push({
+      id: uid('b'), type, x: p.x, y: p.y, w: 5, h: 5, rot: p.angle,
+      mirror: false, position: 0, dir,
+      label: label || '', note: '', trackId: tr.id,
+    });
+  };
+  // 留置線の出発信号機（ラダー側へ出るときに現示する）
+  for (let i = 0; i < 3; i++) attachSignal('signal_shunt', `${i + 1}番線`, 25, 'ab', `入換${i + 1}`);
+  attachSignal('signal_start', '駅1番線', 30, 'ab', '出発1L');
+  attachSignal('signal_start', '駅2番線', 30, 'ab', '出発2L');
+  attachSignal('signal_home', '入出区線', 40, 'ba', '場内');
+  attachSignal('signal_shunt', '引上線', 30, 'ba', '入換2');
+  attachSignal('signal_shunt', '洗浄線', 25, 'ba', '入換3');
 
   /* ---- 分岐器・転轍機を接続点から自動生成 ---- */
   const tmp = { ...doc, tracks: t, objects: o, formations: [] };
