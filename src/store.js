@@ -1,7 +1,7 @@
 // アプリケーション状態（ドキュメント + UI状態）と派生計算
 
 import { polylineLength } from './geom.js';
-import { trackKind } from './catalog.js';
+import { trackKind, vehicleDef } from './catalog.js';
 
 export const STORAGE_KEY = 'game_rail.depot.v1';
 export const DOC_VERSION = 1;
@@ -127,8 +127,12 @@ export function migrate(doc) {
   }));
   d.formations = (doc.formations || []).map(f => ({
     id: f.id || uid('f'), name: f.name || '編成', series: f.series || '',
+    vehicle: f.vehicle || 'emu',
     cars: Math.max(1, +f.cars || 1),
     carLengthM: Number.isFinite(f.carLengthM) ? f.carLengthM : null,
+    loco: f.loco && f.loco.type
+      ? { type: f.loco.type, count: Math.max(1, Math.min(3, +f.loco.count || 1)) }
+      : null,
     color: f.color || '#4f8cff', trackId: f.trackId || null, note: f.note || '',
   }));
   d.version = DOC_VERSION;
@@ -160,19 +164,48 @@ export function trackCapacity(doc, t) {
 
 export const formationsOn = (doc, trackId) => doc.formations.filter(f => f.trackId === trackId);
 
+/** 編成中の1両（本体側）の長さ */
+export function formationCarLength(doc, f) {
+  if (Number.isFinite(f.carLengthM) && f.carLengthM > 0) return f.carLengthM;
+  const v = vehicleDef(f.vehicle);
+  return v.len || doc.settings.carLengthM;
+}
+
+/** 牽引機を含む車両数 */
+export function formationCars(f) {
+  return (f.cars || 0) + (f.loco ? f.loco.count : 0);
+}
+
+/** 牽引機を含む編成長 */
 export function formationLength(doc, f) {
-  const cl = Number.isFinite(f.carLengthM) && f.carLengthM > 0 ? f.carLengthM : doc.settings.carLengthM;
-  return f.cars * cl;
+  const body = f.cars * formationCarLength(doc, f);
+  const loco = f.loco ? vehicleDef(f.loco.type).len * f.loco.count : 0;
+  return body + loco;
+}
+
+/** 編成を構成する車両を先頭から並べる（描画・明細用） */
+export function formationVehicles(doc, f) {
+  const out = [];
+  if (f.loco) {
+    const lv = vehicleDef(f.loco.type);
+    for (let i = 0; i < f.loco.count; i++) out.push({ type: f.loco.type, len: lv.len, color: lv.color, loco: true });
+  }
+  const cl = formationCarLength(doc, f);
+  const v = vehicleDef(f.vehicle);
+  for (let i = 0; i < f.cars; i++) out.push({ type: f.vehicle, len: cl, color: f.color || v.color, loco: false });
+  return out;
 }
 
 /** 線路の留置状況 */
 export function trackUsage(doc, t) {
   const list = formationsOn(doc, t.id);
-  const cars = list.reduce((s, f) => s + f.cars, 0);
+  const cars = list.reduce((s, f) => s + formationCars(f), 0);
   const lengthUsed = list.reduce((s, f) => s + formationLength(doc, f), 0);
   const capacity = trackCapacity(doc, t);
   const usable = Math.max(0, trackLength(t) - (doc.settings.clearanceM || 0));
-  return { list, cars, capacity, lengthUsed, usable, over: cars > capacity || lengthUsed > usable + 1e-6 };
+  // 実長で判定する（車種により1両長が異なるため）。手入力の上限両数を超えた場合も超過とする。
+  const over = lengthUsed > usable + 1e-6 || (t.capacityMode === 'manual' && cars > capacity);
+  return { list, cars, capacity, lengthUsed, usable, over };
 }
 
 export function summary(doc) {
@@ -181,12 +214,12 @@ export function summary(doc) {
     totalLength += trackLength(t);
     if (trackKind(t.kind).stabling) { capacity += trackCapacity(doc, t); stablingTracks++; }
   }
-  for (const f of doc.formations) if (f.trackId) cars += f.cars;
+  for (const f of doc.formations) if (f.trackId) cars += formationCars(f);
   const unassigned = doc.formations.filter(f => !f.trackId);
   return {
     tracks: doc.tracks.length, stablingTracks, capacity, cars,
     formations: doc.formations.length,
-    unassignedCars: unassigned.reduce((s, f) => s + f.cars, 0),
+    unassignedCars: unassigned.reduce((s, f) => s + formationCars(f), 0),
     unassigned: unassigned.length,
     objects: doc.objects.length,
     totalLength,

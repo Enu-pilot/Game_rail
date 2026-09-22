@@ -2,10 +2,13 @@
 
 import {
   store, subscribe, emit, snapshot, commit, setMessage,
-  trackLength, trackCapacity, trackUsage, trackCarLength, formationLength, summary,
+  trackLength, trackCapacity, trackUsage, trackCarLength, formationLength, formationCars, formationCarLength, summary,
   findTrack, findObject, findFormation,
 } from './store.js';
-import { TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS, TURNOUT_NUMBERS, turnoutSize } from './catalog.js';
+import {
+  TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS,
+  TURNOUT_NUMBERS, turnoutSize, VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
+} from './catalog.js';
 import { getGraph, findRoute, validateLayout, END_TYPES, endType } from './topology.js';
 import { layoutChecks } from './checks.js';
 import {
@@ -332,7 +335,7 @@ export function initUI(api) {
           h('span', { class: 'dot', style: `background:${f.color}` }),
           h('span', {
             style: 'cursor:pointer', onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); },
-          }, `${f.name} ${f.cars}両`),
+          }, `${f.name} ${formationCars(f)}両`),
           h('button', { title: '留置解除', onclick: () => assignFormation(f.id, null) }, '×'),
         )))
         : h('p', { class: 'note' }, 'この線路に留置中の編成はありません。'),
@@ -438,13 +441,26 @@ export function initUI(api) {
     const doc = store.doc;
     const t = f.trackId ? findTrack(f.trackId) : null;
     const len = formationLength(doc, f);
+    const vd = vehicleDef(f.vehicle);
     return [h('div', { class: 'card' },
       h('h4', {}, h('span', { class: 'dot', style: `width:10px;height:10px;border-radius:50%;background:${f.color};display:inline-block` }), '編成'),
       field('編成名', textInput(`f.${f.id}.name`, f.name, v => updateEntity('formation', f.id, { name: v }, { history: false }), '例: 第12編成')),
-      field('形式', textInput(`f.${f.id}.series`, f.series, v => updateEntity('formation', f.id, { series: v }, { history: false }), '例: E233系')),
+      field('形式', textInput(`f.${f.id}.series`, f.series, v => updateEntity('formation', f.id, { series: v }, { history: false }), '例: E233系 / キハ40 / 12系 / DD51')),
+      field('車種', selectInput(`f.${f.id}.vehicle`, f.vehicle || 'emu',
+        VEHICLE_TYPES.map(v => ({ value: v.id, label: `${v.name}（標準 ${v.len}m）` })),
+        v => updateEntity('formation', f.id, { vehicle: v }, { history: false }))),
       h('div', { class: 'row' },
-        field('両数', numberInput(`f.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),
+        field(vd.loco ? '両数（機関車）' : '両数（本体）', numberInput(`f.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),
         field('1両長（m）', numberInput(`f.${f.id}.carlen`, f.carLengthM ?? '', v => updateEntity('formation', f.id, { carLengthM: v }, { history: false }), { min: 1, step: .5, allowEmpty: true })),
+      ),
+      h('p', { class: 'note' }, `1両長が空欄のときは車種の標準値（${vd.len}m）を使用します。`),
+      vd.loco ? null : h('div', { class: 'row' },
+        field('牽引機', selectInput(`f.${f.id}.loco`, f.loco ? f.loco.type : '',
+          [{ value: '', label: '— なし（自走）—' }, ...LOCO_TYPES.map(v => ({ value: v.id, label: `${v.name} ${v.len}m` }))],
+          v => updateEntity('formation', f.id, { loco: v ? { type: v, count: f.loco ? f.loco.count : 1 } : null }, { history: false }))),
+        f.loco ? field('機関車両数', numberInput(`f.${f.id}.locon`, f.loco.count,
+          v => updateEntity('formation', f.id, { loco: { type: f.loco.type, count: Math.max(1, Math.min(3, Math.round(v || 1))) } }, { history: false }),
+          { min: 1, max: 3 })) : null,
       ),
       field('留置線', selectInput(`f.${f.id}.track`, f.trackId || '',
         [{ value: '', label: '— 未留置 —' }, ...doc.tracks.map(tt => ({ value: tt.id, label: `${tt.name}（${trackKind(tt.kind).name}）` }))],
@@ -459,7 +475,10 @@ export function initUI(api) {
         }
         return wrap;
       })()),
+      h('div', { class: 'kv' }, h('span', {}, '両数（合計）'), h('b', {}, `${formationCars(f)} 両`)),
       h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${len.toFixed(0)} m`)),
+      f.loco ? h('div', { class: 'kv' }, h('span', {}, '構成'),
+        h('b', {}, `${vehicleDef(f.loco.type).short}×${f.loco.count} ＋ ${vd.short}×${f.cars}`)) : null,
       t ? h('div', { class: 'kv' }, h('span', {}, '留置先'), h('b', {}, t.name)) : null,
       h('div', { class: 'btn-row', style: 'margin-top:8px' },
         h('button', { class: 'btn sm', onclick: () => duplicateSelected() }, '複製'),
@@ -481,8 +500,19 @@ export function initUI(api) {
       h('div', { class: 'kv' }, h('span', {}, '留置中 / 可能'), h('b', {}, `${s.cars} / ${s.capacity} 両`)),
       h('div', { class: 'kv' }, h('span', {}, '未留置'), h('b', {}, `${s.unassigned} 本（${s.unassignedCars} 両）`)),
       meter(s.rate, s.cars > s.capacity),
+      h('div', { class: 'field', style: 'margin-top:8px' },
+        h('label', {}, '編成を追加'),
+        h('div', { class: 'btn-row' },
+          ...[['emu', '電車'], ['dmu', '気動車'], ['coach', '客車列車'], ['freight', '貨物列車'], ['el', '機関車'], ['mowcar', '保守用車']]
+            .map(([v, label]) => h('button', {
+              class: 'btn sm',
+              onclick: () => addFormation(v === 'coach' ? { vehicle: 'coach', cars: 6, loco: { type: 'dl', count: 1 } }
+                : v === 'freight' ? { vehicle: 'freight', cars: 12, loco: { type: 'el', count: 1 } }
+                  : v === 'el' ? { vehicle: 'el', cars: 1 }
+                    : { vehicle: v }),
+            }, `＋ ${label}`))),
+      ),
       h('div', { class: 'btn-row', style: 'margin-top:8px' },
-        h('button', { class: 'btn sm primary', onclick: () => addFormation({}) }, '＋ 編成を追加'),
         h('button', { class: 'btn sm', onclick: () => autoAssign() }, '自動で留置線へ割付'),
         h('button', {
           class: 'btn sm', onclick: () => {
@@ -504,10 +534,17 @@ export function initUI(api) {
       out.push(h('div', { class: 'card', style: sel ? 'border-color:#4f8cff' : '' },
         h('div', { class: 'listrow' + (sel ? ' sel' : ''), onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); } },
           h('span', { class: 'dot', style: `background:${f.color}` }),
-          h('span', { class: 'nm' }, f.name, f.series ? h('small', { class: 'desc' }, f.series) : null),
-          h('span', { class: 'num' }, `${f.cars}両 / ${formationLength(doc, f).toFixed(0)}m`),
+          h('span', { class: 'nm' }, f.name,
+            h('small', { class: 'desc' },
+              [f.loco ? `${vehicleDef(f.loco.type).short}×${f.loco.count}＋` : '', vehicleDef(f.vehicle).short, f.series ? ` ${f.series}` : ''].join(''))),
+          h('span', { class: 'num' }, `${formationCars(f)}両 / ${formationLength(doc, f).toFixed(0)}m`),
         ),
         h('div', { class: 'row', style: 'margin-top:6px' },
+          h('div', { class: 'field', style: 'margin:0' },
+            h('label', {}, '車種'),
+            selectInput(`fl.${f.id}.vehicle`, f.vehicle || 'emu',
+              VEHICLE_TYPES.map(v => ({ value: v.id, label: v.short })),
+              v => updateEntity('formation', f.id, { vehicle: v }, { history: false }))),
           h('div', { class: 'field', style: 'margin:0' },
             h('label', {}, '両数'),
             numberInput(`fl.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),

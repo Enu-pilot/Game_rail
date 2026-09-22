@@ -165,18 +165,43 @@ export function sampleDoc() {
   ];
   plan.forEach(([name, series, cars], i) => {
     f.push({
-      id: uid('f'), name, series, cars, carLengthM: null,
+      id: uid('f'), name, series, vehicle: 'emu', cars, carLengthM: null, loco: null,
       color: FORMATION_COLORS[i % FORMATION_COLORS.length],
       trackId: stabling[i] ? stabling[i].id : null, note: '',
     });
   });
+  const track = nm => (t.find(x => x.name === nm) || {}).id || null;
   f.push({
-    id: uid('f'), name: 'H06編成', series: 'E233系', cars: 10, carLengthM: null,
+    id: uid('f'), name: 'キハ48-1500', series: 'キハ48形', vehicle: 'dmu', cars: 2,
+    carLengthM: null, loco: null, color: '#e0894a', trackId: track('8番線'), note: '',
+  });
+  f.push({
+    id: uid('f'), name: '12系客車', series: '12系', vehicle: 'coach', cars: 5,
+    carLengthM: null, loco: { type: 'dl', count: 1 }, color: '#b5654a',
+    trackId: track('臨時検査線'), note: 'DD51牽引の団体臨時列車',
+  });
+  f.push({
+    id: uid('f'), name: '廃車回送', series: 'ワム80000', vehicle: 'freight', cars: 5,
+    carLengthM: null, loco: { type: 'el', count: 1 }, color: '#8b8172',
+    trackId: track('解体線'), note: '',
+  });
+  f.push({
+    id: uid('f'), name: 'C57 1', series: 'C57形', vehicle: 'sl', cars: 1,
+    carLengthM: null, loco: null, color: '#7a8190',
+    trackId: track('扇形庫1番線'), note: '動態保存機',
+  });
+  f.push({
+    id: uid('f'), name: 'EF64 37', series: 'EF64形', vehicle: 'el', cars: 1,
+    carLengthM: null, loco: null, color: '#6f90c0',
+    trackId: track('扇形庫2番線'), note: '',
+  });
+  f.push({
+    id: uid('f'), name: 'H06編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
     color: FORMATION_COLORS[7], trackId: t.find(x => x.name === '検修1番線').id, note: '交番検査中',
   });
   f.push({
-    id: uid('f'), name: 'W01', series: '保守用車', cars: 2, carLengthM: 12,
-    color: '#c8a24a', trackId: t.find(x => x.kind === 'mow').id, note: 'モーターカー',
+    id: uid('f'), name: 'W01', series: 'モーターカー', vehicle: 'mowcar', cars: 2, carLengthM: null, loco: null,
+    color: '#c8a24a', trackId: t.find(x => x.kind === 'mow').id, note: '',
   });
 
   doc.tracks = t; doc.objects = o; doc.formations = f;

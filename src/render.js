@@ -1,7 +1,7 @@
 // Canvas 2D レンダラ（ワールド単位 = メートル）
 
-import { trackKind, objectDef } from './catalog.js';
-import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength } from './store.js';
+import { trackKind, objectDef, vehicleDef } from './catalog.js';
+import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength, formationVehicles, formationCars } from './store.js';
 import { pointAt, subPolyline, polylineLength } from './geom.js';
 import { getGraph, endType } from './topology.js';
 
@@ -204,62 +204,126 @@ function drawFormations(ctx, cam, doc, t, ui) {
     const len = formationLength(doc, f);
     const start = cursor, end = cursor + len;
     cursor = end + 3;
-    const over = end > usable + 1e-6;
-    const clippedEnd = Math.min(end, total);
     if (start >= total) break;
-    const seg = subPolyline(t.points, start, clippedEnd);
-    if (seg.length < 2) continue;
-    const sp = screenPts(cam, seg);
+    const over = end > usable + 1e-6;
     const selected = ui.sel && ui.sel.kind === 'formation' && ui.sel.id === f.id;
+    const vehicles = formationVehicles(doc, f);
+    const unit = vehicles.length ? vehicles[0].len : 20;
+    const detailed = unit * cam.zoom > 9;   // 1両ずつ描けるだけの拡大率か
 
     ctx.save();
     ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
-    ctx.strokeStyle = over ? '#ff5f56' : f.color;
-    ctx.globalAlpha = over ? .85 : .92;
     ctx.lineWidth = Math.max(2, CAR_W * cam.zoom);
-    strokePts(ctx, sp);
 
-    // 車両間の仕切り
-    if (cam.zoom > 0.45) {
-      const cl = len / f.cars;
-      ctx.globalAlpha = .5;
-      ctx.strokeStyle = '#0d1015';
-      ctx.lineWidth = Math.max(1, 0.35 * cam.zoom);
-      for (let i = 1; i < f.cars; i++) {
-        const d = start + cl * i;
-        if (d > clippedEnd) break;
-        const p = pointAt(t.points, d);
-        const nx = -Math.sin(p.angle) * (CAR_W / 2), ny = Math.cos(p.angle) * (CAR_W / 2);
-        const a = toScreen(cam, p.x - nx, p.y - ny), b = toScreen(cam, p.x + nx, p.y + ny);
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    if (!detailed) {
+      const seg = subPolyline(t.points, start, Math.min(end, total));
+      if (seg.length >= 2) {
+        ctx.globalAlpha = .92;
+        ctx.strokeStyle = over ? '#ff5f56' : (f.color || '#4f8cff');
+        strokePts(ctx, screenPts(cam, seg));
+      }
+    } else {
+      let d = start;
+      for (const v of vehicles) {
+        const a = d, b = Math.min(d + v.len, total);
+        d += v.len;
+        if (a >= total) break;
+        const seg = subPolyline(t.points, a + 0.35, Math.max(a + 0.7, b - 0.35));
+        if (seg.length < 2) continue;
+        ctx.globalAlpha = over ? .85 : .95;
+        ctx.strokeStyle = over ? '#ff5f56' : v.color;
+        strokePts(ctx, screenPts(cam, seg));
+        if (cam.zoom > 1.6) drawVehicleMark(ctx, cam, t, v, a, Math.min(v.len, b - a));
       }
     }
 
+    // 選択中の縁取り
     if (selected) {
-      ctx.globalAlpha = 1;
-      ctx.setLineDash([5, 4]);
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = Math.max(1.5, 0.5 * cam.zoom);
-      strokePts(ctx, sp);
-      ctx.setLineDash([]);
+      const seg = subPolyline(t.points, start, Math.min(end, total));
+      if (seg.length >= 2) {
+        ctx.globalAlpha = 1;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = Math.max(1.5, 0.5 * cam.zoom);
+        strokePts(ctx, screenPts(cam, seg));
+        ctx.setLineDash([]);
+      }
     }
 
     // 編成名
     if (cam.zoom > 0.5 && len * cam.zoom > 46) {
-      const mid = pointAt(t.points, (start + clippedEnd) / 2);
+      const mid = pointAt(t.points, (start + Math.min(end, total)) / 2);
       const s = toScreen(cam, mid.x, mid.y);
       let ang = mid.angle;
       if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
+      const label = `${f.name} ${formationCars(f)}両`;
       ctx.globalAlpha = 1;
+      ctx.save();
       ctx.translate(s.x, s.y); ctx.rotate(ang);
       ctx.font = `600 ${Math.min(13, Math.max(9, CAR_W * cam.zoom * 0.5))}px ${FONT}`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(0,0,0,.55)';
-      ctx.fillText(`${f.name} ${f.cars}両`, 0, 1);
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+      ctx.strokeText(label, 0, 0);
       ctx.fillStyle = '#fff';
-      ctx.fillText(`${f.name} ${f.cars}両`, 0, 0);
+      ctx.fillText(label, 0, 0);
+      ctx.restore();
     }
     ctx.restore();
+  }
+}
+
+/** 車両ごとの動力表現（パンタ・排気・煙突）と機関車の記号 */
+function drawVehicleMark(ctx, cam, t, v, at, len) {
+  const def = vehicleDef(v.type);
+  const z = cam.zoom;
+  const put = (frac, fn) => {
+    const p = pointAt(t.points, at + len * frac);
+    const s = toScreen(cam, p.x, p.y);
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(p.angle);
+    fn();
+    ctx.restore();
+  };
+  ctx.globalAlpha = 1;
+  if (def.power === 'electric') {            // パンタグラフ（横棒）
+    const bar = CAR_W * z * .4;
+    const marks = def.loco ? [0.25, 0.75] : [0.72];
+    for (const m of marks) {
+      put(m, () => {
+        ctx.strokeStyle = 'rgba(255,255,255,.85)';
+        ctx.lineWidth = Math.max(1, .3 * z);
+        ctx.beginPath(); ctx.moveTo(0, -bar); ctx.lineTo(0, bar); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-Math.max(2, .8 * z), -bar * .5); ctx.lineTo(0, 0); ctx.lineTo(-Math.max(2, .8 * z), bar * .5);
+        ctx.stroke();
+      });
+    }
+  } else if (def.power === 'steam') {        // 煙突
+    put(0.18, () => {
+      ctx.fillStyle = '#12161f';
+      ctx.strokeStyle = 'rgba(255,255,255,.75)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, Math.max(2, .7 * z), 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+    });
+  } else if (def.power === 'diesel') {       // 排気
+    put(0.25, () => {
+      ctx.fillStyle = 'rgba(255,255,255,.7)';
+      const r = Math.max(1.5, .45 * z);
+      ctx.fillRect(-r, -r, r * 2, r * 2);
+    });
+  }
+  // 機関車の種別記号
+  if (def.loco && len * z > 34) {
+    put(0.5, () => {
+      ctx.font = `700 ${Math.min(11, Math.max(8, CAR_W * z * .42))}px ${FONT}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(0,0,0,.55)';
+      ctx.strokeText(def.short, 0, 0);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(def.short, 0, 0);
+    });
   }
 }
 

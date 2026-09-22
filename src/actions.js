@@ -1,7 +1,7 @@
 // ドキュメント編集アクション（すべて snapshot() → 変更 → commit() の順で実行）
 
 import { store, snapshot, commit, uid, select, setMessage, trackCapacity, trackLength } from './store.js';
-import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, turnoutSize, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
+import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, turnoutSize, TURNOUT_TYPE_BY_VARIANT, vehicleDef } from './catalog.js';
 import { distToPolyline, pointAt } from './geom.js';
 
 /** 同一種別の連番から線路名を作る */
@@ -124,13 +124,18 @@ export function addObject(type, x, y, rot = 0) {
 export function addFormation(partial = {}) {
   snapshot();
   const n = store.doc.formations.length;
+  const vehicle = partial.vehicle || 'emu';
+  const vd = vehicleDef(vehicle);
+  const defaultCars = { el: 1, dl: 1, sl: 1, mowcar: 1, freight: 12, coach: 6 }[vehicle] ?? 10;
   const f = {
     id: uid('f'),
     name: partial.name || `${String.fromCharCode(65 + (n % 26))}${String(Math.floor(n / 26) + 1).padStart(2, '0')}編成`,
     series: partial.series || '',
-    cars: partial.cars || 10,
+    vehicle,
+    cars: partial.cars || defaultCars,
     carLengthM: partial.carLengthM ?? null,
-    color: partial.color || FORMATION_COLORS[n % FORMATION_COLORS.length],
+    loco: partial.loco || null,
+    color: partial.color || (vd.loco ? vd.color : FORMATION_COLORS[n % FORMATION_COLORS.length]),
     trackId: partial.trackId ?? null,
     note: partial.note || '',
   };

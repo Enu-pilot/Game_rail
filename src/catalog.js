@@ -142,6 +142,27 @@ export function turnoutSize(variant, frog) {
   }
 }
 
+/**
+ * 車種マスタ
+ *  len   : 1両あたりの標準長（連結面間）[m]
+ *  power : 描画用の動力表現（electric=パンタ, diesel=排気, steam=煙突, none=付随）
+ *  loco  : 機関車（牽引機として選べる）
+ */
+export const VEHICLE_TYPES = [
+  { id: 'emu',     name: '電車（EMU）',            short: '電車',   len: 20, color: '#4f8cff', power: 'electric' },
+  { id: 'dmu',     name: '気動車（DC）',           short: '気動車', len: 20, color: '#e0894a', power: 'diesel' },
+  { id: 'coach',   name: '客車',                   short: '客車',   len: 20, color: '#b5654a', power: 'none' },
+  { id: 'freight', name: '貨車',                   short: '貨車',   len: 14, color: '#8b8172', power: 'none' },
+  { id: 'el',      name: '電気機関車（EL）',       short: 'EL',     len: 18, color: '#6f90c0', power: 'electric', loco: true },
+  { id: 'dl',      name: 'ディーゼル機関車（DL）', short: 'DL',     len: 16, color: '#d2762a', power: 'diesel',   loco: true },
+  { id: 'sl',      name: '蒸気機関車（SL）',       short: 'SL',     len: 20, color: '#7a8190', power: 'steam',    loco: true },
+  { id: 'mowcar',  name: '保守用車',               short: '保守',   len: 12, color: '#c8a24a', power: 'diesel' },
+];
+
+export const VEHICLE_MAP = Object.fromEntries(VEHICLE_TYPES.map(v => [v.id, v]));
+export const vehicleDef = id => VEHICLE_MAP[id] || VEHICLE_MAP.emu;
+export const LOCO_TYPES = VEHICLE_TYPES.filter(v => v.loco);
+
 /** 編成に使う既定色 */
 export const FORMATION_COLORS = [
   '#4f8cff', '#2bd4a4', '#ffd166', '#ff8fd0', '#b98cff',
