@@ -182,3 +182,37 @@ kbd{
 #panel-palette summary .cnt{margin-left:auto;color:var(--fg-dim);font-weight:400;font-size:10.5px}
 #panel-palette details[open] > summary{border-bottom:1px solid var(--line)}
 #panel-palette .plist{padding:6px}
+
+
+/* ---------- charts (経営) ---------- */
+.chart{margin:6px 0 2px}
+.chart-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--fg-dim);margin-bottom:6px}
+.chart-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.chart-bars{display:flex;align-items:flex-end;gap:2px;height:104px;padding-top:14px}
+.cbar{flex:1;display:flex;flex-direction:column-reverse;height:100%;position:relative;min-width:6px}
+.cbar .seg{width:100%;border-radius:0}
+.cbar .seg.carried{background:#4f8cff;border-radius:0 0 1px 1px}
+.cbar .seg.left{background:#e0344a;border-radius:4px 4px 0 0;margin-bottom:2px}
+.cbar .seg.carried.top{border-radius:4px 4px 1px 1px}
+.cbar .clabel{position:absolute;bottom:-14px;left:0;right:0;text-align:center;font-size:9px;color:var(--fg-dim)}
+.cbar .cpeak{position:absolute;top:-14px;left:-12px;right:-12px;text-align:center;font-size:10px;color:var(--fg)}
+.chart-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:16px}
+.hero{font-size:26px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+.hero.small{font-size:19px}
+.tiles{display:flex;gap:8px;margin:6px 0}
+.tile{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
+.tile label{display:block;font-size:10.5px;color:var(--fg-dim);margin-bottom:2px}
+.tile b{font-size:14px;font-variant-numeric:tabular-nums}
+.goal{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;border-bottom:1px solid var(--line)}
+.goal:last-child{border-bottom:none}
+.goal .mark{width:18px;text-align:center;font-weight:700}
+.goal .g-name{flex:1}
+.goal .g-val{color:var(--fg-dim);font-variant-numeric:tabular-nums}
+.congrow{margin-bottom:8px}
+.congbar{height:12px;border-radius:4px;background:#0c0f16;border:1px solid var(--line);overflow:hidden;position:relative}
+.congbar > i{display:block;height:100%;border-radius:3px}
+.congbar > span{position:absolute;right:4px;top:-1px;font-size:10px;color:#e6eaf3;text-shadow:0 0 3px #000}
+table.mini{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums;margin-top:6px}
+table.mini th,table.mini td{text-align:right;padding:2px 3px;border-bottom:1px solid var(--line)}
+table.mini th:first-child,table.mini td:first-child{text-align:left}
+table.mini th{color:var(--fg-dim);font-weight:500}

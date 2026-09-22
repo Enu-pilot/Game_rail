@@ -132,6 +132,8 @@ export function sampleDoc() {
     o.push({
       id: uid('b'), type: 'station_mark', x, y: 40, w: 10, h: 10, rot: 0,
       mirror: false, position: 0, dir: 'ab',
+      population: extra.population ?? 20000, jobs: extra.jobs ?? 4000,
+      kindId: extra.kindId || 'residential',
       label: name, note: '', trackId: mainLine.id,
     });
     return o[o.length - 1];
@@ -144,10 +146,10 @@ export function sampleDoc() {
   o.push(O('station_bldg', 2500, 100, { w: 50, h: 24, label: '海岸駅' }));
   o.push(O('platform_side', -950, 66, { w: 140, h: 8, label: '西山ホーム' }));
   o.push(O('station_bldg', -950, 100, { w: 50, h: 24, label: '西山駅' }));
-  const stW = station('西山', -950);
-  const stM = station('みどりが丘', 360);
-  const stH = station('東川', 1670);
-  const stK = station('海岸', 2500);
+  const stW = station('西山', -950, { population: 42000, jobs: 5000, kindId: 'residential' });
+  const stM = station('みどりが丘', 360, { population: 68000, jobs: 12000, kindId: 'mixed' });
+  const stH = station('東川', 1670, { population: 25000, jobs: 9000, kindId: 'school' });
+  const stK = station('海岸', 2500, { population: 18000, jobs: 46000, kindId: 'urban' });
   // 駅間は配線図では省略し、キロ程だけ実距離にする
   const gap = (x, km) => o.push({
     id: uid('b'), type: 'gap_break', x, y: 40, w: 12, h: 16, rot: 0,
@@ -286,14 +288,15 @@ export function sampleDoc() {
     stations: [stW.id, stM.id, stH.id, stK.id],
   };
   const trains = [];
+  const last = line.stations.length - 1;
   const addTrain = (number, type, dir, departSec, speedKmh, extra = {}) => {
-    const last = line.stations.length - 1;
     const down = dir === 'down';
     trains.push({
       id: uid('tr'), lineId: line.id, number, name: '', type, dir,
       fromIdx: extra.fromIdx ?? (down ? 0 : last),
       toIdx: extra.toIdx ?? (down ? last : 0),
-      departSec, speedKmh, dwellSec: 30, skip: [], cars: extra.cars ?? 10,
+      departSec, speedKmh, dwellSec: extra.dwellSec ?? 30, skip: extra.skip || [],
+      cars: extra.cars ?? 10,
       // 東川は交換駅：下りは本線、上りは1番線に入る
       platforms: extra.platforms ?? {
         1: down ? trackId('駅1番線') : trackId('駅2番線'),
@@ -303,12 +306,27 @@ export function sampleDoc() {
       color: null, formationId: extra.formationId || null, note: '',
     });
   };
-  addTrain('101M', 'local', 'down', 6 * 3600, 60);
-  addTrain('102M', 'local', 'up', 6 * 3600 + 600, 60);
-  addTrain('103M', 'rapid', 'down', 6 * 3600 + 1800, 80);
-  addTrain('104M', 'local', 'up', 6 * 3600 + 2400, 60);
-  addTrain('105M', 'local', 'down', 6 * 3600 + 3600, 60);
-  addTrain('回1', 'deadhead', 'down', 6 * 3600 + 900, 45, {
+
+  // 平日ダイヤ：日中20分ごと、ラッシュ時は10分ごと。ラッシュは10両、その他は6両
+  const isRush = sec => {
+    const h = sec / 3600;
+    return (h >= 7 && h < 9.5) || (h >= 17 && h < 19.5);
+  };
+  let noDown = 100, noUp = 101;
+  for (let t2 = 5.5 * 3600; t2 <= 22.5 * 3600; t2 += 60) {
+    const rush = isRush(t2);
+    const headway = rush ? 600 : 1200;
+    if ((t2 - 5.5 * 3600) % headway !== 0) continue;
+    const cars = rush ? 10 : 6;
+    const rapid = !rush && ((t2 / 1200) % 3 === 0);
+    addTrain(`${noDown}M`, rapid ? 'rapid' : 'local', 'down', t2, rapid ? 80 : 60,
+      { cars, skip: rapid ? [2] : [] });
+    addTrain(`${noUp}M`, rapid ? 'rapid' : 'local', 'up', t2 + 300, rapid ? 80 : 60,
+      { cars, skip: rapid ? [2] : [] });
+    noDown += 2; noUp += 2;
+  }
+  // 入庫する回送
+  addTrain('回1', 'deadhead', 'down', 23 * 3600, 45, {
     fromIdx: 0, toIdx: 1, cars: 10, toDepot: true, depotTrackId: trackId('8番線'),
   });
 

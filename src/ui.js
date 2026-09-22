@@ -15,6 +15,9 @@ import { layoutChecks } from './checks.js';
 import { entryAnalysis, stablingSummary } from './analysis.js';
 import { sim, simStart, simPause, simReset, setSimMode, planAdd, planRemove, planClear, simState, simClockText, PHASE_NAMES } from './sim.js';
 import {
+  simulateDemand, finance, evaluate, congestionBand, STATION_KINDS, stationKind, fareFor,
+} from './demand.js';
+import {
   TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
   timetableConflicts, platformConflicts, platformDemand, stationTracks, trainPlatform,
   nearbyTracks, fmtHM, parseHM,
@@ -107,6 +110,7 @@ export function initUI(api) {
     route: document.getElementById('panel-route'),
     sim: document.getElementById('panel-sim'),
     timetable: document.getElementById('panel-timetable'),
+    business: document.getElementById('panel-business'),
     settings: document.getElementById('panel-settings'),
     statusPos: document.getElementById('status-pos'),
     statusSummary: document.getElementById('status-summary'),
@@ -487,6 +491,23 @@ export function initUI(api) {
           { min: 0, step: 0.1 })),
         h('p', { class: 'note' }, '配線図では短く描いたまま、ダイヤのキロ程・所要時間・経路距離にこの距離が加算されます。運転シミュレーションでは、この記号の位置で省略した距離ぶんの時間だけ走ります。'),
         !o.trackId ? h('div', { class: 'warnbox' }, '線路の上に置いてください（最寄りの線路にスナップします）') : null,
+      ));
+    }
+
+    // 駅（停車場）の需要
+    if (def.station) {
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '駅の需要'),
+        h('div', { class: 'row' },
+          field('駅勢圏人口（人）', numberInput(`obj.${o.id}.pop`, o.population ?? 20000,
+            v => updateEntity('object', o.id, { population: Math.max(0, Math.round(v || 0)) }, { history: false }), { min: 0, step: 1000 })),
+          field('就業・集客（人）', numberInput(`obj.${o.id}.jobs`, o.jobs ?? 4000,
+            v => updateEntity('object', o.id, { jobs: Math.max(0, Math.round(v || 0)) }, { history: false }), { min: 0, step: 1000 })),
+        ),
+        field('駅の性格', selectInput(`obj.${o.id}.kind`, o.kindId || 'residential',
+          STATION_KINDS.map(k => ({ value: k.id, label: k.name })),
+          v => updateEntity('object', o.id, { kindId: v }, { history: false }))),
+        h('p', { class: 'note' }, '人口は発生する利用者、就業・集客は目的地としての強さです。朝は就業地へ、夕方は住宅地へ流動が向きます（経営タブで結果を確認できます）。'),
       ));
     }
 
@@ -1383,6 +1404,173 @@ export function initUI(api) {
 
   function ui_showSim() { showTab('right', 'sim'); }
 
+  /* ---------------- 経営 ---------------- */
+  let bizCache = { rev: -1, data: null };
+
+  function businessData() {
+    const doc = store.doc;
+    const line = doc.lines.find(l => l.id === (store.ui.diagram || {}).lineId) || doc.lines[0];
+    if (!line) return null;
+    if (bizCache.rev === store.rev && bizCache.data && bizCache.data.line === line) return bizCache.data;
+    const g = graph();
+    const sts = lineStations(doc, g, line);
+    const trains = doc.trains.filter(t => t.lineId === line.id);
+    const stats = simulateDemand(doc, line, sts, trains);
+    const fin = finance(doc, stats, sts);
+    const ev = evaluate(doc, stats, fin);
+    const data = { line, sts, trains, stats, fin, ev };
+    bizCache = { rev: store.rev, data };
+    return data;
+  }
+
+  const yen = v => `${Math.round(v).toLocaleString('ja-JP')} 円`;
+  const man = v => `${(v / 10000).toFixed(0)} 万円`;
+  const nin = v => `${Math.round(v).toLocaleString('ja-JP')} 人`;
+
+  function buildBusiness() {
+    const doc = store.doc;
+    const data = businessData();
+    if (!data) {
+      return [h('div', { class: 'card' },
+        h('h4', {}, '経営'),
+        h('p', { class: 'note' }, 'ダイヤタブで路線と駅を作ると、駅の人口から需要を計算し、混雑率・輸送実績・収支を評価します。'))];
+    }
+    const { sts, trains, stats, fin, ev } = data;
+    const out = [];
+
+    // 評価
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '経営評価', h('span', { class: 'tag' }, `${data.line.name}・列車 ${trains.length} 本/日`)),
+      h('div', { class: 'hero', style: `color:${ev.score >= 75 ? '#2bd4a4' : ev.score >= 50 ? '#ffd23f' : '#e0344a'}` }, `${ev.score} 点`),
+      h('div', { style: 'margin-top:6px' }, ...ev.goals.map(gl => h('div', { class: 'goal' },
+        h('span', { class: 'mark', style: `color:${gl.ok ? '#2bd4a4' : '#e0344a'}` }, gl.ok ? '✓' : '×'),
+        h('span', { class: 'g-name' }, gl.name),
+        h('span', { class: 'g-val' }, gl.value)))),
+    ));
+
+    // 収支
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '収支（1日あたり）'),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '運賃収入'), h('b', { style: 'color:#2bd4a4' }, man(fin.revenue))),
+        h('div', { class: 'tile' }, h('label', {}, '費用'), h('b', {}, man(fin.cost))),
+      ),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '損益'),
+          h('b', { style: `color:${fin.profit >= 0 ? '#2bd4a4' : '#e0344a'}` }, man(fin.profit))),
+        h('div', { class: 'tile' }, h('label', {}, '営業係数'),
+          h('b', {}, Number.isFinite(fin.opRatio) ? fin.opRatio.toFixed(0) : '—')),
+      ),
+      h('table', { class: 'mini' },
+        h('tr', {}, h('th', {}, '費用の内訳'), h('th', {}, '1日'), h('th', {}, '構成')),
+        ...fin.breakdown.map(b => h('tr', {},
+          h('td', {}, b.name),
+          h('td', {}, man(b.value)),
+          h('td', {}, `${((b.value / Math.max(1, fin.cost)) * 100).toFixed(0)}%`)))),
+      h('p', { class: 'note' }, `輸送人員 ${nin(stats ? stats.totalPassengers : 0)}／人キロ ${Math.round(stats ? stats.passengerKm : 0).toLocaleString('ja-JP')}／1人あたり平均 ${stats && stats.totalPassengers ? Math.round(fin.revenue / stats.totalPassengers) : 0} 円`),
+    ));
+
+    // 時間帯別の輸送
+    if (stats) {
+      const rows = stats.byHour.filter(x => x.demand > 0.5 || x.carried > 0.5);
+      const maxV = Math.max(1, ...rows.map(x => x.carried + x.left));
+      const peak = rows.reduce((a, b) => (b.carried + b.left > a.carried + a.left ? b : a), rows[0] || { carried: 0, left: 0, hour: 0 });
+      const worst = rows.filter(x => x.left > 0.5).sort((a, b) => b.left - a.left).slice(0, 3);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '時間帯別の輸送人員'),
+        h('div', { class: 'chart-legend' },
+          h('span', {}, h('i', { style: 'background:#4f8cff' }), '輸送できた人'),
+          h('span', {}, h('i', { style: 'background:#e0344a' }), '積み残し')),
+        h('div', { class: 'chart' },
+          h('div', { class: 'chart-bars' }, ...rows.map(x => {
+            const total = x.carried + x.left;
+            const hc = (x.carried / maxV) * 100, hl = (x.left / maxV) * 100;
+            return h('div', {
+              class: 'cbar',
+              title: `${x.hour}時台　需要 ${nin(x.demand)}／輸送 ${nin(x.carried)}／積み残し ${nin(x.left)}／輸送力 ${nin(x.capacity)}`,
+            },
+              h('div', { class: 'seg carried' + (hl < 1 ? ' top' : ''), style: `height:${hc.toFixed(1)}%` }),
+              hl >= 1 ? h('div', { class: 'seg left', style: `height:${Math.max(2, hl).toFixed(1)}%` }) : null,
+              x.hour % 3 === 0 ? h('span', { class: 'clabel' }, x.hour) : null,
+              x === peak ? h('span', { class: 'cpeak' }, `${Math.round(total / 1000)}k`) : null);
+          }))),
+        h('div', { class: 'chart-axis' },
+          h('span', {}, `${rows.length ? rows[0].hour : 0} 時`),
+          h('span', {}, `ピーク ${peak.hour} 時台 ${nin(peak.carried + peak.left)}`),
+          h('span', {}, `${rows.length ? rows[rows.length - 1].hour : 23} 時`)),
+        worst.length
+          ? h('table', { class: 'mini' },
+            h('tr', {}, h('th', {}, '積み残しの多い時間'), h('th', {}, '積み残し'), h('th', {}, '輸送力')),
+            ...worst.map(x => h('tr', {}, h('td', {}, `${x.hour} 時台`), h('td', {}, nin(x.left)), h('td', {}, nin(x.capacity)))))
+          : h('p', { class: 'note' }, '✓ すべての時間帯で運びきれています'),
+      ));
+
+      // 区間別の混雑率
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '区間別のピーク混雑率'),
+        ...stats.sections.map(sec => {
+          const band = congestionBand(sec.peak);
+          return h('div', { class: 'congrow' },
+            h('div', { class: 'kv' },
+              h('span', {}, sec.name),
+              h('b', { style: `color:${band.color}` }, `${(sec.peak * 100).toFixed(0)}%　${band.name}`)),
+            h('div', { class: 'congbar' },
+              h('i', { style: `width:${Math.min(100, (sec.peak / 2) * 100).toFixed(1)}%;background:${band.color}` }),
+              h('span', {}, sec.peakHour != null ? `${sec.peakHour}時台 ${sec.peakTrain || ''}` : '')));
+        }),
+        h('p', { class: 'note' }, '混雑率は「乗車人員 ÷ 定員」。100%＝定員、150%＝新聞が読める程度、180%＝体が触れ合う程度。目盛りは200%までです。'),
+      ));
+    }
+
+    // 駅の需要
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '駅の需要'),
+      h('table', { class: 'mini' },
+        h('tr', {}, h('th', {}, '駅'), h('th', {}, '人口'), h('th', {}, '就業'), h('th', {}, '性格')),
+        ...sts.map(st => h('tr', {
+          style: 'cursor:pointer',
+          onclick: () => { if (st.object) { store.ui.sel = { kind: 'object', id: st.object.id }; api.focusOn(st.object); emit('select'); showTab('right', 'inspector'); } },
+        },
+          h('td', {}, st.name),
+          h('td', {}, st.object ? (st.object.population || 0).toLocaleString('ja-JP') : '—'),
+          h('td', {}, st.object ? (st.object.jobs || 0).toLocaleString('ja-JP') : '—'),
+          h('td', {}, st.object ? stationKind(st.object.kindId).name : '—')))),
+      h('p', { class: 'note' }, '行をクリックすると駅を選択して編集できます。'),
+    ));
+
+    // 運賃と原価
+    const st2 = doc.settings;
+    const setS = (k, v) => { snapshot(); st2[k] = v; commit('settings'); };
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '運賃'),
+      h('div', { class: 'row' },
+        field('初乗り（円）', numberInput('biz.fb', st2.fareBase ?? 140, v => setS('fareBase', Math.max(0, v || 0)), { min: 0, step: 10 })),
+        field('距離加算（円/km）', numberInput('biz.fk', st2.farePerKm ?? 14, v => setS('farePerKm', Math.max(0, v || 0)), { min: 0, step: 1 })),
+      ),
+      h('p', { class: 'note' }, `例：2km ${fareFor(doc, 2)}円／5km ${fareFor(doc, 5)}円／10km ${fareFor(doc, 10)}円`),
+    ));
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '原価と条件'),
+      h('div', { class: 'row' },
+        field('1両の定員（人）', numberInput('biz.cap', st2.capacityPerCar ?? 140, v => setS('capacityPerCar', Math.max(10, v || 140)), { min: 10, step: 10 })),
+        field('乗車率の上限（%）', numberInput('biz.max', Math.round((st2.maxLoadFactor ?? 2) * 100), v => setS('maxLoadFactor', Math.max(1, (v || 200) / 100)), { min: 100, step: 10 })),
+      ),
+      h('div', { class: 'row' },
+        field('運行費（円/車両km）', numberInput('biz.ck', st2.costPerCarKm ?? 500, v => setS('costPerCarKm', Math.max(0, v || 0)), { min: 0, step: 50 })),
+        field('車両費（円/両日）', numberInput('biz.cd', st2.costPerCarDay ?? 20000, v => setS('costPerCarDay', Math.max(0, v || 0)), { min: 0, step: 1000 })),
+      ),
+      h('div', { class: 'row' },
+        field('線路保守（円/km日）', numberInput('biz.rk', st2.costPerRouteKmDay ?? 200000, v => setS('costPerRouteKmDay', Math.max(0, v || 0)), { min: 0, step: 10000 })),
+        field('駅運営（円/駅日）', numberInput('biz.sd', st2.costPerStationDay ?? 250000, v => setS('costPerStationDay', Math.max(0, v || 0)), { min: 0, step: 10000 })),
+      ),
+      h('div', { class: 'row' },
+        field('利用回数（回/人日）', numberInput('biz.tr', st2.dailyTripRate ?? 0.4, v => setS('dailyTripRate', Math.max(0, v || 0)), { min: 0, step: 0.05 })),
+        field('目標混雑率（%）', numberInput('biz.tc', st2.targetCongestion ?? 180, v => setS('targetCongestion', Math.max(100, v || 180)), { min: 100, step: 10 })),
+      ),
+    ));
+    return out;
+  }
+
   /* ---------------- 設定 ---------------- */
   function buildSettings() {
     const st = store.doc.settings;
@@ -1473,6 +1661,7 @@ export function initUI(api) {
       withFocus(els.route, buildRoute, selKey);
       withFocus(els.sim, buildSim, 'sim');
       withFocus(els.timetable, buildTimetable, `tt:${(store.ui.diagram || {}).lineId}:${(store.ui.diagram || {}).selected}`);
+      withFocus(els.business, buildBusiness, `biz:${(store.ui.diagram || {}).lineId}`);
       withFocus(els.settings, buildSettings, 'settings');
       buildStatus();
       document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));

@@ -28,6 +28,21 @@ export function defaultSettings() {
     defaultMaxSpeedKmh: 100,// 線路の既定の最高速度[km/h]
     divergeSpeedKmh: 35,    // 分岐器の分岐側の制限[km/h]
     accelMs2: 0.65,         // 加速度[m/s^2]
+    // --- 経営 ---
+    capacityPerCar: 140,    // 1両あたりの定員[人]
+    maxLoadFactor: 2.0,     // 乗車率の上限（超える分は積み残し）
+    dailyTripRate: 0.4,     // 人口あたりの1日利用回数
+    demandDecayKm: 12,      // 距離による需要の減衰
+    fareBase: 140,          // 初乗り運賃[円]
+    farePerKm: 14,          // 距離加算[円/km]
+    fareCap: 1200,          // 運賃の上限[円]
+    costPerCarKm: 500,      // 運行費（電力・乗務員・検査）[円/車両km]
+    costPerCarDay: 20000,   // 車両費（償却・保有）[円/両・日]
+    costPerRouteKmDay: 200000,  // 線路・電路の保守[円/km・日]
+    costPerStationDay: 250000,  // 駅運営[円/駅・日]
+    costPerDepotTrackDay: 20000,// 車両基地[円/線・日]
+    targetCongestion: 180,  // 目標のピーク混雑率[%]
+    targetWaitMin: 8,       // 目標の平均待ち時間[分]
     decelMs2: 0.9,          // 減速度[m/s^2]
     reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
@@ -145,6 +160,9 @@ export function migrate(doc) {
       dir: o.dir === 'ba' ? 'ba' : 'ab',                        // 信号機が防護する進行方向
       tracks: Array.isArray(o.tracks) ? o.tracks.slice() : [],  // 駅の発着線（番線）
       extraM: Number.isFinite(o.extraM) ? o.extraM : 2000,      // 駅間省略で足す距離[m]
+      population: Number.isFinite(o.population) ? o.population : 20000,  // 駅勢圏人口
+      jobs: Number.isFinite(o.jobs) ? o.jobs : 4000,                     // 就業・集客力
+      kindId: o.kindId || 'residential',                                 // 駅の性格
       limitKmh: Number.isFinite(o.limitKmh) ? o.limitKmh : 45,  // 速度制限標
       lengthM: Number.isFinite(o.lengthM) ? o.lengthM : 200,
       divergeSpeedKmh: Number.isFinite(o.divergeSpeedKmh) ? o.divergeSpeedKmh : null,

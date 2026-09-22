@@ -141,7 +141,7 @@ export function runCurve(length, profile, opts = {}) {
   const vStart = ms(opts.startKmh ?? 0);
   const vEnd = ms(opts.endKmh ?? 0);
   const L = Math.max(1, length);
-  const n = Math.max(20, Math.min(4000, Math.ceil(L / 5)));
+  const n = Math.max(20, Math.min(1500, Math.ceil(L / 10)));
   const dx = L / n;
 
   // 上限（m/s）
