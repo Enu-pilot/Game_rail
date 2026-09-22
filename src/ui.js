@@ -15,9 +15,15 @@ import { layoutChecks } from './checks.js';
 import { entryAnalysis, stablingSummary } from './analysis.js';
 import { sim, simStart, simPause, simReset, planAdd, planRemove, planClear, simState, PHASE_NAMES } from './sim.js';
 import {
+  TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
+  timetableConflicts, fmtHM, parseHM,
+} from './timetable.js';
+import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
   constructRoute, setRouteState, deleteRoute,
+  addLine, updateLine, deleteLine, lineAddStation, lineRemoveStation, lineMoveStation,
+  addTrain, updateTrain, deleteTrain, duplicateTrain,
 } from './actions.js';
 
 /* ---------------- DOM ヘルパ ---------------- */
@@ -99,6 +105,7 @@ export function initUI(api) {
     formations: document.getElementById('panel-formations'),
     route: document.getElementById('panel-route'),
     sim: document.getElementById('panel-sim'),
+    timetable: document.getElementById('panel-timetable'),
     settings: document.getElementById('panel-settings'),
     statusPos: document.getElementById('status-pos'),
     statusSummary: document.getElementById('status-summary'),
@@ -1034,6 +1041,171 @@ export function initUI(api) {
     return out;
   }
 
+  /* ---------------- ダイヤ ---------------- */
+  function buildTimetable() {
+    const doc = store.doc;
+    const dg = store.ui.diagram || (store.ui.diagram = { lineId: null, selected: null });
+    const line = doc.lines.find(l => l.id === dg.lineId) || doc.lines[0] || null;
+    if (line) dg.lineId = line.id;
+    const out = [];
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '路線', h('span', { class: 'tag' }, `${doc.lines.length} 本`)),
+      doc.lines.length
+        ? field('編集する路線', selectInput('tt.line', line ? line.id : '',
+          doc.lines.map(l => ({ value: l.id, label: l.name })),
+          v => { dg.lineId = v; dg.selected = null; emit('diagram'); }))
+        : h('p', { class: 'note' }, '路線を作り、配線図に置いた「駅（停車場）」を順に追加するとダイヤを引けます。'),
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn sm primary', onclick: () => { addLine(); emit('diagram'); } }, '＋ 路線を作成'),
+        line ? h('button', { class: 'btn sm danger', onclick: () => { deleteLine(line.id); emit('diagram'); } }, '削除') : null,
+        h('button', { class: 'btn sm', onclick: () => { api.setMode('diagram'); } }, 'ダイヤ表示'),
+      ),
+      line ? h('div', { style: 'margin-top:8px' },
+        field('路線名', textInput(`line.${line.id}.name`, line.name, v => updateLine(line.id, { name: v }))),
+        field('線路条件', selectInput(`line.${line.id}.dbl`, line.double ? 'double' : 'single',
+          [{ value: 'double', label: '複線（行き違い自由）' }, { value: 'single', label: '単線（行き違い不可）' }],
+          v => updateLine(line.id, { double: v === 'double' }))),
+      ) : null,
+    ));
+
+    if (!line) return out;
+
+    // 駅
+    const g = graph();
+    const sts = lineStations(doc, g, line);
+    const available = stationObjects(doc).filter(o => !line.stations.includes(o.id));
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '駅（キロ程は配線から自動計算）', h('span', { class: 'tag' }, `${sts.length} 駅`)),
+      sts.length
+        ? h('div', {}, ...sts.map((st, i) => h('div', { class: 'listrow' },
+          h('span', { class: 'num' }, `${i + 1}`),
+          h('span', {
+            class: 'nm', style: 'cursor:pointer',
+            onclick: () => { if (st.object) { store.ui.sel = { kind: 'object', id: st.object.id }; api.focusOn(st.object); emit('select'); } },
+          }, st.name, h('small', { class: 'desc' }, `${(st.km / 1000).toFixed(2)} km`)),
+          h('button', { class: 'btn sm', onclick: () => { lineMoveStation(line.id, st.id, -1); emit('diagram'); } }, '↑'),
+          h('button', { class: 'btn sm', onclick: () => { lineMoveStation(line.id, st.id, 1); emit('diagram'); } }, '↓'),
+          h('button', { class: 'btn sm danger', onclick: () => { lineRemoveStation(line.id, st.id); emit('diagram'); } }, '×'),
+        )))
+        : h('p', { class: 'note' }, 'まだ駅がありません。'),
+      available.length
+        ? h('div', { class: 'field', style: 'margin-top:8px' },
+          h('label', {}, '駅を追加'),
+          (() => {
+            const sel = h('select', {}, h('option', { value: '' }, '— 配置済みの駅から選ぶ —'),
+              ...available.map(o => h('option', { value: o.id }, o.label || '駅')));
+            sel.addEventListener('change', () => { if (sel.value) { lineAddStation(line.id, sel.value); emit('diagram'); } });
+            return sel;
+          })())
+        : h('p', { class: 'note' }, 'パレットの「駅（停車場）」を線路上に置くと、ここから追加できます。'),
+    ));
+
+    // 列車
+    const trains = doc.trains.filter(t => t.lineId === line.id);
+    const sel = trains.find(t => t.id === dg.selected) || null;
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '列車', h('span', { class: 'tag' }, `${trains.length} 本`)),
+      h('div', { class: 'btn-row' },
+        ...TRAIN_TYPES.slice(0, 4).map(tt => h('button', {
+          class: 'btn sm',
+          onclick: () => { addTrain(line.id, { type: tt.id, speedKmh: tt.speed }); emit('diagram'); },
+        }, `＋ ${tt.name}`)),
+        h('button', {
+          class: 'btn sm',
+          onclick: () => { addTrain(line.id, { type: 'deadhead', speedKmh: 45, number: '回送' }); emit('diagram'); },
+        }, '＋ 回送'),
+      ),
+      trains.length
+        ? h('div', { style: 'margin-top:6px' }, ...trains
+          .slice().sort((a, b) => a.departSec - b.departSec)
+          .map(t => {
+            const tt = trainType(t.type);
+            const stops = computeSchedule(doc, sts, t);
+            const last = stops[stops.length - 1];
+            return h('div', {
+              class: 'listrow' + (sel && sel.id === t.id ? ' sel' : ''),
+              onclick: () => { dg.selected = t.id; emit('diagram'); },
+            },
+              h('span', { class: 'dot', style: `background:${t.color || tt.color}` }),
+              h('span', { class: 'nm' }, `${t.number || '列車'}`,
+                h('small', { class: 'desc' }, `${tt.name} ／ ${sts[t.fromIdx] ? sts[t.fromIdx].name : '?'} → ${sts[t.toIdx] ? sts[t.toIdx].name : '?'}`)),
+              h('span', { class: 'num' }, `${fmtHM(t.departSec)}→${last && last.arr != null ? fmtHM(last.arr) : '--:--'}`));
+          }))
+        : h('p', { class: 'note' }, '種別を選んで列車を追加すると、スジが引かれます。ダイヤ上でスジを左右にドラッグすると発時刻を変えられます。'),
+    ));
+
+    if (sel) {
+      const stops = computeSchedule(doc, sts, sel);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, `${sel.number || '列車'} の設定`),
+        h('div', { class: 'row' },
+          field('列車番号', textInput(`tr.${sel.id}.num`, sel.number, v => updateTrain(sel.id, { number: v }))),
+          field('種別', selectInput(`tr.${sel.id}.type`, sel.type,
+            TRAIN_TYPES.map(t => ({ value: t.id, label: t.name })),
+            v => updateTrain(sel.id, { type: v, speedKmh: trainType(v).speed }))),
+        ),
+        h('div', { class: 'row' },
+          field('始発', selectInput(`tr.${sel.id}.from`, String(sel.fromIdx),
+            sts.map((s2, i) => ({ value: String(i), label: s2.name })),
+            v => updateTrain(sel.id, { fromIdx: Number(v), dir: Number(v) <= sel.toIdx ? 'down' : 'up' }))),
+          field('終着', selectInput(`tr.${sel.id}.to`, String(sel.toIdx),
+            sts.map((s2, i) => ({ value: String(i), label: s2.name })),
+            v => updateTrain(sel.id, { toIdx: Number(v), dir: sel.fromIdx <= Number(v) ? 'down' : 'up' }))),
+        ),
+        h('div', { class: 'row' },
+          field('発時刻', (() => {
+            const i = h('input', { type: 'text', value: fmtHM(sel.departSec), placeholder: '06:30' });
+            i.dataset.key = `tr.${sel.id}.dep`;
+            i.addEventListener('change', () => {
+              const v = parseHM(i.value);
+              if (v != null) updateTrain(sel.id, { departSec: v });
+              else setMessage('時刻は 06:30 の形式で入力してください');
+            });
+            return i;
+          })()),
+          field('表定速度（km/h）', numberInput(`tr.${sel.id}.spd`, sel.speedKmh,
+            v => updateTrain(sel.id, { speedKmh: Math.max(5, v || 60) }), { min: 5, step: 5 })),
+        ),
+        field('停車時分（秒）', numberInput(`tr.${sel.id}.dwell`, sel.dwellSec,
+          v => updateTrain(sel.id, { dwellSec: Math.max(0, v || 0) }), { min: 0, step: 10 })),
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn sm', onclick: () => { duplicateTrain(sel.id); emit('diagram'); } }, '複製'),
+          h('button', {
+            class: 'btn sm',
+            onclick: () => {
+              const fromSt = sts[sel.fromIdx], toSt = sts[sel.toIdx];
+              const f = sel.formationId ? doc.formations.find(x => x.id === sel.formationId) : doc.formations.find(x => x.trackId === (fromSt && fromSt.trackId));
+              if (!f || !toSt || !toSt.trackId) { setMessage('始発駅に在線する編成が見つかりません'); return; }
+              planAdd(f.id, toSt.trackId);
+              ui_showSim();
+              setMessage(`${sel.number || '列車'} を運転の計画に追加しました`);
+            },
+          }, '▶ 運転に送る'),
+          h('button', { class: 'btn sm danger', onclick: () => { deleteTrain(sel.id); emit('diagram'); } }, '削除'),
+        ),
+        h('hr', { class: 'sepline' }),
+        h('div', { class: 'kv' }, h('span', {}, '駅'), h('b', {}, '着 / 発')),
+        ...stops.map(st => h('div', { class: 'kv' },
+          h('span', {}, sts[st.idx] ? sts[st.idx].name : '?'),
+          h('b', {}, `${st.arr != null ? fmtHM(st.arr) : '　—'} / ${st.dep != null ? fmtHM(st.dep) : '　—'}${st.skip ? '（通過）' : ''}`))),
+      ));
+    }
+
+    const issues = timetableConflicts(doc, line, sts, trains);
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, 'ダイヤの競合', h('span', { class: 'tag' }, `${issues.length} 件`)),
+      issues.length
+        ? h('div', {}, ...issues.slice(0, 12).map(is => h('div', { class: 'listrow' },
+          h('span', { class: 'dot', style: `background:${is.level === 'error' ? '#ff5f56' : '#ffb020'}` }),
+          h('span', { class: 'nm', style: 'white-space:normal' }, is.message))))
+        : h('p', { class: 'note' }, '✓ 行き違い・続行の支障はありません'),
+    ));
+    return out;
+  }
+
+  function ui_showSim() { showTab('right', 'sim'); }
+
   /* ---------------- 設定 ---------------- */
   function buildSettings() {
     const st = store.doc.settings;
@@ -1114,6 +1286,7 @@ export function initUI(api) {
       withFocus(els.formations, buildFormations, selKey);
       withFocus(els.route, buildRoute, selKey);
       withFocus(els.sim, buildSim, 'sim');
+      withFocus(els.timetable, buildTimetable, `tt:${(store.ui.diagram || {}).lineId}:${(store.ui.diagram || {}).selected}`);
       withFocus(els.settings, buildSettings, 'settings');
       buildStatus();
       document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));

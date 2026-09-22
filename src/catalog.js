@@ -40,6 +40,7 @@ export const OBJECT_GROUPS = [
       { id: 'platform_roof',   name: 'ホーム上屋',     w: 100, h: 12, color: '#66718c', shape: 'roof' },
       { id: 'overbridge',      name: '跨線橋',         w: 8,   h: 70, color: '#a7b2c9', shape: 'bridge' },
       { id: 'underpass',       name: '地下通路',       w: 8,   h: 70, color: '#66718c', shape: 'bridge' },
+      { id: 'station_mark',    name: '駅（停車場）',   w: 10,  h: 10, color: '#7fd1ff', shape: 'station', onTrack: true, station: true },
       { id: 'station_bldg',    name: '駅舎',           w: 60,  h: 30, color: '#c9a36b', shape: 'building' },
       { id: 'ticket_gate',     name: '改札',           w: 24,  h: 12, color: '#6ad1a8', shape: 'gate' },
       { id: 'waiting_room',    name: '待合室',         w: 20,  h: 12, color: '#b0a07a', shape: 'building' },

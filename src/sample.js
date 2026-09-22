@@ -32,7 +32,7 @@ export function sampleDoc() {
   const ladderDeg = Math.atan2(LAD.y1 - LAD.y0, LAD.x1 - LAD.x0) * 180 / Math.PI;
 
   /* ---- 駅部（本線から分岐する2面2線） ---- */
-  t.push(T('本線', 'main', [{ x: 0, y: 40 }, { x: 1180, y: 40 }], { a: 'boundary', b: 'boundary' }));
+  t.push(T('本線', 'main', [{ x: -1600, y: 40 }, { x: 4600, y: 40 }], { a: 'boundary', b: 'boundary' }));
   t.push(T('駅1番線', 'platform', [{ x: 140, y: 40 }, { x: 200, y: 80 }, { x: 520, y: 80 }, { x: 580, y: 40 }]));
   t.push(T('駅2番線', 'platform', [{ x: 200, y: 80 }, { x: 240, y: 110 }, { x: 500, y: 110 }, { x: 520, y: 80 }]));
   o.push(O('platform_island', 370, 95, { w: 250, h: 14, label: '1・2番線ホーム' }));
@@ -119,6 +119,29 @@ export function sampleDoc() {
     const p1 = { x: Math.round((TT.x + Math.cos(a) * 58) * 10) / 10, y: Math.round((TT.y + Math.sin(a) * 58) * 10) / 10 };
     t.push(T(`扇形庫${i + 1}番線`, 'inspection', [p1, p0], { a: 'buffer' }));
   });
+
+  /* ---- 本線の駅（ダイヤ用） ---- */
+  const mainLine = t.find(x => x.name === '本線');
+  const station = (name, x, extra = {}) => {
+    o.push({
+      id: uid('b'), type: 'station_mark', x, y: 40, w: 10, h: 10, rot: 0,
+      mirror: false, position: 0, dir: 'ab',
+      label: name, note: '', trackId: mainLine.id,
+    });
+    return o[o.length - 1];
+  };
+  // 東川は交換設備のある中間駅
+  t.push(T('東川1番線', 'platform', [{ x: 2200, y: 40 }, { x: 2280, y: 75 }, { x: 2560, y: 75 }, { x: 2640, y: 40 }]));
+  o.push(O('platform_side', 2420, 90, { w: 200, h: 8, label: '東川ホーム' }));
+  o.push(O('station_bldg', 2420, 130, { w: 50, h: 24, label: '東川駅' }));
+  o.push(O('platform_side', 4380, 66, { w: 180, h: 8, label: '海岸ホーム' }));
+  o.push(O('station_bldg', 4380, 100, { w: 50, h: 24, label: '海岸駅' }));
+  o.push(O('platform_side', -1400, 66, { w: 180, h: 8, label: '西山ホーム' }));
+  o.push(O('station_bldg', -1400, 100, { w: 50, h: 24, label: '西山駅' }));
+  const stW = station('西山', -1400);
+  const stM = station('みどりが丘', 360);
+  const stH = station('東川', 2420);
+  const stK = station('海岸', 4400);
 
   /* ---- 信号機を線路に紐づける ---- */
   const attachSignal = (type, trackName, atFromEnd, dir, label) => {
@@ -212,6 +235,30 @@ export function sampleDoc() {
     color: '#c8a24a', trackId: t.find(x => x.kind === 'mow').id, note: '',
   });
 
+  /* ---- 路線とダイヤ ---- */
+  const line = {
+    id: uid('l'), name: 'みどり本線', color: '#7fd1ff', double: true,
+    stations: [stW.id, stM.id, stH.id, stK.id],
+  };
+  const trains = [];
+  const addTrain = (number, type, dir, departSec, speedKmh) => {
+    const last = line.stations.length - 1;
+    trains.push({
+      id: uid('tr'), lineId: line.id, number, name: '', type, dir,
+      fromIdx: dir === 'down' ? 0 : last,
+      toIdx: dir === 'down' ? last : 0,
+      departSec, speedKmh, dwellSec: 30, skip: [], color: null, formationId: null, note: '',
+    });
+  };
+  addTrain('101M', 'local', 'down', 6 * 3600, 60);
+  addTrain('102M', 'local', 'up', 6 * 3600 + 600, 60);
+  addTrain('103M', 'rapid', 'down', 6 * 3600 + 1800, 80);
+  addTrain('104M', 'local', 'up', 6 * 3600 + 2400, 60);
+  addTrain('105M', 'local', 'down', 6 * 3600 + 3600, 60);
+  addTrain('回1', 'deadhead', 'down', 6 * 3600 + 900, 45);
+
   doc.tracks = t; doc.objects = o; doc.formations = f;
+  doc.lines = [line];
+  doc.trains = trains;
   return doc;
 }

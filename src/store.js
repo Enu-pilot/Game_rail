@@ -41,6 +41,8 @@ export function newDoc(name = '無題の車両基地') {
     objects: [],
     formations: [],
     routes: [],        // 構成済みの進路（連動）
+    lines: [],         // 路線（駅の並び）
+    trains: [],        // ダイヤの列車（スジ）
   };
 }
 
@@ -162,6 +164,30 @@ export function migrate(doc) {
     reversals: +r.reversals || 0,
     distance: +r.distance || 0,
     set: r.set !== false,
+  }));
+  d.lines = (doc.lines || []).map(l => ({
+    id: l.id || uid('l'),
+    name: l.name || '路線',
+    color: l.color || '#7fd1ff',
+    double: l.double !== false,          // 複線かどうか
+    stations: (l.stations || []).map(s2 => (typeof s2 === 'string' ? s2 : s2.objectId)).filter(Boolean),
+  }));
+  d.trains = (doc.trains || []).map(t => ({
+    id: t.id || uid('tr'),
+    lineId: t.lineId || null,
+    number: t.number || '',
+    name: t.name || '',
+    type: t.type || 'local',
+    dir: t.dir === 'up' ? 'up' : 'down',
+    fromIdx: Number.isFinite(t.fromIdx) ? t.fromIdx : 0,
+    toIdx: Number.isFinite(t.toIdx) ? t.toIdx : 1,
+    departSec: Number.isFinite(t.departSec) ? t.departSec : 6 * 3600,
+    speedKmh: Number.isFinite(t.speedKmh) ? t.speedKmh : 60,
+    dwellSec: Number.isFinite(t.dwellSec) ? t.dwellSec : 30,
+    skip: Array.isArray(t.skip) ? t.skip.slice() : [],
+    color: t.color || null,
+    formationId: t.formationId || null,
+    note: t.note || '',
   }));
   d.version = DOC_VERSION;
   return d;

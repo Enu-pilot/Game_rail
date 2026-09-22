@@ -2,6 +2,7 @@
 
 import { store, subscribe, emit, undo, redo, loadDoc, newDoc, restoreLocal, setMessage, snapshot, commit } from './store.js';
 import { initCanvas } from './canvas.js';
+import { initDiagram } from './diagram.js';
 import { initUI } from './ui.js';
 import { exportJSON, importJSON, exportPNG } from './io.js';
 import { deleteSelected, duplicateSelected } from './actions.js';
@@ -10,15 +11,43 @@ import { sampleDoc } from './sample.js';
 const canvas = document.getElementById('board');
 const stage = document.getElementById('stage');
 
+const diagramCanvas = document.getElementById('diagram');
 const api = initCanvas(canvas, stage);
+const diagram = initDiagram(diagramCanvas, stage);
+api.diagram = diagram;
 const ui = initUI(api);
 
+/* ---- 配線図 / ダイヤ の切替 ---- */
+let diagramFitted = false;
+function setMode(mode) {
+  store.ui.mode = mode;
+  canvas.classList.toggle('hidden', mode !== 'layout');
+  diagramCanvas.classList.toggle('hidden', mode !== 'diagram');
+  document.querySelectorAll('#modes .tool').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.getElementById('tools').style.opacity = mode === 'layout' ? '1' : '.4';
+  if (mode === 'diagram') {
+    diagram.resize();
+    if (!diagramFitted) { diagram.fit(); diagramFitted = true; }
+    diagram.invalidate();
+    ui.showTab('right', 'timetable');
+  }
+  emit('mode');
+}
+api.setMode = setMode;
+document.getElementById('modes').addEventListener('click', e => {
+  const b = e.target.closest('.tool');
+  if (b) setMode(b.dataset.mode);
+});
+store.ui.mode = 'layout';
+
 /* ---- 初期ドキュメント ---- */
+// 起動時は本線を除いた範囲（＝車両基地まわり）に合わせる
+const initialFit = () => api.fitAll({ excludeKinds: ['main', 'platform'] });
 if (!restoreLocal()) {
   loadDoc(sampleDoc());
-  setTimeout(() => api.fitAll(), 0);
+  setTimeout(initialFit, 0);
 } else {
-  setTimeout(() => api.fitAll(), 0);
+  setTimeout(initialFit, 0);
 }
 emit('init');
 
@@ -34,7 +63,7 @@ on('btn-redo', () => redo());
 on('btn-delete', () => deleteSelected());
 on('btn-zoom-in', () => api.zoomBy(1.25));
 on('btn-zoom-out', () => api.zoomBy(1 / 1.25));
-on('btn-zoom-fit', () => api.fitAll());
+on('btn-zoom-fit', () => (store.ui.mode === 'diagram' ? diagram.fit() : api.fitAll()));
 on('btn-sample', () => {
   if (!confirm('現在のレイアウトを破棄してサンプル（みどりが丘車両センター）を読み込みますか？')) return;
   loadDoc(sampleDoc()); api.fitAll(); setMessage('サンプルレイアウトを読み込みました');

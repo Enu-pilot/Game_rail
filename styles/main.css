@@ -51,7 +51,9 @@ button,input,select,textarea{font:inherit;color:inherit}
   width:274px;flex:none;background:var(--bg-2);display:flex;flex-direction:column;min-height:0;
 }
 .side.left{border-right:1px solid var(--line)}
-.side.right{width:300px;border-left:1px solid var(--line)}
+.side.right{width:310px;border-left:1px solid var(--line)}
+.tabs{overflow-x:auto}
+.tab{white-space:nowrap;padding:8px 6px}
 .tabs{display:flex;flex:none;border-bottom:1px solid var(--line);background:var(--bg-2)}
 .tab{
   flex:1;background:none;border:none;border-bottom:2px solid transparent;
@@ -62,7 +64,9 @@ button,input,select,textarea{font:inherit;color:inherit}
 .tabpanel{display:none;overflow-y:auto;overscroll-behavior:contain;flex:1;padding:10px}
 .tabpanel.active{display:block}
 .stage{flex:1;position:relative;min-width:0;background:#0d1015;overflow:hidden}
-#board{display:block;width:100%;height:100%;cursor:default;touch-action:none}
+#board,#diagram{display:block;width:100%;height:100%;cursor:default;touch-action:none;position:absolute;inset:0}
+.hidden{display:none !important}
+#diagram{cursor:grab}
 .hint{
   position:absolute;left:12px;bottom:12px;pointer-events:none;
   background:#0f1420e0;border:1px solid var(--line);border-radius:6px;

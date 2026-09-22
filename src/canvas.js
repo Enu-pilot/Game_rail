@@ -393,8 +393,8 @@ export function initCanvas(canvas, stage) {
 
   function zoomBy(f) { setZoom(ui.camera.zoom * f); }
 
-  function fitAll() {
-    const b = contentBounds(store.doc);
+  function fitAll(opts) {
+    const b = contentBounds(store.doc, opts);
     const pad = 40;
     const bw = Math.max(50, b.x1 - b.x0), bh = Math.max(50, b.y1 - b.y0);
     const z = Math.max(0.08, Math.min(4, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));

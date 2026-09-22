@@ -25,7 +25,7 @@ const LAYER = {
   yard: 0, fence: 0, building: 0, shed: 0, roof: 0,
   platform: 2, pit: 2, deck: 2, washer: 2, machine: 2, gate: 2,
   turnout: 2, pointmachine: 2, signal: 3, marker: 3, buffer: 2,
-  bridge: 3, label: 3, stairs: 3,
+  bridge: 3, label: 3, stairs: 3, station: 3,
 };
 const layerOf = o => LAYER[objectDef(o.type).shape] ?? 0;
 
@@ -497,6 +497,16 @@ function drawObject(ctx, cam, doc, o, ui) {
       ctx.beginPath(); ctx.moveTo(-w / 2, -h / 2); ctx.lineTo(w / 2, h / 2); ctx.strokeStyle = hexA(color, .6); ctx.stroke();
       break;
     }
+    case 'station': {
+      const r = Math.max(5, 2.2 * z);
+      ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, .5 * z);
+      ctx.beginPath(); ctx.moveTo(0, -r * 1.6); ctx.lineTo(0, r * 1.6); ctx.stroke();
+      ctx.fillStyle = '#10141c';
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(0, 0, r * .4, 0, Math.PI * 2); ctx.fill();
+      break;
+    }
     case 'stairs': {
       ctx.fillStyle = hexA(color, .3);
       ctx.strokeStyle = color; ctx.lineWidth = 1.4;
@@ -631,8 +641,9 @@ function drawObject(ctx, cam, doc, o, ui) {
     if (Math.abs(normRot((o.rot || 0) + ang)) > Math.PI / 2 + 1e-6) ctx.rotate(Math.PI);
     const fs = shape === 'label' ? Math.max(11, o.h * z * .8)
       : shape === 'turnout' ? 10.5
+        : shape === 'station' ? Math.min(15, Math.max(11, 3 * z))
         : Math.min(14, Math.max(9, Math.min(w, h) * .45));
-    const dy = shape === 'turnout' ? -(h / 2 + 7) : 0;   // 記号に重ねず脇に出す
+    const dy = shape === 'turnout' ? -(h / 2 + 7) : (shape === 'station' ? -(Math.max(10, 4.5 * z)) : 0);
     ctx.font = `600 ${fs}px ${FONT}`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.8)';
@@ -1057,12 +1068,20 @@ function normRot(r) {
   return a;
 }
 
-/** 図形全体のバウンディングボックス（全体表示・PNG出力用） */
-export function contentBounds(doc) {
+/**
+ * 図形全体のバウンディングボックス（全体表示・PNG出力用）
+ * excludeKinds を渡すと、その種別の線路（例: 本線）を除いた範囲を返す
+ */
+export function contentBounds(doc, { excludeKinds = [] } = {}) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   const add = (x, y) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
-  for (const t of doc.tracks) for (const p of t.points) add(p.x, p.y);
-  for (const o of doc.objects) {
+  for (const t of doc.tracks) {
+    if (excludeKinds.includes(t.kind)) continue;
+    for (const p of t.points) add(p.x, p.y);
+  }
+  const inside = (x, y) => x >= x0 - 300 && x <= x1 + 300 && y >= y0 - 300 && y <= y1 + 300;
+  const objs = doc.objects.filter(o => !excludeKinds.length || inside(o.x, o.y));
+  for (const o of objs) {
     const r = Math.max(o.w, o.h) / 2;
     add(o.x - r, o.y - r); add(o.x + r, o.y + r);
   }

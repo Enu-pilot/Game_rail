@@ -11,6 +11,11 @@
   <header class="topbar">
     <div class="brand"><span class="logo">🚆</span><span>車両基地レイアウトデザイナー</span></div>
 
+    <div class="toolgroup" id="modes">
+      <button class="tool active" data-mode="layout" title="配線図を編集">▦<span>配線図</span></button>
+      <button class="tool" data-mode="diagram" title="ダイヤグラムを編集">📈<span>ダイヤ</span></button>
+    </div>
+
     <div class="toolgroup" id="tools">
       <button class="tool" data-tool="select" title="選択 / 移動 (V)">▶<span>選択</span></button>
       <button class="tool" data-tool="track" title="線路を敷設 (T)">╱<span>線路</span></button>
@@ -53,6 +58,7 @@
 
     <main class="stage" id="stage">
       <canvas id="board"></canvas>
+      <canvas id="diagram" class="hidden"></canvas>
       <div class="hint" id="hint"></div>
     </main>
 
@@ -62,12 +68,14 @@
         <button class="tab" data-tab="formations">編成</button>
         <button class="tab" data-tab="route">経路</button>
         <button class="tab" data-tab="sim">運転</button>
+        <button class="tab" data-tab="timetable">ダイヤ</button>
         <button class="tab" data-tab="settings">設定</button>
       </nav>
       <div class="tabpanel active" data-panel="inspector" id="panel-inspector"></div>
       <div class="tabpanel" data-panel="formations" id="panel-formations"></div>
       <div class="tabpanel" data-panel="route" id="panel-route"></div>
       <div class="tabpanel" data-panel="sim" id="panel-sim"></div>
+      <div class="tabpanel" data-panel="timetable" id="panel-timetable"></div>
       <div class="tabpanel" data-panel="settings" id="panel-settings"></div>
     </aside>
   </div>

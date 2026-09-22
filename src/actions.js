@@ -218,6 +218,119 @@ export function isRouteAligned(route) {
   return routeAligned(store.doc, getGraph(store.doc, store.rev), route);
 }
 
+/* ---------------- 路線とダイヤ ---------------- */
+
+export function addLine(name) {
+  snapshot();
+  const n = store.doc.lines.length + 1;
+  const line = { id: uid('l'), name: name || `路線${n}`, color: '#7fd1ff', double: true, stations: [] };
+  store.doc.lines.push(line);
+  store.ui.diagram = { ...(store.ui.diagram || {}), lineId: line.id };
+  commit('add-line');
+  setMessage(`${line.name} を作成しました`);
+  return line;
+}
+
+export function updateLine(id, patch) {
+  const l = store.doc.lines.find(x => x.id === id);
+  if (!l) return;
+  snapshot();
+  Object.assign(l, patch);
+  commit('update-line');
+}
+
+export function deleteLine(id) {
+  snapshot();
+  store.doc.lines = store.doc.lines.filter(l => l.id !== id);
+  store.doc.trains = store.doc.trains.filter(t => t.lineId !== id);
+  commit('delete-line');
+}
+
+export function lineAddStation(lineId, objectId, index = -1) {
+  const l = store.doc.lines.find(x => x.id === lineId);
+  if (!l || !objectId || l.stations.includes(objectId)) return;
+  snapshot();
+  if (index < 0 || index >= l.stations.length) l.stations.push(objectId);
+  else l.stations.splice(index, 0, objectId);
+  commit('line-station');
+}
+
+export function lineRemoveStation(lineId, objectId) {
+  const l = store.doc.lines.find(x => x.id === lineId);
+  if (!l) return;
+  snapshot();
+  const idx = l.stations.indexOf(objectId);
+  l.stations = l.stations.filter(s => s !== objectId);
+  for (const t of store.doc.trains.filter(t => t.lineId === lineId)) {
+    t.fromIdx = Math.max(0, Math.min(l.stations.length - 1, t.fromIdx > idx ? t.fromIdx - 1 : t.fromIdx));
+    t.toIdx = Math.max(0, Math.min(l.stations.length - 1, t.toIdx > idx ? t.toIdx - 1 : t.toIdx));
+  }
+  commit('line-station');
+}
+
+export function lineMoveStation(lineId, objectId, delta) {
+  const l = store.doc.lines.find(x => x.id === lineId);
+  if (!l) return;
+  const i = l.stations.indexOf(objectId);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= l.stations.length) return;
+  snapshot();
+  l.stations.splice(i, 1);
+  l.stations.splice(j, 0, objectId);
+  commit('line-station');
+}
+
+export function addTrain(lineId, partial = {}) {
+  const l = store.doc.lines.find(x => x.id === lineId);
+  if (!l) { setMessage('先に路線を作成してください'); return null; }
+  snapshot();
+  const n = store.doc.trains.filter(t => t.lineId === lineId).length;
+  const last = Math.max(0, l.stations.length - 1);
+  const dir = partial.dir || (n % 2 ? 'up' : 'down');
+  const t = {
+    id: uid('tr'), lineId,
+    number: partial.number || `${100 + n * 2 + (dir === 'up' ? 1 : 0)}M`,
+    name: partial.name || '',
+    type: partial.type || 'local',
+    dir,
+    fromIdx: partial.fromIdx ?? (dir === 'down' ? 0 : last),
+    toIdx: partial.toIdx ?? (dir === 'down' ? last : 0),
+    departSec: partial.departSec ?? (6 * 3600 + n * 900),
+    speedKmh: partial.speedKmh ?? 60,
+    dwellSec: partial.dwellSec ?? 30,
+    skip: [], color: null, formationId: partial.formationId || null, note: '',
+  };
+  store.doc.trains.push(t);
+  store.ui.diagram = { ...(store.ui.diagram || {}), selected: t.id };
+  commit('add-train');
+  return t;
+}
+
+export function updateTrain(id, patch) {
+  const t = store.doc.trains.find(x => x.id === id);
+  if (!t) return;
+  snapshot();
+  Object.assign(t, patch);
+  commit('update-train');
+}
+
+export function deleteTrain(id) {
+  snapshot();
+  store.doc.trains = store.doc.trains.filter(t => t.id !== id);
+  if (store.ui.diagram && store.ui.diagram.selected === id) store.ui.diagram.selected = null;
+  commit('delete-train');
+}
+
+export function duplicateTrain(id) {
+  const t = store.doc.trains.find(x => x.id === id);
+  if (!t) return;
+  snapshot();
+  const copy = { ...t, id: uid('tr'), number: `${t.number}'`, departSec: t.departSec + 1800, skip: t.skip.slice() };
+  store.doc.trains.push(copy);
+  store.ui.diagram = { ...(store.ui.diagram || {}), selected: copy.id };
+  commit('duplicate-train');
+}
+
 export function addFormation(partial = {}) {
   snapshot();
   const n = store.doc.formations.length;
