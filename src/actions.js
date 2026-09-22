@@ -1,7 +1,7 @@
 // ドキュメント編集アクション（すべて snapshot() → 変更 → commit() の順で実行）
 
 import { store, snapshot, commit, uid, select, setMessage, trackCapacity, trackLength } from './store.js';
-import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS } from './catalog.js';
+import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, turnoutSize, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
 import { distToPolyline, pointAt } from './geom.js';
 
 /** 同一種別の連番から線路名を作る */
@@ -30,6 +30,62 @@ export function addTrack(points, kindId = store.ui.trackKindId, name) {
   commit('add-track');
   setMessage(`${t.name} を敷設しました（${Math.round(trackLength(t))}m ／ ${trackCapacity(store.doc, t)}両）`);
   return t;
+}
+
+/* ---------------- 分岐器の設置 ---------------- */
+
+const VARIANT_TYPE = TURNOUT_TYPE_BY_VARIANT;
+const normAng = a => { let v = a % (Math.PI * 2); if (v > Math.PI) v -= Math.PI * 2; if (v < -Math.PI) v += Math.PI * 2; return v; };
+
+/** 指定位置付近に既に置かれている分岐器 */
+export function turnoutNear(x, y, maxDist = 14) {
+  let best = null;
+  for (const o of store.doc.objects) {
+    if (objectDef(o.type).shape !== 'turnout') continue;
+    const d = Math.hypot(o.x - x, o.y - y);
+    if (d <= maxDist && (!best || d < best.d)) best = { o, d };
+  }
+  return best ? best.o : null;
+}
+
+/** 接続点に分岐器を設置する（topology.turnoutSpecAt の結果を渡す） */
+export function placeTurnoutFromSpec(spec, frog = 10) {
+  const type = VARIANT_TYPE[spec.variant] || 'turnout_single';
+  const def = objectDef(type);
+  const sz = def.frog ? turnoutSize(def.variant, frog) : { w: def.w, h: def.h };
+  snapshot();
+  const o = {
+    id: uid('b'), type, x: spec.x, y: spec.y,
+    w: sz.w, h: sz.h, rot: spec.rot,
+    frog: def.frog ? frog : null, mirror: !!spec.mirror,
+    label: '', note: '', trackId: null,
+  };
+  store.doc.objects.push(o);
+  store.ui.sel = { kind: 'object', id: o.id };
+  commit('add-turnout');
+  setMessage(`${def.name} を接続点に設置しました`);
+  return o;
+}
+
+/** 接続のない交差点にダイヤモンドクロッシングを設置する */
+export function placeCrossingFrom(cross) {
+  const def = objectDef('diamond');
+  let d = normAng(cross.angB - cross.angA);
+  if (d > Math.PI / 2) d -= Math.PI;
+  if (d < -Math.PI / 2) d += Math.PI;
+  const w = def.w;
+  const h = Math.max(4, Math.round(Math.abs(w * Math.sin(d)) * 10) / 10);
+  snapshot();
+  const o = {
+    id: uid('b'), type: 'diamond', x: cross.x, y: cross.y,
+    w, h, rot: cross.angA, xang: Math.abs(d),
+    frog: null, mirror: d < 0, label: '', note: '', trackId: null,
+  };
+  store.doc.objects.push(o);
+  store.ui.sel = { kind: 'object', id: o.id };
+  commit('add-crossing');
+  setMessage(`ダイヤモンドクロッシングを設置しました（交差角 ${(Math.abs(d) * 180 / Math.PI).toFixed(0)}°）`);
+  return o;
 }
 
 /** 最寄りの線路にスナップする（線路上設備用） */

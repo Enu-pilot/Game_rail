@@ -1,7 +1,7 @@
 // 線路の接続関係（トポロジー）の構築・入換経路探索・レイアウト検証
 
 import { polylineLength, pointAt, distToPolyline, dist } from './geom.js';
-import { trackKind } from './catalog.js';
+import { trackKind, objectDef } from './catalog.js';
 import { trackCapacity, trackUsage, formationLength } from './store.js';
 
 export const JOIN_TOL = 6;        // 接続とみなす距離[m]
@@ -63,6 +63,29 @@ export function buildGraph(doc, tol = JOIN_TOL) {
         const list = attach.get(t.id);
         if (!list.some(a => Math.abs(a.at - r.at) < tol)) list.push({ at: r.at, node: node.id });
       }
+    }
+  }
+
+  // 2.5) 転車台: 放射状に集まる線路の端点を1つのハブにまとめる
+  const merged = new Map();
+  for (const o of (doc.objects || [])) {
+    if (objectDef(o.type).shape !== 'turntable') continue;
+    const R = Math.max(o.w, o.h) / 2 + tol * 1.5;
+    const hub = addNode(o.x, o.y);
+    hub.turntable = o.id;
+    hub.turntableSize = Math.max(o.w, o.h);
+    for (const n of nodes) {
+      if (n === hub || !n.endOf.length) continue;
+      if (dist(n.x, n.y, o.x, o.y) <= R) {
+        merged.set(n.id, hub.id);
+        hub.endOf.push(...n.endOf);
+        if (n.ext) hub.ext = true;
+      }
+    }
+  }
+  if (merged.size) {
+    for (const list of attach.values()) {
+      for (const a of list) if (merged.has(a.node)) a.node = merged.get(a.node);
     }
   }
 
@@ -146,12 +169,12 @@ export function findRoute(doc, g, opts) {
     for (let i = 1; i < heap.length; i++) if (heap[i].cost < heap[bi].cost) bi = i;
     return heap.splice(bi, 1)[0];
   };
-  const costOf = (rev, d) => rev * 1e6 + d;
+  const costOf = (rev, turns, d) => rev * 1e6 + turns * 4e5 + d;
 
   // 起点: 在線中の線路上のどこからでも、どちら向きにも発車できるものとする
   for (const e of g.trackEdges(fromTrackId)) {
     for (const nid of [e.a, e.b]) {
-      const st = { edgeId: e.id, nodeId: nid, rev: 0, dist: 0, cost: 0, prev: null, kind: 'start' };
+  const st = { edgeId: e.id, nodeId: nid, rev: 0, turns: 0, dist: 0, cost: 0, prev: null, kind: 'start' };
       const k = key(e.id, nid);
       if (!best.has(k) || best.get(k).cost > st.cost) { best.set(k, st); push(st); }
     }
@@ -178,11 +201,15 @@ export function findRoute(doc, g, opts) {
       const e = g.edgeById.get(eid);
       if (eid === cur.edgeId) continue;
       const out = g.headingOut(e, cur.nodeId);
-      if (angleDiff(arrive, out) > maxTurn) continue;             // 急すぎる転向は折返しが必要
+      const viaTable = !!node.turntable;                          // 転車台はどの向きへも転回できる
+      if (!viaTable && angleDiff(arrive, out) > maxTurn) continue;// 急すぎる転向は折返しが必要
       const nid = g.other(e, cur.nodeId);
+      const turns = cur.turns + (viaTable && angleDiff(arrive, out) > 1e-3 ? 1 : 0);
       const st = {
-        edgeId: eid, nodeId: nid, rev: cur.rev, dist: cur.dist + e.len,
-        cost: costOf(cur.rev, cur.dist + e.len), prev: cur, kind: 'run',
+        edgeId: eid, nodeId: nid, rev: cur.rev, turns, dist: cur.dist + e.len,
+        cost: costOf(cur.rev, turns, cur.dist + e.len), prev: cur, kind: 'run',
+        turntable: viaTable ? node.turntable : null,
+        turntableSize: viaTable ? node.turntableSize : 0,
       };
       const kk = key(eid, nid);
       if (!best.has(kk) || best.get(kk).cost > st.cost) { best.set(kk, st); push(st); }
@@ -194,8 +221,8 @@ export function findRoute(doc, g, opts) {
       if (fits || !enforceTailFit) {
         const nid = g.other(curEdge, cur.nodeId);
         const st = {
-          edgeId: cur.edgeId, nodeId: nid, rev: cur.rev + 1, dist: cur.dist + curEdge.len,
-          cost: costOf(cur.rev + 1, cur.dist + curEdge.len), prev: cur, kind: 'reverse',
+          edgeId: cur.edgeId, nodeId: nid, rev: cur.rev + 1, turns: cur.turns, dist: cur.dist + curEdge.len,
+          cost: costOf(cur.rev + 1, cur.turns, cur.dist + curEdge.len), prev: cur, kind: 'reverse',
           shortTail: !fits,
         };
         const kk = key(cur.edgeId, nid);
@@ -221,6 +248,7 @@ export function findRoute(doc, g, opts) {
   const steps = [];  // 表示用
   const reversePoints = [];
   const shortTails = [];
+  const tableIssues = [];
   for (let i = 0; i < chain.length; i++) {
     const s = chain[i];
     const e = g.edgeById.get(s.edgeId);
@@ -232,6 +260,12 @@ export function findRoute(doc, g, opts) {
       reversePoints.push({ trackId: e.trackId, at: forward ? e.fromAt : e.toAt });
       steps.push({ type: 'reverse', trackId: e.trackId, name: t.name, len: e.len, short: s.shortTail });
       if (s.shortTail) shortTails.push({ name: t.name, len: e.len });
+    } else if (s.turntable) {
+      steps.push({ type: 'turntable', name: '転車台で転回', size: s.turntableSize });
+      if (s.turntableSize && trainLength > s.turntableSize) {
+        tableIssues.push({ size: s.turntableSize });
+      }
+      steps.push({ type: 'run', trackId: e.trackId, name: t.name, len: e.len });
     } else {
       const last = steps[steps.length - 1];
       if (last && last.type === 'run' && last.trackId === e.trackId) last.len += e.len;
@@ -241,12 +275,17 @@ export function findRoute(doc, g, opts) {
 
   // 支障・容量の確認
   const warnings = [];
+  for (const ti of tableIssues) {
+    warnings.push(`転車台（桁長 ${ti.size}m）に編成長 ${trainLength.toFixed(0)}m は載りません（機関車単体などに限られます）`);
+  }
   for (const st of shortTails) {
     warnings.push(`引上げに使う「${st.name}」の有効長が不足しています（区間 ${st.len.toFixed(0)}m ＜ 編成長 ${trainLength.toFixed(0)}m）`);
   }
-  const usedTracks = [...new Set(steps.map(s => s.trackId))].filter(id => id !== fromTrackId && id !== toTrackId);
+  const usedTracks = [...new Set(steps.map(s => s.trackId))]
+    .filter(id => id && id !== fromTrackId && id !== toTrackId);
   for (const id of usedTracks) {
     const t = g.trackById.get(id);
+    if (!t) continue;
     const u = trackUsage(doc, t);
     if (u.list.length) warnings.push(`経由する「${t.name}」に ${u.list.map(f => f.name).join('・')} が留置中です（支障）`);
   }
@@ -264,6 +303,7 @@ export function findRoute(doc, g, opts) {
     steps, path, warnings, reversePoints,
     distance: goal.dist,
     reversals: goal.rev,
+    turntables: goal.turns || 0,
     toExt,
   };
 }
@@ -327,6 +367,53 @@ export function validateLayout(doc, g) {
     if (u.over) issues.push({ level: 'error', trackId: t.id, message: `「${t.name}」は留置両数が有効長を超えています（${u.cars}/${u.capacity}両）` });
   }
   return issues;
+}
+
+/* ---------------- 分岐器の自動生成 ---------------- */
+
+/**
+ * 接続点に置くべき分岐器の仕様を求める。
+ * 通過方向（最も直線に近い2方向）を基準線とし、分かれていく側へ開くように向きを決める。
+ * @returns {null|{variant,rot,mirror,x,y,branches}}
+ */
+export function turnoutSpecAt(doc, g, nodeId) {
+  const node = g.nodeById.get(nodeId);
+  if (!node || node.turntable) return null;   // 転車台は分岐器ではない
+  const list = node.edges.map(eid => {
+    const e = g.edgeById.get(eid);
+    return { e, ang: g.headingOut(e, nodeId) };
+  });
+  const tracks = new Set(list.map(x => x.e.trackId));
+  if (list.length < 3 || tracks.size < 2) return null;   // 単なる継目は分岐器ではない
+
+  // 最も向かい合う2方向 = 基準線
+  let pair = [0, 1], bestScore = Infinity;
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const score = Math.abs(Math.PI - angleDiff(list[i].ang, list[j].ang));
+      if (score < bestScore) { bestScore = score; pair = [i, j]; }
+    }
+  }
+  const branches = list.filter((_, i) => i !== pair[0] && i !== pair[1]);
+  if (!branches.length) return null;
+  const div = branches[0];
+
+  // 分岐が出ていく側の基準方向を採る
+  const cand = [list[pair[0]], list[pair[1]]];
+  let base = cand[0];
+  if (Math.cos(div.ang - cand[1].ang) > Math.cos(div.ang - cand[0].ang)) base = cand[1];
+
+  const delta = norm(div.ang - base.ang);
+  const variant = list.length >= 4 ? 'scissors' : (branches.length >= 2 ? 'three' : 'single');
+  return {
+    variant, rot: base.ang, mirror: delta > 0,
+    x: node.x, y: node.y, branches: branches.length, nodeId,
+  };
+}
+
+/** 接続点（2線以上が集まる点）の一覧 */
+export function junctionNodes(g) {
+  return g.nodes.filter(n => new Set(n.edges.map(eid => g.edgeById.get(eid).trackId)).size > 1);
 }
 
 /** 編成が使う長さ（留置編成が指定されていればその長さ） */

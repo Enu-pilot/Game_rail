@@ -46,10 +46,16 @@ function bindEdit(input, key, apply) {
 function field(label, input) { return h('div', { class: 'field' }, h('label', {}, label), input); }
 
 function numberInput(key, value, onApply, opts = {}) {
-  const inp = h('input', { type: 'number', value: value ?? '', step: opts.step ?? 1, min: opts.min ?? undefined, max: opts.max });
+  const inp = h('input', {
+    type: 'number', value: value ?? '', step: opts.step ?? 1,
+    min: opts.min ?? undefined, max: opts.max, inputmode: 'decimal',
+  });
   return bindEdit(inp, key, i => {
-    const v = i.value === '' ? null : Number(i.value);
-    if (v !== null && Number.isNaN(v)) return;
+    const raw = i.value.trim();
+    if (raw === '-' || raw === '.' || raw === '-.') return;     // 入力途中
+    if (raw === '' && !opts.allowEmpty) return;                 // 空欄のまま確定しない
+    const v = raw === '' ? null : Number(raw);
+    if (v !== null && !Number.isFinite(v)) return;
     onApply(v);
   });
 }
@@ -110,9 +116,25 @@ export function initUI(api) {
     aside.querySelectorAll('.tabpanel').forEach(p => p.classList.toggle('active', p.dataset.panel === name));
   }
 
-  /* --- フォーカス保持付き再描画 --- */
-  function withFocus(container, build) {
+  /* --- フォーカス保持付き再描画（入力中はそのパネルを作り直さない） --- */
+  function withFocus(container, build, ctxKey = '') {
     const active = document.activeElement;
+    const ctxChanged = container._ctxKey !== ctxKey;
+    container._ctxKey = ctxKey;
+    const editing = !ctxChanged && active && container.contains(active) &&
+      (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') &&
+      active.type !== 'checkbox' && active.type !== 'range';
+    if (editing) {
+      // 入力中に value を書き戻すと数値が打てないため、フォーカスが外れるまで待つ
+      if (!container._awaitBlur) {
+        container._awaitBlur = true;
+        active.addEventListener('blur', () => {
+          container._awaitBlur = false;
+          renderAll('blur');
+        }, { once: true });
+      }
+      return;
+    }
     const key = container.contains(active) ? active.dataset.key : null;
     const selStart = key && active.selectionStart !== undefined ? active.selectionStart : null;
     container.replaceChildren(...build());
@@ -229,7 +251,8 @@ export function initUI(api) {
         h('p', { class: 'note', html: '<b>操作</b><br>' +
           'パレット → 線路種別 → クリックで折線を敷設（ダブルクリックで確定）<br>' +
           '構造物はパレットから選んでキャンバスをクリック<br>' +
-          '洗車機・検査台などは最寄りの線路に自動スナップします' }),
+          '洗車機・検査台などは最寄りの線路に自動スナップします<br>' +
+          '<b>線路が交わる点をクリックすると分岐器を自動設置</b>（向き・開く側は配線から判定。接続のない交差点にはダイヤモンドクロッシング）' }),
       )];
     }
     if (sel.kind === 'track') return buildTrackInspector(findTrack(sel.id));
@@ -293,7 +316,7 @@ export function initUI(api) {
         field('留置可能両数', t.capacityMode === 'manual'
           ? numberInput(`track.${t.id}.cap`, t.capacity, v => updateEntity('track', t.id, { capacity: Math.max(0, v || 0) }, { history: false }), { min: 0 })
           : h('input', { type: 'number', value: trackCapacity(doc, t), disabled: true })),
-        field('1両長（m）', numberInput(`track.${t.id}.carlen`, t.carLengthM ?? '', v => updateEntity('track', t.id, { carLengthM: v }, { history: false }), { min: 1, step: 0.5 })),
+        field('1両長（m）', numberInput(`track.${t.id}.carlen`, t.carLengthM ?? '', v => updateEntity('track', t.id, { carLengthM: v }, { history: false }), { min: 1, step: 0.5, allowEmpty: true })),
       ),
       h('p', { class: 'note' }, `1両長が空欄のときは全体設定（${doc.settings.carLengthM}m）を使用します。`),
       meter(u.capacity ? u.cars / u.capacity : 0, u.over),
@@ -359,14 +382,23 @@ export function initUI(api) {
       h('h4', {}, def.name, h('span', { class: 'tag' }, def.groupName || '')),
       field('表示名', textInput(`obj.${o.id}.label`, o.label, v => updateEntity('object', o.id, { label: v }, { history: false }), def.name)),
       h('div', { class: 'row' },
-        field('幅 W（m）', numberInput(`obj.${o.id}.w`, o.w, v => updateEntity('object', o.id, { w: Math.max(1, v || 1) }, { history: false }), { min: 1 })),
-        field('奥行 D（m）', numberInput(`obj.${o.id}.h`, o.h, v => updateEntity('object', o.id, { h: Math.max(1, v || 1) }, { history: false }), { min: 1 })),
+        field('幅 W（m）', numberInput(`obj.${o.id}.w`, o.w, v => updateEntity('object', o.id, { w: Math.max(0.5, v || 1) }, { history: false }), { min: 0.5, step: 0.5 })),
+        field('奥行 D（m）', numberInput(`obj.${o.id}.h`, o.h, v => updateEntity('object', o.id, { h: Math.max(0.5, v || 1) }, { history: false }), { min: 0.5, step: 0.5 })),
       ),
       h('div', { class: 'row' },
-        field('X（m）', numberInput(`obj.${o.id}.x`, Math.round(o.x), v => updateEntity('object', o.id, { x: v || 0 }, { history: false }))),
-        field('Y（m）', numberInput(`obj.${o.id}.y`, Math.round(o.y), v => updateEntity('object', o.id, { y: v || 0 }, { history: false }))),
+        field('X（m）', numberInput(`obj.${o.id}.x`, Math.round(o.x * 10) / 10, v => updateEntity('object', o.id, { x: v || 0 }, { history: false }), { step: 0.5 })),
+        field('Y（m）', numberInput(`obj.${o.id}.y`, Math.round(o.y * 10) / 10, v => updateEntity('object', o.id, { y: v || 0 }, { history: false }), { step: 0.5 })),
       ),
-      def.shape === 'turnout' ? h('div', { class: 'field' },
+      def.shape === 'turntable' ? field('直径（m）', numberInput(`obj.${o.id}.dia`, Math.max(o.w, o.h),
+        v => { const d = Math.max(4, v || 25); updateEntity('object', o.id, { w: d, h: d }, { history: false }); }, { min: 4, step: 0.5 })) : null,
+      def.shape === 'roundhouse' ? h('p', { class: 'note' }, '幅Wが扇形庫の外径になります。転車台の中心に合わせて配置し、回転で向きを調整してください。') : null,
+      def.variant === 'diamond' ? field('交差角（度）', numberInput(`obj.${o.id}.xang`,
+        Math.round((o.xang ?? Math.atan2(o.h, o.w)) * 180 / Math.PI),
+        v => {
+          const a = Math.max(5, Math.min(90, v || 45)) * Math.PI / 180;
+          updateEntity('object', o.id, { xang: a, h: Math.max(4, Math.round(Math.abs(o.w * Math.sin(a)) * 10) / 10) }, { history: false });
+        }, { min: 5, max: 90, step: 5 })) : null,
+      def.shape === 'turnout' && def.variant !== 'diamond' ? h('div', { class: 'field' },
         h('label', {}, '分岐器の番数'),
         selectInput(`obj.${o.id}.frog`, String(o.frog ?? ''),
           [{ value: '', label: '手動サイズ' }, ...TURNOUT_NUMBERS.map(n => ({ value: String(n), label: `#${n}（全長 ${turnoutSize(def.variant, n).w}m）` }))],
@@ -384,6 +416,9 @@ export function initUI(api) {
         v => updateEntity('object', o.id, { rot: (v || 0) * Math.PI / 180 }, { history: false }), { step: 15 })),
       h('div', { class: 'btn-row' },
         h('button', { class: 'btn sm', onclick: () => { snapshot(); o.rot = ((o.rot || 0) + Math.PI / 4) % (Math.PI * 2); commit('rotate'); } }, '↻ 45°回転'),
+        def.shape === 'turnout'
+          ? h('button', { class: 'btn sm', title: '分岐の開く向きを左右反転します', onclick: () => updateEntity('object', o.id, { mirror: !o.mirror }) }, '⇅ 開き反転')
+          : null,
         h('button', { class: 'btn sm', onclick: () => api.focusOn(o) }, '◎ 表示'),
         h('button', { class: 'btn sm', onclick: () => duplicateSelected() }, '複製'),
         h('button', { class: 'btn sm danger', onclick: () => deleteSelected() }, '削除'),
@@ -409,7 +444,7 @@ export function initUI(api) {
       field('形式', textInput(`f.${f.id}.series`, f.series, v => updateEntity('formation', f.id, { series: v }, { history: false }), '例: E233系')),
       h('div', { class: 'row' },
         field('両数', numberInput(`f.${f.id}.cars`, f.cars, v => updateEntity('formation', f.id, { cars: Math.max(1, Math.round(v || 1)) }, { history: false }), { min: 1, max: 30 })),
-        field('1両長（m）', numberInput(`f.${f.id}.carlen`, f.carLengthM ?? '', v => updateEntity('formation', f.id, { carLengthM: v }, { history: false }), { min: 1, step: .5 })),
+        field('1両長（m）', numberInput(`f.${f.id}.carlen`, f.carLengthM ?? '', v => updateEntity('formation', f.id, { carLengthM: v }, { history: false }), { min: 1, step: .5, allowEmpty: true })),
       ),
       field('留置線', selectInput(`f.${f.id}.track`, f.trackId || '',
         [{ value: '', label: '— 未留置 —' }, ...doc.tracks.map(tt => ({ value: tt.id, label: `${tt.name}（${trackKind(tt.kind).name}）` }))],
@@ -588,18 +623,34 @@ export function initUI(api) {
           h('p', { class: 'note' }, '線路どうしが接続しているか（接続点の表示を確認）、転向角の上限（設定タブ）が厳しすぎないかを確認してください。'),
         ));
       } else {
-        const stepRows = routeResult.steps.map((st, i) => st.type === 'reverse'
-          ? h('div', { class: 'listrow' },
-            h('span', { class: 'dot', style: 'background:#ffd166' }),
-            h('span', { class: 'nm' }, `${st.name} で折返し`),
-            h('span', { class: 'num' }, `有効長 ${st.len.toFixed(0)}m`))
-          : h('div', { class: 'listrow', onclick: () => { store.ui.sel = { kind: 'track', id: st.trackId }; emit('select'); } },
-            h('span', { class: 'dot', style: `background:${trackKind((store.doc.tracks.find(t => t.id === st.trackId) || {}).kind).color}` }),
-            h('span', { class: 'nm' }, `${i + 1}. ${st.name}`),
-            h('span', { class: 'num' }, `${st.len.toFixed(0)}m`)));
+        const origin = findTrack(routeForm.fromId);
+        const stepRows = [
+          origin ? h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: `background:${trackKind(origin.kind).color}` }),
+            h('span', { class: 'nm' }, `起点: ${origin.name}`)) : null,
+          ...routeResult.steps.map((st, i) => {
+            if (st.type === 'reverse') {
+              return h('div', { class: 'listrow' },
+                h('span', { class: 'dot', style: 'background:#ffd166' }),
+                h('span', { class: 'nm' }, `${st.name} で折返し`),
+                h('span', { class: 'num' }, `有効長 ${st.len.toFixed(0)}m`));
+            }
+            if (st.type === 'turntable') {
+              return h('div', { class: 'listrow' },
+                h('span', { class: 'dot', style: 'background:#7fd1ff' }),
+                h('span', { class: 'nm' }, '転車台で転回'),
+                h('span', { class: 'num' }, st.size ? `桁長 ${st.size}m` : ''));
+            }
+            return h('div', { class: 'listrow', onclick: () => { store.ui.sel = { kind: 'track', id: st.trackId }; emit('select'); } },
+              h('span', { class: 'dot', style: `background:${trackKind((store.doc.tracks.find(t => t.id === st.trackId) || {}).kind).color}` }),
+              h('span', { class: 'nm' }, `${i + 1}. ${st.name}`),
+              h('span', { class: 'num' }, `${st.len.toFixed(0)}m`));
+          }),
+        ].filter(Boolean);
         out.push(h('div', { class: 'card' },
           h('h4', {}, '経路', h('span', { class: 'tag' }, routeResult.toExt ? '場外へ出区' : '基地内入換')),
           h('div', { class: 'kv' }, h('span', {}, '折返し回数'), h('b', {}, `${routeResult.reversals} 回`)),
+          routeResult.turntables ? h('div', { class: 'kv' }, h('span', {}, '転車台の使用'), h('b', {}, `${routeResult.turntables} 回`)) : null,
           h('div', { class: 'kv' }, h('span', {}, '走行距離'), h('b', {}, `${routeResult.distance.toFixed(0)} m`)),
           h('div', { class: 'kv' }, h('span', {}, '編成長'), h('b', {}, `${(routeResult.trainLength || 0).toFixed(0)} m`)),
           h('hr', { class: 'sepline' }),
@@ -705,12 +756,14 @@ export function initUI(api) {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
-      withFocus(els.palette, buildPalette);
-      withFocus(els.tracklist, buildTrackList);
-      withFocus(els.inspector, buildInspector);
-      withFocus(els.formations, buildFormations);
-      withFocus(els.route, buildRoute);
-      withFocus(els.settings, buildSettings);
+      const sel = store.ui.sel;
+      const selKey = sel ? `${sel.kind}:${sel.id}` : 'none';
+      withFocus(els.palette, buildPalette, `${store.ui.tool}:${store.ui.placeType || ''}:${store.ui.trackKindId}`);
+      withFocus(els.tracklist, buildTrackList, selKey);
+      withFocus(els.inspector, buildInspector, selKey);
+      withFocus(els.formations, buildFormations, selKey);
+      withFocus(els.route, buildRoute, selKey);
+      withFocus(els.settings, buildSettings, 'settings');
       buildStatus();
       document.querySelectorAll('#tools .tool').forEach(b => b.classList.toggle('active', b.dataset.tool === store.ui.tool));
     });

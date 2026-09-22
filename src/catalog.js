@@ -44,6 +44,9 @@ export const OBJECT_GROUPS = [
       { id: 'ticket_gate',     name: '改札',           w: 24,  h: 12, color: '#6ad1a8', shape: 'gate' },
       { id: 'waiting_room',    name: '待合室',         w: 20,  h: 12, color: '#b0a07a', shape: 'building' },
       { id: 'elevator',        name: 'エレベーター',   w: 8,   h: 8,  color: '#9aa4bb', shape: 'building' },
+      { id: 'stairs',          name: '階段',           w: 12,  h: 6,  color: '#a7b2c9', shape: 'stairs' },
+      { id: 'stairs_wide',     name: '階段（幅広）',   w: 14,  h: 10, color: '#a7b2c9', shape: 'stairs' },
+      { id: 'escalator',       name: 'エスカレーター', w: 14,  h: 4,  color: '#8d99b4', shape: 'stairs' },
     ]
   },
   {
@@ -67,10 +70,13 @@ export const OBJECT_GROUPS = [
       { id: 'inspect_shop',    name: '検査職場',     w: 44,  h: 24, color: '#c0a066', shape: 'building' },
       { id: 'warehouse',       name: '資材倉庫',     w: 40,  h: 22, color: '#8b8172', shape: 'building' },
       { id: 'mow_base',        name: '保守用車基地建屋', w: 60, h: 26, color: '#c8a24a', shape: 'shed' },
+      { id: 'roundhouse',      name: '扇形庫',       w: 120, h: 120, color: '#d8a23c', shape: 'roundhouse' },
     ]
   },
   {
-    id: 'equipment', name: '線路上の設備', items: [
+    id: 'equipment', name: '線路まわりの設備', items: [
+      { id: 'turntable',    name: '転車台',         w: 25, h: 25, color: '#7fd1ff', shape: 'turntable' },
+      { id: 'traverser',    name: '遷車台（トラバーサー）', w: 30, h: 12, color: '#7fd1ff', shape: 'traverser' },
       { id: 'car_washer',   name: '洗車機',         w: 24, h: 14, color: '#2bd4a4', shape: 'washer',  onTrack: true },
       { id: 'inspect_pit',  name: '検査台（ピット）', w: 120, h: 8, color: '#ffd166', shape: 'pit',    onTrack: true },
       { id: 'clean_deck',   name: '清掃台',         w: 80,  h: 8,  color: '#7fd1ff', shape: 'deck',   onTrack: true },
@@ -89,6 +95,7 @@ export const OBJECT_GROUPS = [
       { id: 'turnout_three',  name: 'ポイント（三枝）',   w: 27, h: 5.4, color: '#ffe08a', shape: 'turnout', variant: 'three',  frog: 10 },
       { id: 'scissors',       name: 'シーサスクロッシング', w: 54, h: 4.5, color: '#ffe08a', shape: 'turnout', variant: 'scissors', frog: 10 },
       { id: 'crossover',      name: '渡り線',            w: 54, h: 4.5, color: '#ffe08a', shape: 'turnout', variant: 'crossover', frog: 10 },
+      { id: 'diamond',        name: 'ダイヤモンドクロッシング', w: 30, h: 18, color: '#ffc04d', shape: 'turnout', variant: 'diamond' },
       { id: 'point_machine',  name: '転轍機',            w: 6,  h: 6,  color: '#ff9f43', shape: 'pointmachine' },
       { id: 'signal_start',   name: '出発信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4 },
       { id: 'signal_home',    name: '場内信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4 },
@@ -114,6 +121,12 @@ export const OBJECT_GROUPS = [
 export const OBJECT_MAP = {};
 for (const g of OBJECT_GROUPS) for (const it of g.items) OBJECT_MAP[it.id] = { ...it, group: g.id, groupName: g.name };
 export const objectDef = id => OBJECT_MAP[id] || { id, name: id, w: 20, h: 20, color: '#9aa4bb', shape: 'building' };
+
+/** 分岐器の形状 → カタログID */
+export const TURNOUT_TYPE_BY_VARIANT = {
+  single: 'turnout_single', double: 'turnout_double', three: 'turnout_three',
+  scissors: 'scissors', crossover: 'crossover', diamond: 'diamond',
+};
 
 /** 分岐器の番数（#N）— 全長 L ≒ 2.5N+2 [m]、開き量 ≒ L/N [m] */
 export const TURNOUT_NUMBERS = [6, 8, 10, 12, 16, 20];

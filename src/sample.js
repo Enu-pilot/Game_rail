@@ -2,7 +2,8 @@
 // 線路どうしが実際に接続しているため、入換経路の検証をそのまま試せる
 
 import { newDoc, uid } from './store.js';
-import { objectDef, FORMATION_COLORS, turnoutSize } from './catalog.js';
+import { objectDef, FORMATION_COLORS, turnoutSize, TURNOUT_TYPE_BY_VARIANT } from './catalog.js';
+import { buildGraph, junctionNodes, turnoutSpecAt } from './topology.js';
 
 const T = (name, kind, points, extra = {}) => ({
   id: uid('t'), name, kind, points,
@@ -42,8 +43,9 @@ export function sampleDoc() {
   o.push(O('ticket_gate', 300, 24, { w: 30, h: 10 }));
   o.push(O('overbridge', 430, 95, { w: 8, h: 56 }));
   o.push(O('elevator', 452, 95));
-  o.push(O('turnout_single', 140, 40, { frog: 12, rot: 34 }));
-  o.push(O('turnout_single', 580, 40, { frog: 12, rot: 214 }));
+  o.push(O('stairs', 430, 60, { rot: 90, label: '跨線橋 階段' }));
+  o.push(O('stairs', 430, 130, { rot: 90 }));
+  o.push(O('escalator', 446, 130, { rot: 90 }));
   o.push(O('signal_start', 505, 72, { label: '出発1L' }));
   o.push(O('signal_start', 487, 102, { label: '出発2L' }));
 
@@ -53,8 +55,6 @@ export function sampleDoc() {
   t.push(T('引上線', 'shunting', [{ x: 900, y: 190 }, { x: 1180, y: 190 }], { b: 'buffer', note: '最長編成（10両=200m）が収まる有効長' }));
   o.push(O('signal_home', 640, 176, { label: '場内' }));
   o.push(O('signal_shunt', 900, 176, { label: '入換2' }));
-  o.push(O('turnout_single', 800, 190, { frog: 10, rot: 231 }));
-  o.push(O('point_machine', 800, 199));
 
   /* ---- ラダー線 ---- */
   t.push(T('ラダー線', 'shunting', [{ x: 740, y: 190 }, { x: LAD.x0, y: LAD.y0 }, { x: LAD.x1, y: LAD.y1 }], { b: 'buffer' }));
@@ -65,8 +65,6 @@ export function sampleDoc() {
   for (let i = 0; i < n; i++) {
     const y = y0 + pitch * i, xEnd = Math.round(ladderX(y) * 10) / 10;
     t.push(T(`${i + 1}番線`, 'stabling', [{ x: 340, y }, { x: xEnd, y }], { a: 'buffer' }));
-    o.push(O('turnout_single', xEnd, y, { frog: 8, rot: ladderDeg, label: `${20 + i}号` }));
-    o.push(O('point_machine', xEnd + 5, y + 7));
   }
   o.push(O('clean_deck', 520, y0, { w: 100, h: 8, label: '清掃台' }));
   o.push(O('shore_power', 380, y0 + pitch, { label: '地上給電' }));
@@ -88,7 +86,6 @@ export function sampleDoc() {
   for (const [name, kind, xLeft, y, endA] of lower) {
     const xr = Math.round(ladderX(y) * 10) / 10;
     t.push(T(name, kind, [{ x: xLeft, y }, { x: xr, y }], { a: endA }));
-    o.push(O('turnout_single', xr, y, { frog: 10, rot: ladderDeg }));
   }
 
   o.push(O('inspection_shed', 480, 500, { w: 290, h: 84, label: '検修庫' }));
@@ -116,6 +113,48 @@ export function sampleDoc() {
   o.push(O('substation', 1000, 300, { label: '変電所' }));
   o.push(O('parking', 110, 180, { w: 90, h: 44, label: '駐車場' }));
   o.push(O('gatehouse', 50, 230, { label: '守衛所' }));
+
+  /* ---- 機関区（転車台・扇形庫） ---- */
+  const TT = { x: 250, y: 960, d: 24 };
+  o.push(O('turntable', TT.x, TT.y, { w: TT.d, h: TT.d, rot: 0, label: '転車台' }));
+  o.push(O('roundhouse', TT.x, TT.y, { w: 120, h: 120, rot: 180, label: '扇形庫' }));
+  t.push(T('機関区連絡線', 'shunting',
+    [{ x: 400, y: 860 }, { x: 400, y: 900 }, { x: 330, y: 960 }, { x: TT.x + TT.d / 2, y: TT.y }]));
+  [150, 180, 210].forEach((deg, i) => {
+    const a = deg * Math.PI / 180;
+    const p0 = { x: Math.round((TT.x + Math.cos(a) * (TT.d / 2)) * 10) / 10, y: Math.round((TT.y + Math.sin(a) * (TT.d / 2)) * 10) / 10 };
+    const p1 = { x: Math.round((TT.x + Math.cos(a) * 58) * 10) / 10, y: Math.round((TT.y + Math.sin(a) * 58) * 10) / 10 };
+    t.push(T(`扇形庫${i + 1}番線`, 'inspection', [p1, p0], { a: 'buffer' }));
+  });
+
+  /* ---- 分岐器・転轍機を接続点から自動生成 ---- */
+  const tmp = { ...doc, tracks: t, objects: o, formations: [] };
+  const g = buildGraph(tmp);
+  const junctions = junctionNodes(g).sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  let no = 0;
+  for (const nd of junctions) {
+    const spec = turnoutSpecAt(tmp, g, nd.id);
+    if (!spec) continue;
+    const involvesStabling = nd.edges
+      .map(eid => t.find(x => x.id === g.edgeById.get(eid).trackId))
+      .some(x => x && x.kind === 'stabling');
+    const frog = involvesStabling ? 8 : 10;
+    const type = TURNOUT_TYPE_BY_VARIANT[spec.variant] || 'turnout_single';
+    const d = objectDef(type);
+    const sz = d.frog ? turnoutSize(d.variant, frog) : { w: d.w, h: d.h };
+    o.push({
+      id: uid('b'), type, x: spec.x, y: spec.y, w: sz.w, h: sz.h, rot: spec.rot,
+      frog: d.frog ? frog : null, mirror: !!spec.mirror,
+      label: `${++no}号`, note: '', trackId: null,
+    });
+    // 転轍機は基準線の側方に配置
+    o.push({
+      id: uid('b'), type: 'point_machine',
+      x: spec.x + Math.sin(spec.rot) * (spec.mirror ? -7 : 7) * -1,
+      y: spec.y + Math.cos(spec.rot) * (spec.mirror ? -7 : 7),
+      w: 6, h: 6, rot: spec.rot, frog: null, mirror: false, label: '', note: '', trackId: null,
+    });
+  }
 
   /* ---- 編成 ---- */
   const stabling = t.filter(x => x.kind === 'stabling');

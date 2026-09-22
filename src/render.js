@@ -18,7 +18,7 @@ const LAYER = {
   yard: 0, fence: 0, building: 0, shed: 0, roof: 0,
   platform: 2, pit: 2, deck: 2, washer: 2, machine: 2, gate: 2,
   turnout: 2, pointmachine: 2, signal: 3, marker: 3, buffer: 2,
-  bridge: 3, label: 3,
+  bridge: 3, label: 3, stairs: 3,
 };
 const layerOf = o => LAYER[objectDef(o.type).shape] ?? 0;
 
@@ -47,6 +47,7 @@ export function render(ctx, W, H, doc, ui) {
   for (const o of top) drawObject(ctx, cam, doc, o, ui);
 
   if (ui.issueMarks && ui.issueMarks.length && doc.settings.showIssues) drawIssueMarks(ctx, cam, ui.issueMarks);
+  if (ui.hoverJunction) drawHoverJunction(ctx, cam, ui.hoverJunction);
   drawSelection(ctx, cam, doc, ui);
   if (ui.draft) drawDraft(ctx, cam, doc, ui);
   if (ui.tool === 'place' && ui.placeType && ui.cursor) drawGhost(ctx, cam, ui);
@@ -279,6 +280,8 @@ function drawObject(ctx, cam, doc, o, ui) {
   const color = def.color;
   const label = o.label || def.name;
 
+  ctx.save();
+  if (o.mirror) ctx.scale(1, -1);
   switch (shape) {
     case 'building': case 'shed': {
       ctx.fillStyle = hexA(color, shape === 'shed' ? .3 : .38);
@@ -370,8 +373,92 @@ function drawObject(ctx, cam, doc, o, ui) {
       ctx.beginPath(); ctx.moveTo(-w / 2, -h / 2); ctx.lineTo(w / 2, h / 2); ctx.strokeStyle = hexA(color, .6); ctx.stroke();
       break;
     }
+    case 'stairs': {
+      ctx.fillStyle = hexA(color, .3);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.4;
+      ctx.fillRect(-w / 2, -h / 2, w, h); ctx.strokeRect(-w / 2, -h / 2, w, h);
+      // 踏面（登り方向 = ローカル +X）
+      const steps = Math.max(3, Math.min(14, Math.round(o.w / 1.2)));
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = hexA(color, .85);
+      for (let i = 1; i < steps; i++) {
+        const x = -w / 2 + (w / steps) * i;
+        ctx.beginPath(); ctx.moveTo(x, -h / 2 + 1); ctx.lineTo(x, h / 2 - 1); ctx.stroke();
+      }
+      if (z > 0.8) {   // 上り方向の矢印
+        ctx.strokeStyle = '#cfd6e6'; ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(w / 2 - Math.min(10, w * .3), 0); ctx.lineTo(w / 2 - 2, 0);
+        ctx.moveTo(w / 2 - 6, -3); ctx.lineTo(w / 2 - 2, 0); ctx.lineTo(w / 2 - 6, 3);
+        ctx.stroke();
+      }
+      break;
+    }
+    case 'turntable': {
+      const r = Math.min(w, h) / 2;
+      ctx.fillStyle = 'rgba(16,21,30,.92)';
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = hexA(color, .45); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0, 0, r * .88, 0, Math.PI * 2); ctx.stroke();
+      // 桁の位置を示す目盛（15度ごと）
+      if (z > 0.7) {
+        ctx.strokeStyle = hexA(color, .35);
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * r * .88, Math.sin(a) * r * .88);
+          ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+          ctx.stroke();
+        }
+      }
+      // 転車台桁（軌道）
+      ctx.strokeStyle = '#2a3140'; ctx.lineWidth = Math.max(3, 4.2 * z);
+      ctx.beginPath(); ctx.moveTo(-r * .95, 0); ctx.lineTo(r * .95, 0); ctx.stroke();
+      ctx.strokeStyle = color; ctx.lineWidth = Math.max(1, .34 * z);
+      for (const side of [-1, 1]) {
+        const off = side * (1.435 / 2) * z;
+        ctx.beginPath(); ctx.moveTo(-r * .95, off); ctx.lineTo(r * .95, off); ctx.stroke();
+      }
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(0, 0, Math.max(2, 1.2 * z), 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'traverser': {
+      ctx.fillStyle = hexA(color, .18);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.fillRect(-w / 2, -h / 2, w, h); ctx.strokeRect(-w / 2, -h / 2, w, h);
+      ctx.strokeStyle = '#2a3140'; ctx.lineWidth = Math.max(3, 4.2 * z);
+      ctx.beginPath(); ctx.moveTo(-w / 2 + 2, 0); ctx.lineTo(w / 2 - 2, 0); ctx.stroke();
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-w / 2, -h / 2); ctx.lineTo(-w / 2, h / 2);
+      ctx.moveTo(w / 2, -h / 2); ctx.lineTo(w / 2, h / 2);
+      ctx.stroke();
+      break;
+    }
+    case 'roundhouse': {
+      const r1 = Math.max(w, h) / 2, r0 = r1 * .2, span = Math.PI * 55 / 180;
+      ctx.beginPath();
+      ctx.arc(0, 0, r0, -span, span);
+      ctx.arc(0, 0, r1, span, -span, true);
+      ctx.closePath();
+      ctx.fillStyle = hexA(color, .28);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.fill(); ctx.stroke();
+      if (z > 0.4) {   // 庫の仕切り
+        ctx.strokeStyle = hexA(color, .5); ctx.lineWidth = 1;
+        for (let i = 1; i < 6; i++) {
+          const a = -span + (span * 2 / 6) * i;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+          ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+          ctx.stroke();
+        }
+      }
+      break;
+    }
     case 'turnout': {
-      drawTurnout(ctx, w, h, color, def.variant);
+      drawTurnout(ctx, w, h, color, def.variant, o.xang);
       break;
     }
     case 'pointmachine': {
@@ -403,6 +490,7 @@ function drawObject(ctx, cam, doc, o, ui) {
       break;
     }
   }
+  ctx.restore();
 
   // ラベル（小さな記号類は既定名を表示しない）
   const minM = Math.min(o.w, o.h);
@@ -438,7 +526,7 @@ function drawObject(ctx, cam, doc, o, ui) {
   ctx.restore();
 }
 
-function turnoutPath(ctx, w, h, variant) {
+function turnoutPath(ctx, w, h, variant, xang) {
   const x0 = -w / 2, x1 = w / 2;
   ctx.beginPath();
   ctx.moveTo(x0, 0); ctx.lineTo(x1, 0);                      // 基準線
@@ -453,20 +541,25 @@ function turnoutPath(ctx, w, h, variant) {
     ctx.moveTo(x0, -h / 2); ctx.lineTo(x1, -h / 2);
     ctx.moveTo(x0, h / 2); ctx.lineTo(x1, h / 2);
     ctx.moveTo(x0 + w * .15, -h / 2); ctx.lineTo(x1 - w * .15, h / 2);
+  } else if (variant === 'diamond') {
+    const a = Number.isFinite(xang) ? xang : Math.atan2(h, w);
+    const L = Math.max(w, h) / 2;
+    ctx.moveTo(x0, 0); ctx.lineTo(x1, 0);
+    ctx.moveTo(-Math.cos(a) * L, -Math.sin(a) * L); ctx.lineTo(Math.cos(a) * L, Math.sin(a) * L);
   } else { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); }  // 片開き
 }
 
-function drawTurnout(ctx, w, h, color, variant) {
+function drawTurnout(ctx, w, h, color, variant, xang) {
   const lw = Math.max(1.8, Math.min(4, h * .35));
   ctx.lineCap = 'round';
   // 背景の縁取りで軌道上でも見えるように
   ctx.strokeStyle = 'rgba(8,11,16,.75)';
   ctx.lineWidth = lw + 2.5;
-  turnoutPath(ctx, w, h, variant);
+  turnoutPath(ctx, w, h, variant, xang);
   ctx.stroke();
   ctx.strokeStyle = color;
   ctx.lineWidth = lw;
-  turnoutPath(ctx, w, h, variant);
+  turnoutPath(ctx, w, h, variant, xang);
   ctx.stroke();
   // トングレール位置の目印
   if (variant === 'single' || variant === 'double' || variant === 'three') {
@@ -596,6 +689,29 @@ function drawRoute(ctx, cam, doc, route) {
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
       ctx.fillText('折返し', s.x, s.y - 8);
     }
+  }
+  ctx.restore();
+}
+
+/** クリックで分岐器を置ける接続点のハイライト */
+function drawHoverJunction(ctx, cam, hj) {
+  const s = toScreen(cam, hj.x, hj.y);
+  const r = Math.max(10, 6 * cam.zoom);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,224,138,.18)';
+  ctx.fill();
+  ctx.strokeStyle = hj.exists ? '#7fd1ff' : '#ffe08a';
+  ctx.lineWidth = 2;
+  ctx.setLineDash(hj.exists ? [] : [4, 3]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (!hj.exists) {
+    ctx.strokeStyle = '#ffe08a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(s.x - r * .45, s.y); ctx.lineTo(s.x + r * .45, s.y);
+    ctx.moveTo(s.x, s.y - r * .45); ctx.lineTo(s.x, s.y + r * .45);
+    ctx.stroke();
   }
   ctx.restore();
 }

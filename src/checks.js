@@ -78,23 +78,52 @@ function samples(t) {
   return out;
 }
 
+let _crossCache = { rev: -1, doc: null, list: null };
+
+/** 接続点をもたない線路どうしの交差点（分岐器・クロッシング未設置の箇所） */
+export function crossingPoints(doc, g, rev) {
+  if (_crossCache.list && _crossCache.rev === rev && _crossCache.doc === doc) return _crossCache.list;
+  const tracks = doc.tracks.filter(t => t.points && t.points.length >= 2 && polylineLength(t.points) > 0.5);
+  const boxes = new Map(tracks.map(t => [t.id, bbox(t.points)]));
+  const list = [];
+  for (let i = 0; i < tracks.length; i++) {
+    for (let j = i + 1; j < tracks.length; j++) {
+      const A = tracks[i], B = tracks[j];
+      if (bboxFar(boxes.get(A.id), boxes.get(B.id), 2)) continue;
+      for (let a = 1; a < A.points.length; a++) {
+        for (let b = 1; b < B.points.length; b++) {
+          const x = segIntersect(A.points[a - 1], A.points[a], B.points[b - 1], B.points[b]);
+          if (!x) continue;
+          if (g && g.nodes.some(n => dist(n.x, n.y, x.x, x.y) <= (g.tol || 6) + 1)) continue;
+          const angA = Math.atan2(A.points[a].y - A.points[a - 1].y, A.points[a].x - A.points[a - 1].x);
+          const angB = Math.atan2(B.points[b].y - B.points[b - 1].y, B.points[b].x - B.points[b - 1].x);
+          list.push({ x: x.x, y: x.y, a: A.id, b: B.id, aName: A.name, bName: B.name, angA, angB });
+        }
+      }
+    }
+  }
+  _crossCache = { rev, doc, list };
+  return list;
+}
+
 let _cache = { rev: -1, doc: null, issues: null };
 
 /** 物理チェックの実行（版数が同じなら再利用） */
 export function layoutChecks(doc, g, rev) {
   if (_cache.issues && _cache.rev === rev && _cache.doc === doc) return _cache.issues;
-  const issues = runChecks(doc, g);
+  const issues = runChecks(doc, g, rev);
   _cache = { rev, doc, issues };
   return issues;
 }
 
-function runChecks(doc, g) {
+function runChecks(doc, g, rev) {
   const issues = [];
   const minSp = doc.settings.minTrackSpacingM ?? DEFAULT_MIN_SPACING;
   const half = doc.settings.clearanceHalfM ?? DEFAULT_CLEARANCE_HALF;
   const tracks = doc.tracks.filter(t => t.points && t.points.length >= 2 && polylineLength(t.points) > 0.5);
   const boxes = new Map(tracks.map(t => [t.id, bbox(t.points)]));
   const sampled = new Map(tracks.map(t => [t.id, samples(t)]));
+  const crossings = g ? crossingPoints(doc, g, rev) : [];
 
   // 共有する接続点（分岐部）— 近傍は離隔チェックの対象外
   const sharedNodes = (a, b) => {
@@ -111,15 +140,7 @@ function runChecks(doc, g) {
       const shared = sharedNodes(A, B);
 
       // --- 交差（接続点なし） ---
-      let crossed = null;
-      for (let a = 1; a < A.points.length && !crossed; a++) {
-        for (let b = 1; b < B.points.length; b++) {
-          const x = segIntersect(A.points[a - 1], A.points[a], B.points[b - 1], B.points[b]);
-          if (!x) continue;
-          const nearNode = g && g.nodes.some(n => dist(n.x, n.y, x.x, x.y) <= (g.tol || 6) + 1);
-          if (!nearNode) { crossed = x; break; }
-        }
-      }
+      const crossed = crossings.find(c => (c.a === A.id && c.b === B.id) || (c.a === B.id && c.b === A.id));
       if (crossed) {
         issues.push({
           level: 'error', trackId: A.id, x: crossed.x, y: crossed.y,

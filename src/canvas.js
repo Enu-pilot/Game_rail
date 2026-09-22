@@ -4,7 +4,9 @@ import { store, emit, snapshot, commit, setMessage, subscribe } from './store.js
 import { objectDef, trackKind } from './catalog.js';
 import { render, toWorld, toScreen, contentBounds } from './render.js';
 import { snap, snapAngle, distToPolyline, hitRect, dist } from './geom.js';
-import { addTrack, addObject, deleteSelected, snapToTrack } from './actions.js';
+import { addTrack, addObject, deleteSelected, snapToTrack, turnoutNear, placeTurnoutFromSpec, placeCrossingFrom } from './actions.js';
+import { getGraph, junctionNodes, turnoutSpecAt } from './topology.js';
+import { crossingPoints } from './checks.js';
 
 export function initCanvas(canvas, stage) {
   const ctx = canvas.getContext('2d');
@@ -60,6 +62,26 @@ export function initCanvas(canvas, stage) {
       if (dist(p.x, p.y, t.points[i].x, t.points[i].y) <= tol) return { track: t, index: i };
     }
     return null;
+  }
+
+  /** 線路が交わる点（接続点・未接続の交差点）の判定 */
+  function hitJunction(p) {
+    const tol = Math.max(4, 11 / ui.camera.zoom);
+    let g;
+    try { g = getGraph(store.doc, store.rev); } catch { return null; }
+    let best = null;
+    for (const n of junctionNodes(g)) {
+      if (n.turntable) continue;              // 転車台は分岐器を置く対象外
+      const d = dist(p.x, p.y, n.x, n.y);
+      if (d <= tol && (!best || d < best.d)) best = { d, x: n.x, y: n.y, type: 'junction', nodeId: n.id };
+    }
+    for (const c of crossingPoints(store.doc, g, store.rev)) {
+      const d = dist(p.x, p.y, c.x, c.y);
+      if (d <= tol && (!best || d < best.d)) best = { d, x: c.x, y: c.y, type: 'crossing', cross: c };
+    }
+    if (!best) return null;
+    best.exists = !!turnoutNear(best.x, best.y, Math.max(8, tol));
+    return best;
   }
 
   /** 選択中オブジェクトのリサイズハンドル（画面座標で判定） */
@@ -176,6 +198,20 @@ export function initCanvas(canvas, stage) {
       canvas.style.cursor = 'nwse-resize';
       return;
     }
+    // 線路の交点をクリック → 分岐器を設置（既にあれば通常の選択に任せる）
+    const j = hitJunction(p);
+    if (j && !j.exists) {
+      if (j.type === 'crossing') placeCrossingFrom(j.cross);
+      else {
+        const g = getGraph(store.doc, store.rev);
+        const spec = turnoutSpecAt(store.doc, g, j.nodeId);
+        if (spec) placeTurnoutFromSpec(spec);
+        else { setMessage('ここは分岐ではありません（線路どうしの継目です）'); }
+      }
+      ui.hoverJunction = null;
+      invalidate();
+      return;
+    }
     const v = hitVertex(p);
     if (v) {
       snapshot();
@@ -265,7 +301,12 @@ export function initCanvas(canvas, stage) {
       cur = snapWorld(snapAngle(prev.x, prev.y, cur.x, cur.y), e);
     }
     if (!drag && ui.tool === 'select') {
-      canvas.style.cursor = hitHandle(e) ? 'nwse-resize' : 'default';
+      const j = hitJunction(p);
+      const changed = (!!j !== !!ui.hoverJunction) ||
+        (j && ui.hoverJunction && (j.x !== ui.hoverJunction.x || j.y !== ui.hoverJunction.y || j.exists !== ui.hoverJunction.exists));
+      ui.hoverJunction = j ? { x: j.x, y: j.y, exists: j.exists } : null;
+      if (changed) { invalidate(); updateHint(); }
+      canvas.style.cursor = hitHandle(e) ? 'nwse-resize' : (j && !j.exists ? 'copy' : 'default');
     }
     ui.cursor = (ui.tool === 'track' || ui.tool === 'place') ? cur : p;
     if (ui.tool === 'track' || ui.tool === 'place') invalidate();
@@ -373,6 +414,10 @@ export function initCanvas(canvas, stage) {
       h = `<b>${objectDef(ui.placeType).name}</b> を配置 — クリックで設置 / R キーで回転 / Shift+クリックで連続設置 / Esc 中止`;
     } else if (ui.tool === 'pan') {
       h = 'ドラッグで画面移動';
+    } else if (ui.tool === 'select' && ui.hoverJunction) {
+      h = ui.hoverJunction.exists
+        ? 'この交点には分岐器が設置済みです'
+        : 'クリックすると <b>分岐器（交差なら平面交差）</b> を自動で設置します';
     }
     hintEl.innerHTML = h;
   }

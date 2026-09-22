@@ -121,6 +121,8 @@ export function migrate(doc) {
     id: o.id || uid('b'), type: o.type || 'station_bldg',
     x: +o.x || 0, y: +o.y || 0, w: +o.w || 20, h: +o.h || 10, rot: +o.rot || 0,
     frog: Number.isFinite(o.frog) ? o.frog : null,
+    mirror: !!o.mirror,
+    xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
     label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
   }));
   d.formations = (doc.formations || []).map(f => ({
