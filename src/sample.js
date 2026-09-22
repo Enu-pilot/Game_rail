@@ -32,7 +32,7 @@ export function sampleDoc() {
   const ladderDeg = Math.atan2(LAD.y1 - LAD.y0, LAD.x1 - LAD.x0) * 180 / Math.PI;
 
   /* ---- 駅部（本線から分岐する2面2線） ---- */
-  t.push(T('本線', 'main', [{ x: -1600, y: 40 }, { x: 4600, y: 40 }], { a: 'boundary', b: 'boundary' }));
+  t.push(T('本線', 'main', [{ x: -1100, y: 40 }, { x: 2700, y: 40 }], { a: 'boundary', b: 'boundary' }));
   t.push(T('駅1番線', 'platform', [{ x: 140, y: 40 }, { x: 200, y: 80 }, { x: 520, y: 80 }, { x: 580, y: 40 }]));
   t.push(T('駅2番線', 'platform', [{ x: 200, y: 80 }, { x: 240, y: 110 }, { x: 500, y: 110 }, { x: 520, y: 80 }]));
   o.push(O('platform_island', 370, 95, { w: 250, h: 14, label: '1・2番線ホーム' }));
@@ -131,17 +131,26 @@ export function sampleDoc() {
     return o[o.length - 1];
   };
   // 東川は交換設備のある中間駅
-  t.push(T('東川1番線', 'platform', [{ x: 2200, y: 40 }, { x: 2280, y: 75 }, { x: 2560, y: 75 }, { x: 2640, y: 40 }]));
-  o.push(O('platform_side', 2420, 90, { w: 200, h: 8, label: '東川ホーム' }));
-  o.push(O('station_bldg', 2420, 130, { w: 50, h: 24, label: '東川駅' }));
-  o.push(O('platform_side', 4380, 66, { w: 180, h: 8, label: '海岸ホーム' }));
-  o.push(O('station_bldg', 4380, 100, { w: 50, h: 24, label: '海岸駅' }));
-  o.push(O('platform_side', -1400, 66, { w: 180, h: 8, label: '西山ホーム' }));
-  o.push(O('station_bldg', -1400, 100, { w: 50, h: 24, label: '西山駅' }));
-  const stW = station('西山', -1400);
+  t.push(T('東川1番線', 'platform', [{ x: 1500, y: 40 }, { x: 1560, y: 75 }, { x: 1780, y: 75 }, { x: 1840, y: 40 }]));
+  o.push(O('platform_side', 1670, 90, { w: 160, h: 8, label: '東川ホーム' }));
+  o.push(O('station_bldg', 1670, 130, { w: 50, h: 24, label: '東川駅' }));
+  o.push(O('platform_side', 2500, 66, { w: 140, h: 8, label: '海岸ホーム' }));
+  o.push(O('station_bldg', 2500, 100, { w: 50, h: 24, label: '海岸駅' }));
+  o.push(O('platform_side', -950, 66, { w: 140, h: 8, label: '西山ホーム' }));
+  o.push(O('station_bldg', -950, 100, { w: 50, h: 24, label: '西山駅' }));
+  const stW = station('西山', -950);
   const stM = station('みどりが丘', 360);
-  const stH = station('東川', 2420);
-  const stK = station('海岸', 4400);
+  const stH = station('東川', 1670);
+  const stK = station('海岸', 2500);
+  // 駅間は配線図では省略し、キロ程だけ実距離にする
+  const gap = (x, km) => o.push({
+    id: uid('b'), type: 'gap_break', x, y: 40, w: 12, h: 16, rot: 0,
+    mirror: false, position: 0, dir: 'ab', tracks: [], extraM: km * 1000,
+    label: '', note: '', trackId: mainLine.id,
+  });
+  gap(-400, 1.4);
+  gap(1100, 1.2);
+  gap(2150, 2.0);
   // 駅の番線（配線と連携）
   const trackId = nm => (t.find(x => x.name === nm) || {}).id;
   stW.tracks = [mainLine.id];

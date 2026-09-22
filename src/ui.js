@@ -455,6 +455,19 @@ export function initUI(api) {
       ));
     }
 
+    // 駅間省略
+    if (def.gap) {
+      const tr = o.trackId ? findTrack(o.trackId) : null;
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '駅間の省略', h('span', { class: 'tag' }, tr ? tr.name : '線路に未接続')),
+        field('省略する距離（km）', numberInput(`obj.${o.id}.extra`, (o.extraM || 0) / 1000,
+          v => updateEntity('object', o.id, { extraM: Math.max(0, (v || 0) * 1000) }, { history: false }),
+          { min: 0, step: 0.1 })),
+        h('p', { class: 'note' }, '配線図では短く描いたまま、ダイヤのキロ程・所要時間・経路距離にこの距離が加算されます。運転シミュレーションでは、この記号の位置で省略した距離ぶんの時間だけ走ります。'),
+        !o.trackId ? h('div', { class: 'warnbox' }, '線路の上に置いてください（最寄りの線路にスナップします）') : null,
+      ));
+    }
+
     // 駅（停車場）
     if (def.station) {
       const assigned = (o.tracks || []).filter(id => store.doc.tracks.some(t => t.id === id));

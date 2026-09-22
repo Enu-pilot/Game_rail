@@ -4,9 +4,9 @@
 // いずれも区間ごとに進路を構成し、分岐器の転換・信号現示・進路の競合が連動する
 
 import { store, emit, commit, snapshot, uid, setMessage, formationLength } from './store.js';
-import { getGraph, findRoute } from './topology.js';
+import { getGraph, findRoute, trackGaps } from './topology.js';
 import { routeFromLeg, findConflicts } from './interlocking.js';
-import { lineStations, computeSchedule, trainType, fmtHM, stationAt } from './timetable.js';
+import { lineStations, computeSchedule, trainType, fmtHM, trainPlatform } from './timetable.js';
 import { distToPolyline } from './geom.js';
 
 export const sim = {
@@ -102,11 +102,25 @@ function releaseRoute(mv) {
 
 /* ---------------- 移動の生成 ---------------- */
 
-function createMovement({ formationId, fromTrackId, toTrackId, name, color, trainLength, trainId, fromAt, toAt, speedKmh }) {
-  const doc = store.doc;
-  const g = getGraph(doc, store.rev);
+/** 区間内の省略記号の位置（区間始点からの距離）を求める */
+function legGaps(doc, leg) {
+  const out = [];
+  let acc = 0;
+  for (const p of leg.path) {
+    const lo = Math.min(p.fromAt, p.toAt), hi = Math.max(p.fromAt, p.toAt);
+    const len = hi - lo;
+    for (const g of trackGaps(doc, p.trackId)) {
+      if (g.at < lo - 1e-6 || g.at > hi + 1e-6) continue;
+      const along = p.toAt >= p.fromAt ? g.at - p.fromAt : p.fromAt - g.at;
+      out.push({ at: acc + along, extraM: g.extraM });
+    }
+    acc += len;
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
 
-  // 同じ線路の中を移動する場合（本線上の駅間など）は、そのまま1区間として扱う
+/** 2地点を結ぶ走行区間を作る（同一線路内ならそのまま1区間） */
+function buildLegs(doc, { fromTrackId, toTrackId, trainLength, fromAt, toAt }) {
   if (fromTrackId === toTrackId && Number.isFinite(fromAt) && Number.isFinite(toAt)) {
     const t = doc.tracks.find(x => x.id === fromTrackId);
     const leg = {
@@ -116,38 +130,62 @@ function createMovement({ formationId, fromTrackId, toTrackId, name, color, trai
       fromName: t ? t.name : '?', toName: t ? t.name : '?',
       length: Math.abs(toAt - fromAt),
     };
-    if (leg.length < 1) { logLine(`${name}：発着位置が同じです`, 'warn'); return null; }
-    if (formationId) {
-      const f = doc.formations.find(x => x.id === formationId);
-      if (f) f.trackId = null;
-    }
-    logLine(`${name}：${t ? t.name : ''} を ${leg.length.toFixed(0)}m 走行`);
-    return {
-      id: uid('mv'), formationId, fromTrackId, toTrackId, trainId,
-      name, color: color || '#4f8cff', trainLength, speedKmh: speedKmh || null,
-      legs: [leg], legIndex: 0, dist: 0, phase: 'lining', phaseT: 0, routeId: null,
-      startedAt: sim.clock,
-    };
+    if (leg.length < 1) return null;
+    leg.gaps = legGaps(doc, leg);
+    return { legs: [leg], distance: leg.length };
   }
-
+  const g = getGraph(doc, store.rev);
   const r = findRoute(doc, g, { fromTrackId, toTrackId, trainLength });
-  if (!r.found) {
-    logLine(`${name}：経路がありません（${trackName(fromTrackId)} → ${trackName(toTrackId)}）`, 'error');
+  if (!r.found) return null;
+  const legs = (r.legs || []).map(lg => ({ ...lg, path: lg.path.map(p => ({ ...p })) }));
+  if (!legs.length) return null;
+
+  // 起点は「駅の位置」から。経路が起点線路を出るノードまでの距離を足す
+  const first = legs[0];
+  if (Number.isFinite(fromAt) && first.originTrackId === fromTrackId && Number.isFinite(first.originAt)) {
+    if (Math.abs(first.originAt - fromAt) > 0.5) {
+      first.path.unshift({ trackId: fromTrackId, fromAt, toAt: first.originAt });
+    }
+  }
+  // 終点も「駅の位置」まで延ばす
+  const last = legs[legs.length - 1];
+  const lastSeg = last.path[last.path.length - 1];
+  if (Number.isFinite(toAt) && lastSeg && lastSeg.trackId === toTrackId) lastSeg.toAt = toAt;
+
+  for (const lg of legs) {
+    lg.length = lg.path.reduce((s2, p) => s2 + Math.abs(p.toAt - p.fromAt), 0);
+    lg.gaps = legGaps(doc, lg);
+  }
+  const usable = legs.filter(l => l.length > 0.5);
+  if (!usable.length) return null;
+  return { legs: usable, distance: usable.reduce((s2, l) => s2 + l.length, 0) };
+}
+
+/** 走行を開始する（journey = 停車駅ごとの区切り） */
+function createMovement({ formationId, name, color, trainLength, trainId, speedKmh, journey }) {
+  const doc = store.doc;
+  const hop = journey[0];
+  const built = buildLegs(doc, { ...hop, trainLength });
+  if (!built) {
+    logLine(`${name}：経路がありません（${trackName(hop.fromTrackId)} → ${trackName(hop.toTrackId)}）`, 'error');
     return null;
   }
-  const mv = {
-    id: uid('mv'), formationId, fromTrackId, toTrackId, trainId,
-    name, color: color || '#4f8cff', trainLength, speedKmh: speedKmh || null,
-    legs: (r.legs || []).map(lg => ({ ...lg, length: lg.path.reduce((s, p) => s + Math.abs(p.toAt - p.fromAt), 0) })).filter(l => l.length > 0.5),
-    legIndex: 0, dist: 0, phase: 'lining', phaseT: 0, routeId: null,
-    startedAt: sim.clock,
-  };
   if (formationId) {
     const f = doc.formations.find(x => x.id === formationId);
     if (f) f.trackId = null;                    // 走行中は在線から外す
   }
-  logLine(`${name}：${trackName(fromTrackId)} → ${trackName(toTrackId)}（${mv.legs.length}区間・${r.distance.toFixed(0)}m）`);
-  return mv;
+  const total = journey.length;
+  logLine(`${name}：${trackName(journey[0].fromTrackId)} → ${trackName(journey[total - 1].toTrackId)}` +
+    (total > 1 ? `（途中 ${total - 1} 駅停車）` : `（${built.distance.toFixed(0)}m）`));
+  return {
+    id: uid('mv'), formationId, trainId, name, color: color || '#4f8cff',
+    trainLength, speedKmh: speedKmh || null,
+    journey, hopIndex: 0,
+    fromTrackId: hop.fromTrackId, toTrackId: journey[total - 1].toTrackId,
+    legs: built.legs, legIndex: 0, dist: 0, gapIndex: 0, gapRemain: 0,
+    phase: 'lining', phaseT: 0, routeId: null, dwellUntil: 0,
+    startedAt: sim.clock,
+  };
 }
 
 const trackName = id => (store.doc.tracks.find(t => t.id === id) || {}).name || '?';
@@ -184,15 +222,7 @@ function stationPos(doc, stations, idx, trackId) {
   return distToPolyline(st.object.x, st.object.y, t.points).at;
 }
 
-function stationTrackFor(doc, train, stations, idx) {
-  const st = stations[idx];
-  if (!st) return null;
-  const assigned = train.platforms && train.platforms[idx];
-  if (assigned && doc.tracks.some(t => t.id === assigned)) return assigned;
-  const o = st.object;
-  if (o && o.tracks && o.tracks.length) return o.tracks[0];
-  return st.trackId || null;
-}
+const stationTrackFor = (doc, train, stations, idx) => trainPlatform(doc, train, stations, idx);
 
 function dispatchTrain(train) {
   const doc = store.doc;
@@ -219,12 +249,29 @@ function dispatchTrain(train) {
     const f = doc.formations.find(x => x.id === formationId);
     if (f) trainLength = formationLength(doc, f);
   }
+  // 停車駅ごとに区切った行程をつくる（通過駅は途中で止まらない）
+  const stops = computeSchedule(doc, stations, train).filter(s2 => !s2.skip);
+  const journey = [];
+  for (let i = 1; i < stops.length; i++) {
+    const a = stops[i - 1], b = stops[i];
+    const last = i === stops.length - 1;
+    const fromT = i === 1 ? fromTrackId : stationTrackFor(doc, train, stations, a.idx);
+    const toT = last ? toTrackId : stationTrackFor(doc, train, stations, b.idx);
+    journey.push({
+      fromTrackId: fromT, toTrackId: toT,
+      fromAt: stationPos(doc, stations, a.idx, fromT),
+      toAt: (last && train.toDepot && train.depotTrackId) ? null : stationPos(doc, stations, b.idx, toT),
+      depart: a.dep ?? sim.clock,
+      arrive: b.arr,
+      stationName: stations[b.idx] ? stations[b.idx].name : '',
+    });
+  }
+  if (!journey.length) { logLine(`${train.number}：行程がありません`, 'warn'); return; }
   const mv = createMovement({
-    formationId, fromTrackId, toTrackId, trainId: train.id,
+    formationId, trainId: train.id,
     name: train.number || tt.name, color: train.color || tt.color, trainLength,
     speedKmh: train.speedKmh || tt.speed,
-    fromAt: stationPos(doc, stations, train.fromIdx, fromTrackId),
-    toAt: (train.toDepot && train.depotTrackId) ? null : stationPos(doc, stations, train.toIdx, toTrackId),
+    journey,
   });
   if (mv) sim.movements.push(mv);
 }
@@ -261,8 +308,8 @@ export function simTick(dtReal) {
     else if (f.trackId === to.id) logLine(`${f.name} はすでに ${to.name} にいます`);
     else {
       const mv = createMovement({
-        formationId: f.id, fromTrackId: f.trackId, toTrackId: to.id,
-        name: f.name, color: f.color, trainLength: formationLength(doc, f),
+        formationId: f.id, name: f.name, color: f.color, trainLength: formationLength(doc, f),
+        journey: [{ fromTrackId: f.trackId, toTrackId: to.id, depart: sim.clock, stationName: to.name }],
       });
       if (mv) sim.movements.push(mv);
     }
@@ -280,8 +327,17 @@ export function simTick(dtReal) {
       if (mv.phaseT >= liningSec) { mv.phase = 'running'; mv.phaseT = 0; }
     } else if (mv.phase === 'running') {
       const leg = mv.legs[mv.legIndex];
-      if (!leg) { finishMovement(mv); continue; }
-      mv.dist += (mv.speedKmh ? (mv.speedKmh * 1000) / 3600 : shuntMs) * dt;
+      if (!leg) { finishHop(mv); continue; }
+      const vms = mv.speedKmh ? (mv.speedKmh * 1000) / 3600 : shuntMs;
+      mv.dist += vms * dt;
+      // 省略した駅間にさしかかったら、その距離ぶんの時間だけ走る
+      const gaps = leg.gaps || [];
+      if (mv.gapIndex < gaps.length && mv.dist >= gaps[mv.gapIndex].at) {
+        mv.dist = gaps[mv.gapIndex].at;
+        mv.gapRemain = gaps[mv.gapIndex].extraM / Math.max(0.1, vms);
+        mv.phase = 'gap';
+        continue;
+      }
       if (mv.dist >= leg.length) {
         mv.dist = leg.length;
         releaseRoute(mv);
@@ -289,9 +345,14 @@ export function simTick(dtReal) {
           mv.phase = 'reversing'; mv.phaseT = 0;
           logLine(`${mv.name}：${leg.toName} で折返し`);
         } else {
-          finishMovement(mv);
+          finishHop(mv);
         }
       }
+    } else if (mv.phase === 'gap') {
+      mv.gapRemain -= dt;
+      if (mv.gapRemain <= 0) { mv.gapIndex++; mv.phase = 'running'; }
+    } else if (mv.phase === 'dwelling') {
+      if (sim.clock >= mv.dwellUntil) startHop(mv);
     } else if (mv.phase === 'reversing') {
       mv.phaseT += dt;
       if (mv.phaseT >= reversalSec) { mv.legIndex++; mv.dist = 0; mv.phase = 'lining'; mv.phaseT = 0; }
@@ -312,12 +373,50 @@ export function simTick(dtReal) {
   return true;
 }
 
-function finishMovement(mv) {
+/** 次の停車駅へ向けて走り出す */
+function startHop(mv) {
+  const doc = store.doc;
+  const hop = mv.journey[mv.hopIndex];
+  const built = buildLegs(doc, { ...hop, trainLength: mv.trainLength });
+  if (!built) {
+    logLine(`${mv.name}：${hop.stationName || ''} への経路がありません`, 'error');
+    finishMovement(mv, true);
+    return;
+  }
+  mv.legs = built.legs;
+  mv.legIndex = 0; mv.dist = 0; mv.gapIndex = 0; mv.gapRemain = 0;
+  mv.phase = 'lining'; mv.phaseT = 0;
+}
+
+/** 1区間（停車駅間）を走り終えたとき */
+function finishHop(mv) {
+  const doc = store.doc;
+  releaseRoute(mv);
+  const hop = mv.journey[mv.hopIndex];
+  const isLast = mv.hopIndex >= mv.journey.length - 1;
+  if (isLast) { finishMovement(mv); return; }
+  const next = mv.journey[mv.hopIndex + 1];
+  mv.hopIndex++;
+  mv.dwellUntil = Math.max(sim.clock, next.depart ?? sim.clock);
+  mv.phase = 'dwelling';
+  // 停車中は到着番線に在線させる
+  if (mv.formationId) {
+    const f = doc.formations.find(x => x.id === mv.formationId);
+    if (f) f.trackId = hop.toTrackId;
+  }
+  logLine(`${mv.name}：${hop.stationName || trackName(hop.toTrackId)} 着（${fmtHM(mv.dwellUntil)} 発）`);
+  commit('sim-stop');
+}
+
+function finishMovement(mv, failed = false) {
   const doc = store.doc;
   const f = mv.formationId ? doc.formations.find(x => x.id === mv.formationId) : null;
   const to = doc.tracks.find(t => t.id === mv.toTrackId);
   if (f && to) f.trackId = to.id;
-  logLine(`${mv.name} が ${to ? to.name : '?'} に到着`, 'ok');
+  if (!failed) {
+    const last = mv.journey[mv.journey.length - 1];
+    logLine(`${mv.name} が ${last && last.stationName ? last.stationName : (to ? to.name : '?')} に到着`, 'ok');
+  }
   releaseRoute(mv);
   sim.movements = sim.movements.filter(x => x.id !== mv.id);
   commit('sim-arrive');
@@ -344,6 +443,7 @@ export function pathSlice(path, from, to) {
 function updateTrains() {
   const out = [];
   for (const mv of sim.movements) {
+    if (mv.phase === 'dwelling') continue;        // 停車中は在線として描かれる
     const leg = mv.legs[mv.legIndex];
     if (!leg) continue;
     const nose = mv.dist;
@@ -373,7 +473,9 @@ export function simState() {
         progress: leg && leg.length ? Math.min(1, mv.dist / leg.length) : 0,
         remain: leg ? Math.max(0, leg.length - mv.dist) : 0,
         leg: mv.legIndex + 1, legs: mv.legs.length,
-        to: trackName(mv.toTrackId),
+        hop: mv.hopIndex + 1, hops: mv.journey.length,
+        to: (mv.journey[mv.hopIndex] || {}).stationName || trackName(mv.toTrackId),
+        dwellUntil: mv.phase === 'dwelling' ? fmtHM(mv.dwellUntil) : null,
       };
     }),
     pending,
@@ -382,5 +484,6 @@ export function simState() {
 
 export const PHASE_NAMES = {
   idle: '待機', lining: '進路構成中', waiting: '進路待ち', running: '走行中',
-  reversing: '折返し中', done: '完了', error: 'エラー',
+  reversing: '折返し中', dwelling: '停車中', gap: '省略区間を走行中',
+  done: '完了', error: 'エラー',
 };

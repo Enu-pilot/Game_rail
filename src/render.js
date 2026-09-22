@@ -25,7 +25,7 @@ const LAYER = {
   yard: 0, fence: 0, building: 0, shed: 0, roof: 0,
   platform: 2, pit: 2, deck: 2, washer: 2, machine: 2, gate: 2,
   turnout: 2, pointmachine: 2, signal: 3, marker: 3, buffer: 2,
-  bridge: 3, label: 3, stairs: 3, station: 3,
+  bridge: 3, label: 3, stairs: 3, station: 3, gapbreak: 3,
 };
 const layerOf = o => LAYER[objectDef(o.type).shape] ?? 0;
 
@@ -402,7 +402,9 @@ function drawObject(ctx, cam, doc, o, ui) {
   ctx.rotate(o.rot || 0);
   const shape = def.shape || 'building';
   const color = def.color;
-  const label = o.label || def.name;
+  const label = o.label || (def.shape === 'gapbreak'
+    ? `≈ ${((o.extraM || 0) / 1000).toFixed(1)} km 省略`
+    : def.name);
 
   ctx.save();
   if (o.mirror) ctx.scale(1, -1);
@@ -495,6 +497,20 @@ function drawObject(ctx, cam, doc, o, ui) {
       ctx.strokeStyle = color; ctx.lineWidth = 1.5;
       roundRect(ctx, -w / 2, -h / 2, w, h, 3); ctx.fill(); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-w / 2, -h / 2); ctx.lineTo(w / 2, h / 2); ctx.strokeStyle = hexA(color, .6); ctx.stroke();
+      break;
+    }
+    case 'gapbreak': {
+      const hh = Math.max(7, 3.2 * z);
+      ctx.strokeStyle = '#0d1015';
+      ctx.lineWidth = Math.max(5, 5.2 * z);
+      ctx.beginPath(); ctx.moveTo(0, -hh); ctx.lineTo(0, hh); ctx.stroke();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1.6, .5 * z);
+      for (const dx of [-Math.max(3, 1.4 * z), Math.max(3, 1.4 * z)]) {
+        ctx.beginPath();
+        ctx.moveTo(dx - hh * .35, -hh); ctx.lineTo(dx + hh * .35, 0); ctx.lineTo(dx - hh * .35, hh);
+        ctx.stroke();
+      }
       break;
     }
     case 'station': {
@@ -631,7 +647,9 @@ function drawObject(ctx, cam, doc, o, ui) {
   const minM = Math.min(o.w, o.h);
   const labelMin = shape === 'turnout' ? 18 : 26;     // 分岐器の番号は小さくても表示する
   const showText = (shape === 'label') || selected ||
-    (o.label ? Math.max(w, h) > labelMin : (minM >= 10 && z > 0.35 && Math.min(w, h) > 12));
+    (shape === 'gapbreak' ? z > 0.2
+      : o.label ? Math.max(w, h) > labelMin
+        : (minM >= 10 && z > 0.35 && Math.min(w, h) > 12));
   if (showText && label) {
     let ang = 0;
     const rot = normRot(o.rot || 0);
@@ -640,10 +658,12 @@ function drawObject(ctx, cam, doc, o, ui) {
     ctx.rotate(ang);
     if (Math.abs(normRot((o.rot || 0) + ang)) > Math.PI / 2 + 1e-6) ctx.rotate(Math.PI);
     const fs = shape === 'label' ? Math.max(11, o.h * z * .8)
-      : shape === 'turnout' ? 10.5
+      : (shape === 'turnout' || shape === 'gapbreak') ? 10.5
         : shape === 'station' ? Math.min(15, Math.max(11, 3 * z))
         : Math.min(14, Math.max(9, Math.min(w, h) * .45));
-    const dy = shape === 'turnout' ? -(h / 2 + 7) : (shape === 'station' ? -(Math.max(10, 4.5 * z)) : 0);
+    const dy = shape === 'turnout' ? -(h / 2 + 7)
+      : shape === 'station' ? -(Math.max(10, 4.5 * z))
+        : shape === 'gapbreak' ? -(Math.max(12, 4.5 * z)) : 0;
     ctx.font = `600 ${fs}px ${FONT}`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.8)';

@@ -280,6 +280,8 @@ export function findRoute(doc, g, opts) {
     const e0 = s0 ? g.edgeById.get(s0.edgeId) : null;
     const dir0 = e0 ? (s0.nodeId === e0.b ? 'ab' : 'ba') : 'ab';
     leg = newLeg(fromTrackId, dir0, from.name);
+    // 起点の線路を出るノードの位置（駅からの実距離を足すために使う）
+    if (e0) leg.originAt = (s0.nodeId === e0.b ? e0.toAt : e0.fromAt);
   }
   const pushTurnout = (req) => {
     if (!req) return;
@@ -425,6 +427,33 @@ export function validateLayout(doc, g) {
     if (u.over) issues.push({ level: 'error', trackId: t.id, message: `「${t.name}」は留置両数が有効長を超えています（${u.cars}/${u.capacity}両）` });
   }
   return issues;
+}
+
+/* ---------------- 駅間省略（キロ程補正） ---------------- */
+
+/** その線路に置かれた省略記号（位置と省略距離） */
+export function trackGaps(doc, trackId) {
+  const t = doc.tracks.find(x => x.id === trackId);
+  if (!t || !t.points || t.points.length < 2) return [];
+  const out = [];
+  for (const o of doc.objects || []) {
+    if (!objectDef(o.type).gap) continue;
+    if (o.trackId !== trackId) continue;
+    const r = distToPolyline(o.x, o.y, t.points);
+    out.push({ object: o, at: r.at, extraM: Math.max(0, o.extraM || 0) });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/** 線路上の区間 [a,b] に含まれる省略距離の合計 */
+export function segmentExtra(doc, trackId, a, b) {
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  return trackGaps(doc, trackId).reduce((s, g) => (g.at >= lo && g.at <= hi ? s + g.extraM : s), 0);
+}
+
+/** 経路（[{trackId,fromAt,toAt}]）に含まれる省略距離の合計 */
+export function pathExtra(doc, path) {
+  return (path || []).reduce((s, p) => s + segmentExtra(doc, p.trackId, p.fromAt, p.toAt), 0);
 }
 
 /* ---------------- 分岐器の開通方向 ---------------- */

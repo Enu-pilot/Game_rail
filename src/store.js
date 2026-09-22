@@ -139,6 +139,7 @@ export function migrate(doc) {
       position: Number.isFinite(o.position) ? o.position : 0,   // 分岐器の開通方向（0=定位）
       dir: o.dir === 'ba' ? 'ba' : 'ab',                        // 信号機が防護する進行方向
       tracks: Array.isArray(o.tracks) ? o.tracks.slice() : [],  // 駅の発着線（番線）
+      extraM: Number.isFinite(o.extraM) ? o.extraM : 2000,      // 駅間省略で足す距離[m]
       xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
       label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
     };

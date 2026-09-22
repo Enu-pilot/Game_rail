@@ -116,6 +116,7 @@ export const OBJECT_GROUPS = [
       { id: 'fence',      name: 'フェンス',   w: 120, h: 2, color: '#7f8aa3', shape: 'fence' },
       { id: 'gatehouse',  name: '守衛所・門', w: 16, h: 12, color: '#8d99b4', shape: 'building' },
       { id: 'label',      name: 'テキスト',   w: 40, h: 10, color: '#e6eaf3', shape: 'label' },
+      { id: 'gap_break',  name: '駅間省略（キロ程補正）', w: 12, h: 16, color: '#ffd166', shape: 'gapbreak', onTrack: true, gap: true },
     ]
   },
 ];

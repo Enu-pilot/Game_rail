@@ -1,7 +1,7 @@
 // 路線（駅の並び）とダイヤ（列車のスジ）の計算
 
 import { objectDef } from './catalog.js';
-import { findRoute } from './topology.js';
+import { findRoute, segmentExtra, pathExtra } from './topology.js';
 import { distToPolyline } from './geom.js';
 
 export const TRAIN_TYPES = [
@@ -48,10 +48,10 @@ export function lineStations(doc, g, line) {
       if (prev && prev.trackId && o.trackId) {
         if (prev.trackId === o.trackId) {
           const a = stationAt(doc, prev), b = stationAt(doc, o);
-          d = (a != null && b != null) ? Math.abs(b - a) : 0;
+          d = (a != null && b != null) ? Math.abs(b - a) + segmentExtra(doc, o.trackId, a, b) : 0;
         } else {
           const r = findRoute(doc, g, { fromTrackId: prev.trackId, toTrackId: o.trackId, trainLength: 0 });
-          d = r.found ? r.distance : 0;
+          d = r.found ? r.distance + pathExtra(doc, r.path) : 0;   // 省略した駅間の距離を加える
         }
       }
       km += d;

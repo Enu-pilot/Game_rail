@@ -1,7 +1,7 @@
 // 入区・出区の効率解析（同時に構成できる進路の数＝同時入線数、ボトルネック、所要時間の見積もり）
 
 import { trackKind } from './catalog.js';
-import { findRoute } from './topology.js';
+import { findRoute, pathExtra } from './topology.js';
 import { formationLength, trackUsage } from './store.js';
 
 /** 2つの経路が同時に成立しないか（分岐器の共用・線路区間の重複） */
@@ -78,10 +78,11 @@ export function entryAnalysis(doc, g, opts = {}) {
     if (!r.found) { unreachable.push(t); continue; }
     const turnoutIds = new Set();
     for (const lg of r.legs || []) for (const to of lg.turnouts) turnoutIds.add(to.objectId);
+    const dist = r.distance + pathExtra(doc, r.path);
     routes.push({
       track: t, path: r.path, turnoutIds,
-      distance: r.distance, reversals: r.reversals,
-      minutes: (r.distance / 1000) / speedKmh * 60 + r.reversals * reversalMin,
+      distance: dist, reversals: r.reversals,
+      minutes: (dist / 1000) / speedKmh * 60 + r.reversals * reversalMin,
       warnings: r.warnings,
     });
   }
