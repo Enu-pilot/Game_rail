@@ -52,6 +52,8 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
     return [t.id, st0 && st0.dep != null ? st0.dep : t.departSec];
   }));
   const list = trains.slice().sort((a, b) => depOf.get(a.id) - depOf.get(b.id));
+  // 環状線の始発駅と終着駅のように、同じ名前の駅は同じ駅とみなす
+  const sameStation = (a, b) => a === b || (!!stations[a] && !!stations[b] && stations[a].name === stations[b].name);
   const rosters = [];
   /** 直通に出ている間、編成は戻ってこない（往復＋折返し） */
   const awaySec = t => {
@@ -69,11 +71,13 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
     const treq = trainRequirement(doc, line, t);
     let bestRA = false;
     for (const r of rosters) {
-      if (r.lastIdx !== t.fromIdx) continue;
+      if (!sameStation(r.lastIdx, t.fromIdx)) continue;
       if (r.toDepot) continue;                       // 入庫した運用にはつながない
       if ((r.operatorId || selfId) !== op) continue; // 他社の車両とはつながない
       // 1運用は1編成が通しで担当するので、両数と乗入れ制限が両立しない列車はつなげない
       if (Math.max(r.cars, t.cars || 1) > Math.min(r.reqMaxCars, treq.maxCars)) continue;
+      // 両数の違う列車は同じ編成でつながない設定（増解結をしない路線）
+      if (doc.settings.rosterSameCars && r.cars !== (t.cars || 1)) continue;
       // 機関車牽引の列車は機関車牽引どうしでつなぐ。折り返すときは機回しが要る
       const prev = r.trains[r.trains.length - 1];
       if (!!prev.loco !== !!t.loco) continue;
@@ -83,8 +87,10 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
       const need = r.needGap + (ra ? runAroundSec(doc) : 0);
       const gap = depOf.get(t.id) - r.lastArr;
       if (gap < need || gap > maxIdle + need) continue;
-      // 先着順（いちばん長く待っている運用から使う）＝必要編成数が最小になる
-      if (!best || r.lastArr < best.lastArr) { best = r; bestRA = ra; }
+      // 両数が同じ運用を優先し、その中で先着順（いちばん長く待っている運用から使う）＝必要編成数が最小になる
+      const same = r.cars === (t.cars || 1);
+      const bestSame = best && best.cars === (t.cars || 1);
+      if (!best || (same && !bestSame) || (same === bestSame && r.lastArr < best.lastArr)) { best = r; bestRA = ra; }
     }
     if (best) {
       if (bestRA) best.runArounds.push({ idx: t.fromIdx, name: stations[t.fromIdx] ? stations[t.fromIdx].name : '?', at: depOf.get(t.id) });

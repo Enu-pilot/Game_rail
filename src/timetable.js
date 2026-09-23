@@ -212,7 +212,18 @@ export function computeSchedule(doc, stations, train, _depth = 0) {
 export function coupledLeader(doc, t) {
   const id = t && t.couple && t.couple.withId;
   if (!id || id === t.id) return null;
-  return (doc.trains || []).find(x => x.id === id) || null;
+  return trainById(doc, id);
+}
+
+/** 列車IDから列車を引く（列車の配列が変わるまで索引を使い回す） */
+let _trainIdx = { arr: null, len: -1, map: new Map() };
+export function trainById(doc, id) {
+  const arr = doc.trains || [];
+  if (_trainIdx.arr !== arr || _trainIdx.len !== arr.length) {
+    _trainIdx = { arr, len: arr.length, map: new Map(arr.map(t => [t.id, t])) };
+  }
+  const t = _trainIdx.map.get(id);
+  return t && t.id === id ? t : (arr.find(x => x.id === id) || null);
 }
 
 /** 併結して走る付属編成か */
@@ -358,9 +369,19 @@ export function nearbyTracks(doc, stationObj, radius = 80) {
   return out.sort((a, b) => a.d - b.d);
 }
 
+/** 線路IDの集合（線路の配列が変わるまで使い回す） */
+let _trackSet = { arr: null, len: -1, set: new Set() };
+export function hasTrack(doc, id) {
+  const arr = doc.tracks;
+  if (_trackSet.arr !== arr || _trackSet.len !== arr.length) {
+    _trackSet = { arr, len: arr.length, set: new Set(arr.map(t => t.id)) };
+  }
+  return _trackSet.set.has(id);
+}
+
 /** 駅の発着線（未設定なら駅マーカーが乗っている線路） */
 export function stationTracks(doc, stationObj) {
-  const ids = (stationObj.tracks || []).filter(id => doc.tracks.some(t => t.id === id));
+  const ids = (stationObj.tracks || []).filter(id => hasTrack(doc, id));
   if (ids.length) return ids;
   return stationObj.trackId ? [stationObj.trackId] : [];
 }
@@ -370,7 +391,7 @@ export function trainPlatform(doc, train, stations, idx) {
   const st = stations[idx];
   if (!st) return null;
   const assigned = train.platforms && train.platforms[idx];
-  if (assigned && doc.tracks.some(t => t.id === assigned)) return assigned;
+  if (assigned && hasTrack(doc, assigned)) return assigned;
   const list = st.object ? stationTracks(doc, st.object) : [];
   return list[0] || st.trackId || null;
 }
@@ -397,7 +418,9 @@ function platformUses(doc, line, stations, trains, headwaySec) {
       // 本線（駅マーカーが乗っている線路）は複線を1本で表しているので、
       // 前後が複線なら上下で別の線路とみなす。待避線などの副本線は1本の線路
       const onMain = !stObj || !stObj.trackId || trackId === stObj.trackId;
-      const sepDir = through && onMain && dbl(st.idx - 1) && dbl(st.idx);
+      // 番線が本線1本だけの駅は、始発・終着でも上下別（直通先へ抜ける途中駅として扱う）
+      const single = stObj ? stationTracks(doc, stObj).length <= 1 : true;
+      const sepDir = (through || single) && onMain && dbl(st.idx - 1) && dbl(st.idx);
       const up = tr.toIdx < tr.fromIdx;
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;

@@ -26,9 +26,22 @@ export function stationTrackCount(doc, st) {
 /** 行き違い・待避ができる駅（発着線が2本以上） */
 export const canPass = (doc, st) => stationTrackCount(doc, st) >= 2;
 
-/** 列車が各駅間を占有する時間帯 */
-export function sectionRuns(stops, trainId) {
+/**
+ * 列車が各駅間を占有する時間帯。
+ * noPass（待避線のない駅の番号の集合）を渡すと、その駅での停車・通過も
+ * 「駅」の区間（sec = 's'+駅番号）として加える（駅の中での追い越し・続行を見つけるため）。
+ */
+export function sectionRuns(stops, trainId, noPass = null) {
   const runs = [];
+  if (noPass) {
+    const up = stops.length > 1 && stops[stops.length - 1].idx < stops[0].idx;
+    for (const st of stops) {
+      if (!noPass.has(st.idx)) continue;
+      const a = st.arr ?? st.dep, b = st.dep ?? st.arr;
+      if (a == null) continue;
+      runs.push({ trainId, sec: `s${st.idx}`, station: true, from: st.idx, to: st.idx, start: a, end: b, up });
+    }
+  }
   for (let i = 1; i < stops.length; i++) {
     const a = stops[i - 1], b = stops[i];
     const start = a.dep ?? a.arr, end = b.arr ?? b.dep;
@@ -39,6 +52,32 @@ export function sectionRuns(stops, trainId) {
     });
   }
   return runs;
+}
+
+/** 2本の占有の関係：'meet' 行き違い / 'overtake' 追い越し / 'follow' 続行（時隔不足）/ null */
+function classify(q, r, single, headway) {
+  const opposing = q.up !== r.up;
+  if (q.station) {
+    // 待避線のない駅：同じ向きの列車は同じ番線に入るので、前の列車が出るまで次は入れない
+    if (opposing) return null;
+    if ((r.end - q.end) * (r.start - q.start) < 0) return 'overtake';
+    return r.start < q.end + headway * 2 / 3 ? 'follow' : null;
+  }
+  if (opposing) return single ? 'meet' : null;
+  if (single) return 'follow';
+  if ((r.end - q.end) * (r.start - q.start) < 0) return 'overtake';
+  if (r.start - q.start < headway || r.end - q.end < headway) return 'follow';
+  return null;
+}
+
+/** 待避線のない複線の駅（駅の中で追い越せない） */
+function noPassStations(doc, line, stations) {
+  const set = new Set();
+  stations.forEach((st, i) => {
+    const dbl = !sectionSingle(line, i) || !sectionSingle(line, i - 1);
+    if (dbl && !canPass(doc, st)) set.add(i);
+  });
+  return set;
 }
 
 /** 待ちを入れられる駅（進行方向の手前側で、いちばん近い交換可能駅）を探す */
@@ -74,25 +113,47 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   const schedCache = new Map();
   const sched = t => {
     let s = schedCache.get(t.id);
-    if (!s) { s = computeSchedule(doc, stations, { ...t, holds: holds[t.id] }); schedCache.set(t.id, s); }
+    if (!s) {
+      s = computeSchedule(doc, stations, { ...t, holds: holds[t.id] });
+      s.byIdx = new Map(s.map(x => [x.idx, x]));
+      schedCache.set(t.id, s);
+    }
     return s;
   };
+  // 駅ごとに、そこを通る列車（停車・通過とも）
+  const atStation = new Map();
   /** 待避・交換する列車を、対向（通過）列車と別の番線に入れる */
   const sidePlatform = (yTrain, oTrain, idx, from, to) => {
     const stn = stations[idx];
     const listT = stn && stn.object ? stationTracks(doc, stn.object) : [];
     if (listT.length < 2) return null;
     const used = trainPlatform(doc, { ...oTrain, platforms: plats[oTrain.id] }, stations, idx);
-    const cands = listT.filter(id => id !== used);
-    // ほかの列車が使っていない番線を選ぶ
+    // ほかの列車が使っていない番線を選ぶ。いま割り当てている副本線（向きに合ったもの）を先に、本線は最後に
     const upOf = t => t.toIdx < t.fromIdx;
     const mainId = stn && stn.object ? stn.object.trackId : null;
+    const mine = plats[yTrain.id] && plats[yTrain.id][idx];
+    // 左側通行：進行方向の左にある副本線を先に選ぶ
+    const up = upOf(yTrain);
+    const pa = stations[up ? idx + 1 : idx - 1], pb = stations[up ? idx - 1 : idx + 1];
+    const o = stn.object;
+    const leftOf = id => {
+      if (!pa || !pb || !pa.object || !pb.object) return false;
+      const t = doc.tracks.find(k => k.id === id);
+      if (!t || !t.points.length) return false;
+      const m = t.points[Math.floor(t.points.length / 2)];
+      const tx = pb.object.x - pa.object.x, ty = pb.object.y - pa.object.y;
+      return tx * (m.y - o.y) - ty * (m.x - o.x) < 0;
+    };
+    const rank = id => (id === mine && id !== mainId ? 0 : id === mainId ? 3 : leftOf(id) ? 1 : 2);
+    const cands = listT.filter(id => id !== used).sort((a, b) => rank(a) - rank(b));
     for (const id of cands) {
       let free = true;
-      for (const t of list) {
+      for (const t of atStation.get(idx) || []) {
         if (t.id === yTrain.id || t.id === oTrain.id) continue;
-        const stop = sched(t).find(x => x.idx === idx);
+        const stop = sched(t).byIdx.get(idx);
         if (!stop) continue;
+        const a0 = (stop.arr ?? stop.dep) - headway / 2, b0 = (stop.dep ?? stop.arr) + headway / 2;
+        if (b0 <= from || a0 >= to) continue;           // 時間が重ならない列車は番線を見ない
         if (trainPlatform(doc, { ...t, platforms: plats[t.id] }, stations, idx) !== id) continue;
         if (id === mainId && upOf(t) !== upOf(yTrain)) continue;   // 本線は上下別
         const a = (stop.arr ?? stop.dep) - headway / 2, b = (stop.dep ?? stop.arr) + headway / 2;
@@ -113,8 +174,9 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   const bySec = new Map();
   const runsOf = new Map();
   let maxSpan = headway;          // 駅間の占有のいちばん長いもの（探索の起点を決める）
+  const noPass = noPassStations(doc, line, stations);
   const insertRuns = t => {
-    const rs = sectionRuns(sched(t), t.id);
+    const rs = sectionRuns(sched(t), t.id, noPass);
     runsOf.set(t.id, rs);
     for (const r of rs) {
       maxSpan = Math.max(maxSpan, r.end - r.start + headway);
@@ -133,7 +195,13 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     }
     runsOf.delete(id);
   };
-  for (const t of list) insertRuns(t);
+  for (const t of list) {
+    insertRuns(t);
+    for (const st of sched(t)) {
+      if (!atStation.has(st.idx)) atStation.set(st.idx, []);
+      atStation.get(st.idx).push(t);
+    }
+  }
   // 待ち時間は増やす一方なので、支障が新たに生じるのは「前回の最早の支障」か
   // 「待ちを入れた駅に着く時刻」のどちらか早いほう以降に限られる
   let lowBound = -Infinity;
@@ -143,7 +211,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     // いちばん早い支障を1件だけ解く
     let worst = null;
     for (const [sec, runs] of bySec) {
-      const single = sectionSingle(line, sec);
+      const single = typeof sec === 'number' && sectionSingle(line, sec);
       let i0 = 0;
       if (lowBound > -Infinity) {
         let lo = 0, hi = runs.length;
@@ -162,11 +230,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
           const key = q.trainId < r.trainId ? `${q.trainId}|${r.trainId}|${sec}` : `${r.trainId}|${q.trainId}|${sec}`;
           if (gaveUp.has(key)) continue;
           const opposing = q.up !== r.up;
-          let kind = null;
-          if (opposing) { if (single) kind = 'meet'; }
-          else if (single) kind = 'follow';
-          else if ((r.end - q.end) * (r.start - q.start) < 0) kind = 'overtake';
-          else if (r.start - q.start < headway || r.end - q.end < headway) kind = 'follow';
+          let kind = classify(q, r, single, headway);
           if (!kind) continue;
           // 同一方向で、あとから来る列車のほうが優等なら、先行の遅い列車が待避する
           const qT = byId.get(q.trainId), rT = byId.get(r.trainId);
@@ -194,7 +258,9 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     // 単線は「対向が抜けるまで」、複線は「前後の間隔を確保できるまで」待つ
     const raw = worst.single
       ? other.end + headway - yielder.start
-      : Math.max(headway - (yielder.start - other.start), headway - (yielder.end - other.end));
+      : yielder.station
+        ? other.end + headway * 2 / 3 - yielder.start  // 駅：前の列車が出て（通過して）から入る
+        : Math.max(headway - (yielder.start - other.start), headway - (yielder.end - other.end));
     const need = Math.ceil(raw / 30) * 30;
     const cur = hs ? (holds[yielder.trainId][hs.idx] || 0) : 0;
 
@@ -261,8 +327,9 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
 }
 
 const num = t => t.number || t.name || '列車';
-const secName = (stations, sec) =>
-  `${stations[sec] ? stations[sec].name : '?'}〜${stations[sec + 1] ? stations[sec + 1].name : '?'}`;
+const secName = (stations, sec) => (typeof sec === 'string'
+  ? `${stations[+sec.slice(1)] ? stations[+sec.slice(1)].name : '?'}駅`
+  : `${stations[sec] ? stations[sec].name : '?'}〜${stations[sec + 1] ? stations[sec + 1].name : '?'}`);
 
 /**
  * いまのダイヤの支障を検出する（単線の行き違い不可・追い越し・時隔不足）。
@@ -271,9 +338,10 @@ const secName = (stations, sec) =>
 export function detectConflicts(doc, line, stations, trains, opts = {}) {
   const headway = Math.max(30, opts.headwaySec ?? doc.settings.minHeadwaySec ?? 90);
   const bySec = new Map();
+  const noPass = noPassStations(doc, line, stations);
   for (const t of trains) {
     if (isCompanion(doc, t)) continue;
-    for (const r of sectionRuns(computeSchedule(doc, stations, t), t.id)) {
+    for (const r of sectionRuns(computeSchedule(doc, stations, t), t.id, noPass)) {
       if (!bySec.has(r.sec)) bySec.set(r.sec, []);
       bySec.get(r.sec).push({ ...r, train: t });
     }
@@ -281,17 +349,12 @@ export function detectConflicts(doc, line, stations, trains, opts = {}) {
   const issues = [];
   for (const [sec, runs] of bySec) {
     runs.sort((a, b) => a.start - b.start);
-    const single = sectionSingle(line, sec);
+    const single = typeof sec === 'number' && sectionSingle(line, sec);
     for (let i = 0; i < runs.length; i++) {
       for (let j = i + 1; j < runs.length; j++) {
         const q = runs[i], r = runs[j];
         if (r.start > q.end + headway) break;
-        const opposing = q.up !== r.up;
-        let kind = null;
-        if (opposing) { if (single) kind = 'meet'; }
-        else if (single) kind = 'follow';
-        else if ((r.end - q.end) * (r.start - q.start) < 0) kind = 'overtake';
-        else if (r.start - q.start < headway || r.end - q.end < headway) kind = 'follow';
+        const kind = classify(q, r, single, headway);
         if (!kind) continue;
         issues.push({
           level: kind === 'follow' ? 'warn' : 'error', kind, sec,

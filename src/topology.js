@@ -2,7 +2,7 @@
 
 import { polylineLength, pointAt, distToPolyline, dist, polylineIntersect } from './geom.js';
 import { trackKind, objectDef } from './catalog.js';
-import { trackCapacity, trackUsage, formationLength } from './store.js';
+import { trackCapacity, trackUsage, formationLength, store } from './store.js';
 
 export const JOIN_TOL = 6;        // 接続とみなす距離[m]
 export const DEFAULT_MAX_TURN = 90; // 折返しなしで通過できる最大転向角[度]
@@ -463,17 +463,29 @@ export function validateLayout(doc, g) {
 /* ---------------- 駅間省略（キロ程補正） ---------------- */
 
 /** その線路に置かれた省略記号（位置と省略距離） */
+let _gapCache = { doc: null, rev: -1, byTrack: null };
 export function trackGaps(doc, trackId) {
+  // 変更（store.rev）があるまで、線路ごとの省略記号の一覧を使い回す
+  if (_gapCache.doc !== doc || _gapCache.rev !== store.rev) {
+    const byTrack = new Map();
+    for (const o of doc.objects || []) {
+      if (!objectDef(o.type).gap || !o.trackId) continue;
+      if (!byTrack.has(o.trackId)) byTrack.set(o.trackId, []);
+      byTrack.get(o.trackId).push(o);
+    }
+    _gapCache = { doc, rev: store.rev, byTrack, memo: new Map() };
+  }
+  if (_gapCache.memo.has(trackId)) return _gapCache.memo.get(trackId);
   const t = doc.tracks.find(x => x.id === trackId);
   if (!t || !t.points || t.points.length < 2) return [];
   const out = [];
-  for (const o of doc.objects || []) {
-    if (!objectDef(o.type).gap) continue;
-    if (o.trackId !== trackId) continue;
+  for (const o of _gapCache.byTrack.get(trackId) || []) {
     const r = distToPolyline(o.x, o.y, t.points);
     out.push({ object: o, at: r.at, extraM: Math.max(0, o.extraM || 0) });
   }
-  return out.sort((a, b) => a.at - b.at);
+  out.sort((a, b) => a.at - b.at);
+  _gapCache.memo.set(trackId, out);
+  return out;
 }
 
 /** 線路上の区間 [a,b] に含まれる省略距離の合計 */

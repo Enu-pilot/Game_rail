@@ -61,7 +61,8 @@ function makePath(points) {
 
 export function buildNetwork(spec) {
   const doc = newDoc(spec.title);
-  Object.assign(doc.settings, spec.settings || {});
+  // 実在路線のサンプルは、両数の違う列車を同じ編成で回さない（増解結なし）
+  Object.assign(doc.settings, { rosterSameCars: true }, spec.settings || {});
   const tracks = [], objects = [], formations = [];
   const SP = spec.spacing || 480;
 
@@ -78,16 +79,19 @@ export function buildNetwork(spec) {
   /* ---- 1) 路線ごとに本線・駅・待避線を描く ---- */
   for (const L of spec.lines) {
     const st = L.stations.map(([name, km, type = 's', extra = {}]) => ({ name, km, type, extra }));
-    const shared0 = !!L.attach;       // 先頭駅は接続先の路線と共用
+    // 先頭駅は接続先の路線と共用。ownStation なら分岐した先に自線のホーム（別の駅標）を置く
+    const shared0 = !!L.attach && !L.attach.ownStation;
+    const own0 = !!L.attach && !!L.attach.ownStation;
     // 描画上の駅位置（経路の始点からの距離）
     const pos = [];
-    let s = L.attach ? 0 : (L.ring ? 20 : MARGIN);
+    // 環状線は始発駅の待避線が継目にかからないよう、少し先から並べる
+    let s = L.attach ? 0 : (L.ring ? LOOP_HALF + 60 : MARGIN);
     const connLen = L.attach ? (L.attach.mode === 'branch' ? Math.abs(L.attach.offset ?? 220) : 0) : 0;
     for (let i = 0; i < st.length; i++) {
-      if (i === 0) { pos.push(L.attach ? -connLen : s); continue; }
+      if (i === 0) { pos.push(own0 ? (s = LOOP_HALF + 90) : L.attach ? -connLen : s); continue; }
       const real = Math.abs(st[i].km - st[i - 1].km) * 1000;
       const gap = Math.max(Math.min(real, SP), 300);
-      s = (i === 1 && L.attach ? 0 : s) + (i === 1 && L.attach ? Math.max(gap, 220) : gap);
+      s = (i === 1 && shared0 ? 0 : s) + (i === 1 && shared0 ? Math.max(gap, 220) : gap);
       pos.push(s);
     }
     const endLen = pos[pos.length - 1] + (L.ring ? 20 : MARGIN);
@@ -215,9 +219,11 @@ export function buildNetwork(spec) {
       objects.push(obj);
       // ホーム（見た目）
       const ang = p.angle;
-      const side = S.type === 'p' ? LOOP_OFF + 9 : 9;
+      // 曲線（環状線）ではホームの弦が線路に寄るぶん離して置く
+      const side = (S.type === 'p' ? LOOP_OFF + 9 : 9) + (L.ring ? 5 : 0);
       const pl = (L.maxCars || 10) * 20 + 10;
-      if (S.type !== 't') {
+      const closing = loopSeam && i === st.length - 1;     // 環状線の終点＝始発駅（ホームは始発側に描く）
+      if (S.type !== 't' && !closing) {
         for (const sg of [-1, 1]) {
           const q = add(p, n, sg * side);
           objects.push(O('platform_side', q.x, q.y, { w: Math.min(pl, 210), h: 5, rot: ang }));
@@ -345,8 +351,12 @@ export function buildNetwork(spec) {
   };
   const makeTrain = (E, fromName, toName, dep, sv, op, number) => {
     const sts = stsOf[E.key];
-    const fromIdx = E.stations.findIndex(x => x.name === fromName);
-    const toIdx = E.stations.findIndex(x => x.name === toName);
+    // 環状線は始終点が同じ駅名なので、「駅名*」で最後の方を指す
+    const find = nm => (nm.endsWith('*')
+      ? E.stations.map(x => x.name).lastIndexOf(nm.slice(0, -1))
+      : E.stations.findIndex(x => x.name === nm));
+    const fromIdx = find(fromName);
+    const toIdx = find(toName);
     if (fromIdx < 0 || toIdx < 0) throw new Error(`${sv.name}: ${E.spec.name} に ${fromName}/${toName} がありません`);
     const up = toIdx < fromIdx;
     const stopsSpec = sv.stops && sv.stops[E.key];
@@ -404,17 +414,19 @@ export function buildNetwork(spec) {
     const no = (counters[sv.prefix || sv.type] = (counters[sv.prefix || sv.type] || 0) + 1);
     const number = `${sv.prefix || ''}${no}${sv.suffix || ''}`;
     const transfer = sv.transfer ?? 60;
+    const occ = {};                   // 同じ路線を何度目に通るか（環状線に入って出る系統など）
     const made = route.map((seg, k) => {
+      const key = `${seg[0]}#${(occ[seg[0]] = (occ[seg[0]] ?? -1) + 1)}`;
       const E = lines[seg[0]];
       const tr = makeTrain(E, seg[1], seg[2], dep, sv, op, number);
       if (throughSources.has(seg[0])) tr.throughId = throughFor(route, k);
       if (sv.loco) tr.loco = true;
       // 併結：相手の系統の同じ回・同じ向きの列車に付属編成として連結する
       if (sv.with && sv.with.on.includes(seg[0])) {
-        const L = runs.get(`${sv.with.service}|${n}|${dirKey}|${seg[0]}`);
+        const L = runs.get(`${sv.with.service}|${n}|${dirKey}|${key}`);
         if (L) tr.couple = { withId: L.id };
       }
-      runs.set(`${sv.prefix}|${n}|${dirKey}|${seg[0]}`, tr);
+      runs.set(`${sv.prefix}|${n}|${dirKey}|${key}`, tr);
       return { E, tr };
     });
     // 時刻：併結区間は相手の時刻に合わせ、その前後の区間を前詰め・後詰めでつなぐ
@@ -441,7 +453,25 @@ export function buildNetwork(spec) {
         t = made[k].tr.departSec + segDuration(made[k].E, made[k].tr) + transfer;
       }
     }
+    chains.push({ made, transfer });
     return made.map(m => m.tr);
+  };
+  const chains = [];
+  /** 1本の系統の区間どうしで、次の区間が前の区間の到着より先に出ないようにそろえる */
+  const retime = () => {
+    doc.trains = trains;
+    store.rev++;
+    for (const { made, transfer } of chains) {
+      for (let k = 1; k < made.length; k++) {
+        const cur = made[k].tr;
+        if (cur.couple) continue;                       // 付属編成は相手の列車に従う
+        const prev = made[k - 1];
+        const ps = computeSchedule(doc, stsOf[prev.E.key], prev.tr);
+        const arr = ps[ps.length - 1].arr;
+        if (arr != null && cur.departSec < arr + transfer) cur.departSec = Math.ceil((arr + transfer) / 30) * 30;
+      }
+    }
+    store.rev++;
   };
   for (const sv of spec.services || []) {
     let n = 0;
@@ -457,58 +487,77 @@ export function buildNetwork(spec) {
     }
   }
   doc.trains = trains;
+  retime();
 
   /* ---- 5.5) 路線ごとに行き違い・待避を入れておく（編成数はこのダイヤから逆算する） ---- */
-  store.rev++;
-  for (const E of Object.values(lines)) {
-    const sts = stsOf[E.key];
-    const own = trains.filter(t => t.lineId === E.line.id);
-    if (!own.length) continue;
-    const plan = planMeets(doc, E.line, sts, own);
-    for (const t of own) {
-      if (plan.holds[t.id]) t.holds = plan.holds[t.id];
-      if (plan.platforms[t.id]) t.platforms = plan.platforms[t.id];
-    }
+  // 待避で遅れると、その先の区間（直通先）の発時刻をずらす。ずらした結果にもう一度待避を入れる
+  const syncComps = () => {
     store.rev++;
-    for (const t of own) {
-      if (!t.couple) continue;
-      const st0 = computeSchedule(doc, sts, t)[0];
-      if (st0 && st0.dep != null) t.departSec = st0.dep;
+    for (const E of Object.values(lines)) {
+      for (const t of trains) {
+        if (t.lineId !== E.line.id || !t.couple) continue;
+        const st0 = computeSchedule(doc, stsOf[E.key], t)[0];
+        if (st0 && st0.dep != null) t.departSec = st0.dep;
+      }
     }
-  }
+  };
+  const dispatchAll = (passes, reset) => {
+    for (let pass = 0; pass < passes; pass++) {
+      if (pass) retime();
+      store.rev++;
+      for (const E of Object.values(lines)) {
+        const own = trains.filter(t => t.lineId === E.line.id);
+        if (!own.length) continue;
+        const plan = planMeets(doc, E.line, stsOf[E.key], own, { reset });
+        for (const t of own) {
+          if (isCompanionIn(t)) continue;
+          if (plan.holds[t.id]) t.holds = plan.holds[t.id];
+          if (plan.platforms[t.id]) t.platforms = plan.platforms[t.id];
+        }
+      }
+      syncComps();
+    }
+  };
+  const isCompanionIn = t => !!(t.couple && t.couple.withId);
+  const multiSeg = chains.some(c => c.made.length > 1);
 
   /* ---- 6) 自社の編成をダイヤから逆算し、車両基地に置く ---- */
   const selfMain = spec.lines.find(L => L.op === spec.self);
-  let fleetGroups = [];
-  if (selfMain) {
-    const E = lines[selfMain.key];
-    store.rev++;
-    const sts = lineStations(doc, buildGraph(doc), E.line);
-    const own = trains.filter(t => t.lineId === E.line.id && t.operatorId === opIds[spec.self]);
-    const rosters = buildRosters(doc, E.line, sts, own);
-    const groups = new Map();
-    for (const r of rosters) {
-      const key = `${r.cars}|${[...r.req.safety].sort().join(',')}`;
-      if (!groups.has(key)) groups.set(key, { cars: r.cars, safety: [...r.req.safety], n: 0 });
-      groups.get(key).n++;
-    }
-    fleetGroups = [...groups.values()].sort((a, b) => b.n - a.n);
-  }
   const fleet = spec.fleet || {};
-  const allSafety = [...new Set(fleetGroups.flatMap(g => g.safety).concat(fleet.extraSafety || []))];
-  const sets = [];
-  let serial = 1;
-  for (const gp of fleetGroups) {
-    const count = gp.n + Math.max(1, Math.ceil(gp.n * 0.15));
-    for (let k = 0; k < count; k++) {
-      sets.push({
-        name: `${fleet.prefix || ''}${String(serial++).padStart(2, '0')}${fleet.suffix || '編成'}`,
-        series: fleet.series || '', cars: gp.cars,
-        // 予備車は全線対応にしておく（運用の入れ替えがきくように）
-        safety: k >= gp.n ? allSafety : gp.safety,
-      });
+  const fleetSets = () => {
+    let fleetGroups = [];
+    if (selfMain) {
+      const E = lines[selfMain.key];
+      store.rev++;
+      const sts = lineStations(doc, buildGraph(doc), E.line);
+      const own = trains.filter(t => t.lineId === E.line.id && t.operatorId === opIds[spec.self]);
+      const rosters = buildRosters(doc, E.line, sts, own);
+      const groups = new Map();
+      for (const r of rosters) {
+        const key = `${r.cars}|${[...r.req.safety].sort().join(',')}`;
+        if (!groups.has(key)) groups.set(key, { cars: r.cars, safety: [...r.req.safety], n: 0 });
+        groups.get(key).n++;
+      }
+      fleetGroups = [...groups.values()].sort((a, b) => b.n - a.n);
     }
-  }
+    const allSafety = [...new Set(fleetGroups.flatMap(g => g.safety).concat(fleet.extraSafety || []))];
+    const out = [];
+    let serial = 1;
+    for (const gp of fleetGroups) {
+      const count = gp.n + Math.max(1, Math.ceil(gp.n * 0.15));
+      for (let k = 0; k < count; k++) {
+        out.push({
+          name: `${fleet.prefix || ''}${String(serial++).padStart(2, '0')}${fleet.suffix || '編成'}`,
+          series: fleet.series || '', cars: gp.cars,
+          // 予備車は全線対応にしておく（運用の入れ替えがきくように）
+          safety: k >= gp.n ? allSafety : gp.safety,
+        });
+      }
+    }
+    return out;
+  };
+  // 車両基地の大きさは待避を入れる前のダイヤから見積もる（待避で運用が延びるぶん多めに）
+  const estSets = Math.ceil(fleetSets().length * 1.25) + 1;
 
   // 車両基地
   const depotTracks = [];
@@ -516,7 +565,7 @@ export function buildNetwork(spec) {
     const E = lines[dp.line];
     const S = E.stations.find(x => x.name === dp.at);
     if (!S) continue;
-    const setsHere = dp.own ? (dp.share != null ? Math.ceil(sets.length * dp.share) : sets.length) : 0;
+    const setsHere = dp.own ? (dp.share != null ? Math.ceil(estSets * dp.share) : estSets) : 0;
     const lenM = Math.max(220, (dp.cars || 10) * 21 + 30) * 2;   // 1線に2編成
     const nStable = Math.max(dp.min || 4, Math.ceil(setsHere / 2) + 1);
     const yard = buildDepot(E, S, dp, nStable, lenM);
@@ -527,21 +576,6 @@ export function buildNetwork(spec) {
       if (yard.shop) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
     }
   }
-  // 編成を留置線へ（最後の1本は交番検査中にする）
-  sets.forEach((st, i) => {
-    const spot = depotTracks.find(d => !d.shop && d.left > 0);
-    const shop = i === sets.length - 1 ? depotTracks.find(d => d.shop && d.left > 0) : null;
-    const place = shop || spot;
-    if (place) place.left--;
-    formations.push({
-      id: uid('f'), name: st.name, series: st.series, vehicle: fleet.vehicle || 'emu',
-      cars: st.cars, carLengthM: fleet.carLengthM ?? null, loco: null,
-      color: FORMATION_COLORS[i % FORMATION_COLORS.length],
-      trackId: place ? place.t.id : null, note: shop ? '交番検査中' : '',
-      operatorId: opIds[spec.self], safety: st.safety, odoKm: 0, inspection: null,
-    });
-  });
-
   /* ---- 7) 分岐器を接続点から自動生成 ---- */
   const tmp = { ...doc, tracks, objects, formations: [] };
   const g = buildGraph(tmp);
@@ -557,6 +591,50 @@ export function buildNetwork(spec) {
     });
   }
   if (spec.extras) spec.extras({ doc, lines, tracks, objects, T, O, add });
+
+  /* ---- 8) 車両基地・分岐器まで入った配線で時刻を計算し直し、支障が出たところに待避を足す ---- */
+  doc.tracks = tracks; doc.objects = objects;
+  store.rev++;
+  const gF = buildGraph(doc);
+  for (const E of Object.values(lines)) stsOf[E.key] = lineStations(doc, gF, E.line);
+  dispatchAll(multiSeg ? 2 : 1, true);
+
+  /* ---- 9) 待避を入れたダイヤから編成数を決めて、車両基地に置く ---- */
+  const sets = fleetSets();
+  // 編成を留置線へ（最後の1本は交番検査中にする）
+  sets.forEach((st, i) => {
+    const spot = depotTracks.find(d => !d.shop && d.left > 0);
+    const shop = i === sets.length - 1 ? depotTracks.find(d => d.shop && d.left > 0) : null;
+    const place = shop || spot;
+    if (place) place.left--;
+    formations.push({
+      id: uid('f'), name: st.name, series: st.series, vehicle: fleet.vehicle || 'emu',
+      cars: st.cars, carLengthM: fleet.carLengthM ?? null, loco: null,
+      color: FORMATION_COLORS[i % FORMATION_COLORS.length],
+      trackId: place ? place.t.id : null, note: shop ? '交番検査中' : '',
+      operatorId: opIds[spec.self], safety: st.safety, odoKm: 0, inspection: null,
+    });
+  });
+
+
+  /* ---- 10) 1日の最後の列車は車両基地へ入庫させる（終着駅で夜を明かさない） ---- */
+  const depotOf = {};
+  for (const d of depotTracks) if (!d.shop && !depotOf[d.depot.line]) depotOf[d.depot.line] = d.t.id;
+  const anyDepot = depotTracks.find(d => !d.shop);
+  store.rev++;
+  const gE = buildGraph(doc);
+  for (const E of Object.values(lines)) {
+    if (E.spec.op !== spec.self) continue;
+    const trackId = depotOf[E.key] || (anyDepot && anyDepot.t.id);
+    if (!trackId) continue;
+    const sts = lineStations(doc, gE, E.line);
+    const own = trains.filter(t => t.lineId === E.line.id && t.operatorId === opIds[spec.self]);
+    for (const r of buildRosters(doc, E.line, sts, own)) {
+      const last = r.trains[r.trains.length - 1];
+      if (last.throughId || last.toDepot || last.couple) continue;
+      last.toDepot = true; last.depotTrackId = trackId;
+    }
+  }
 
   doc.tracks = tracks; doc.objects = objects; doc.formations = formations;
   initCompany(doc);

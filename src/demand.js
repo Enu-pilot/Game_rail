@@ -1,6 +1,8 @@
 // 需要（駅の人口・時間帯別の流動）・乗車シミュレーション（混雑率・積み残し）・収支
 
-import { computeSchedule, trainType } from './timetable.js';
+import { computeSchedule, trainType, lineStations, isCompanion, companionsOf } from './timetable.js';
+import { getGraph } from './topology.js';
+import { store } from './store.js';
 import { throughChain, selfOperator } from './operators.js';
 
 export const STATION_KINDS = [
@@ -108,7 +110,8 @@ export function simulateDemand(doc, line, stations, trains) {
     totalPassengers: 0, passengerKm: 0, revenue: 0, left: 0,
     trainKm: 0, carKm: 0, trainCount: trains.length,
     foreignCarKm: 0,     // 自社線を走る他社車両
-    throughCarKm: 0,     // 他社線を走る自社車両
+    throughCarKm: 0,     // 直通先を走る自社車両
+    settleCarKm: 0,      // うち他社の線を走るぶん（車両使用料の精算の対象）
   };
   const selfId = selfOperator(doc) ? selfOperator(doc).id : null;
 
@@ -118,24 +121,43 @@ export function simulateDemand(doc, line, stations, trains) {
   // 列車の停車イベントを時刻順に並べる
   const events = [];
   for (const tr of trains) {
+    // 付属編成は相手の列車と一体の1本として扱い、両数（定員）だけ足す
+    if (isCompanion(doc, tr)) continue;
     const stops = computeSchedule(doc, stations, tr).filter(s => !s.skip);
     if (stops.length < 2) continue;
+    const comps = companionsOf(doc, tr.id).filter(c => c.lineId === tr.lineId);
+    const carsAt = idx => (tr.cars || 10) + comps.reduce((a, c) => {
+      const lo = Math.min(c.fromIdx, c.toIdx), hi = Math.max(c.fromIdx, c.toIdx);
+      // 付属編成が連結されている区間（その駅を発車するときに連結しているか）
+      const on = c.toIdx > c.fromIdx ? (idx >= lo && idx < hi) : (idx <= hi && idx > lo);
+      return a + (on ? (c.cars || 0) : 0);
+    }, 0);
     const cars = tr.cars || 10;
     const cap = cars * capPerCar;
     const order = stops.map(s => s.idx);
     const run = { train: tr, cars, cap, stops, order, onboard: new Float64Array(n), load: 0, xfer: new Map() };
+    run.capK = stops.map(s2 => carsAt(s2.idx) * capPerCar);
     for (let a = 0; a < order.length; a++) for (let b = a + 1; b < order.length; b++) served[order[a]][order[b]] = 1;
     stops.forEach((s, k) => events.push({ t: s.dep ?? s.arr, run, k }));
     // 走行キロ
     const dist = Math.abs(stations[order[order.length - 1]].km - stations[order[0]].km) / 1000;
     stats.trainKm += dist;
     stats.carKm += dist * cars;
+    for (const c of comps) {
+      const a = stations[c.fromIdx], b = stations[c.toIdx];
+      if (a && b) stats.carKm += Math.abs(b.km - a.km) / 1000 * (c.cars || 0);
+    }
     const foreign = (tr.operatorId || selfId) !== selfId;
     if (foreign) stats.foreignCarKm += dist * cars;
     else {
       const chain = throughChain(doc, tr.throughId);
-      const thKm = chain.reduce((a, x) => a + (x.km || 0), 0) * 2;   // 往復
+      // 自社の別の路線（ゲーム内にある路線）へ直通するぶんは、その路線の費用として数える
+      const modeledOwn = x => x.operatorId === selfId && x.partnerLineId && doc.lines.some(l => l.id === x.partnerLineId);
+      const thKm = chain.filter(x => !modeledOwn(x)).reduce((a, x) => a + (x.km || 0), 0) * 2;   // 往復
       stats.throughCarKm += thKm * cars;
+      // 他社の線を走ったぶんだけ車両使用料を払う（自社の別の線への直通は精算しない）
+      const foreignKm = chain.filter(x => x.operatorId && x.operatorId !== selfId).reduce((a, x) => a + (x.km || 0), 0) * 2;
+      stats.settleCarKm += foreignKm * cars;
     }
   }
   events.sort((a, b) => a.t - b.t);
@@ -177,7 +199,8 @@ export function simulateDemand(doc, line, stations, trains) {
 
     // 乗車（この列車がこの先に停まる駅が行先の人）
     const ahead = run.order.slice(k + 1);
-    const room = () => Math.max(0, run.cap * maxLoad - run.load);
+    const capNow = run.capK[k];
+    const room = () => Math.max(0, capNow * maxLoad - run.load);
     for (const j of ahead) {
       const q = queues[idx][j];
       let qi = 0;
@@ -237,11 +260,11 @@ export function simulateDemand(doc, line, stations, trains) {
         const sec = stats.sections[sIdx];
         if (!sec) continue;
         sec.byHour[h] += run.load;
-        sec.capHour[h] += run.cap;
-        const ratio = run.load / Math.max(1, run.cap);
+        sec.capHour[h] += capNow;
+        const ratio = run.load / Math.max(1, capNow);
         if (ratio > sec.peak) { sec.peak = ratio; sec.peakHour = h; sec.peakTrain = run.train.number; }
       }
-      stats.byHour[h].capacity += run.cap;
+      stats.byHour[h].capacity += capNow;
     }
   }
   generateUntil(endT);
@@ -265,25 +288,58 @@ export function simulateDemand(doc, line, stations, trains) {
   return stats;
 }
 
+/**
+ * この路線が自社の車両キロに占める割合（路線が1本なら1）。
+ * 直通先として別の路線で走るぶんは、その路線の車両キロとして数える。
+ */
+let _shareCache = { rev: -1, doc: null, map: new Map() };
+export function lineShare(doc, stations) {
+  const lines = doc.lines || [];
+  if (lines.length < 2 || !stations || !stations.length) return 1;
+  if (_shareCache.rev !== store.rev || _shareCache.doc !== doc) {
+    const selfId = selfOperator(doc) ? selfOperator(doc).id : null;
+    const g = getGraph(doc, store.rev);
+    const map = new Map();
+    let total = 0;
+    for (const l of lines) {
+      const sts = lineStations(doc, g, l);
+      let ck = 0;
+      for (const t of doc.trains) {
+        if (t.lineId !== l.id || (t.operatorId || selfId) !== selfId) continue;
+        const a = sts[t.fromIdx], b = sts[t.toIdx];
+        if (a && b) ck += Math.abs(b.km - a.km) / 1000 * (t.cars || 1);
+      }
+      map.set(l.id, ck); total += ck;
+    }
+    for (const [k, v] of map) map.set(k, total > 0 ? v / total : 1 / lines.length);
+    _shareCache = { rev: store.rev, doc, map };
+  }
+  const line = lines.find(l => (l.stations || []).length && stations[0] && l.stations[0] === stations[0].id &&
+    l.stations.length === stations.length);
+  return line ? (_shareCache.map.get(line.id) ?? 1) : 1;
+}
+
 /** 収支（1日あたり） */
 export function finance(doc, stats, stations) {
   const s = doc.settings;
   // 他社車両が自社線を走るぶんは相手の費用。自社車両が他社線を走るぶんは自社の費用
   const ownCarKm = stats ? Math.max(0, stats.carKm - (stats.foreignCarKm || 0)) + (stats.throughCarKm || 0) : 0;
   const carKmCost = (s.costPerCarKm ?? 250) * ownCarKm;
-  const cars = doc.formations.reduce((a, f) => a + (f.cars || 0) + (f.loco ? f.loco.count : 0), 0);
+  // 複数の路線を持つときは、車両・車両基地の費用を自社の車両キロの割合で按分する
+  const share = lineShare(doc, stations);
+  const cars = share * doc.formations.reduce((a, f) => a + (f.cars || 0) + (f.loco ? f.loco.count : 0), 0);
   const rollingStock = cars * (s.costPerCarDay ?? 12000);
   const routeKm = stations && stations.length ? (stations[stations.length - 1].km / 1000) : 0;
   const trackCost = routeKm * (s.costPerRouteKmDay ?? 90000);
   const stationCost = (stations ? stations.length : 0) * (s.costPerStationDay ?? 70000);
   const depotTracks = doc.tracks.filter(t => ['stabling', 'inspection', 'daily', 'periodic', 'special', 'washing', 'wheellathe'].includes(t.kind)).length;
-  const depotCost = depotTracks * (s.costPerDepotTrackDay ?? 9000);
+  const depotCost = share * depotTracks * (s.costPerDepotTrackDay ?? 9000);
   // 検査費：仕業・全般は日数で、交番・重要部は走行キロで効いてくる
   const inspectCost = cars * (s.inspectCostPerCarDay ?? 4500)
     + ownCarKm * (s.inspectCostPerCarKm ?? 8);
   // 直通のキロ精算：他社車両が自社線を走った分を受け取り、自社車両が他社線を走った分を払う
   const settleRate = s.settlementPerCarKm ?? 60;
-  const settlement = settleRate * ((stats ? stats.throughCarKm || 0 : 0) - (stats ? stats.foreignCarKm || 0 : 0));
+  const settlement = settleRate * ((stats ? stats.settleCarKm || 0 : 0) - (stats ? stats.foreignCarKm || 0 : 0));
   const cost = carKmCost + rollingStock + inspectCost + trackCost + stationCost + depotCost + settlement;
   const revenue = stats ? stats.revenue : 0;
   return {

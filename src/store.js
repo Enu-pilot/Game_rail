@@ -64,6 +64,7 @@ export function defaultSettings() {
     coupleMinutes: 3,       // 途中駅での連結作業[分]
     splitMinutes: 2,        // 途中駅での切り離し作業[分]
     runAroundMinutes: 10,   // 機回し（機関車の付け替え）[分]
+    rosterSameCars: false,  // 両数の違う列車を同じ編成の運用でつながない
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
     minHeadwaySec: 90,      // 同一方向の最小運転時隔[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
@@ -243,6 +244,7 @@ export function migrate(doc) {
     runMin: Number.isFinite(t.runMin) ? t.runMin : 20,
     dailyPassengers: Number.isFinite(t.dailyPassengers) ? t.dailyPassengers : 0,
     viaIds: Array.isArray(t.viaIds) ? t.viaIds.slice() : [],     // ここへ行くまでに経由する他社線
+    partnerLineId: t.partnerLineId || null,                        // ゲーム内にある直通先の路線
     suspended: !!t.suspended,            // 直通中止
     delayMin: Number.isFinite(t.delayMin) ? t.delayMin : 0,       // 直通先の遅れ
     note: t.note || '',
