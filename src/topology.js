@@ -403,7 +403,8 @@ export function findRoute(doc, g, opts) {
 export function validateLayout(doc, g) {
   const issues = [];
   const boundaryNodes = g.nodes.filter(n => n.ext);
-  if (!boundaryNodes.length) {
+  // 路線網のレイアウト（実在路線のサンプルなど）は基地の出入口を持たないことがある
+  if (!boundaryNodes.length && !(doc.settings && doc.settings.networkLayout)) {
     issues.push({ level: 'warn', message: '場外接続（基地の出入口）の端点が設定されていません。線路のプロパティで端点種別を「場外接続」にしてください。' });
   }
 

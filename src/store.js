@@ -65,6 +65,7 @@ export function defaultSettings() {
     splitMinutes: 2,        // 途中駅での切り離し作業[分]
     runAroundMinutes: 10,   // 機回し（機関車の付け替え）[分]
     rosterSameCars: false,  // 両数の違う列車を同じ編成の運用でつながない
+    networkLayout: false,   // 路線網のレイアウト（基地の出入口がなくてもよい）
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
     minHeadwaySec: 90,      // 同一方向の最小運転時隔[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
@@ -286,6 +287,7 @@ export function migrate(doc) {
     // 併結：withId の列車に付属編成として連結して走る（始発で連結・終着で切り離し）
     couple: t.couple && t.couple.withId ? { withId: t.couple.withId } : null,
     loco: !!t.loco,                        // 機関車牽引（折返しに機回しが必要）
+    dwellAt: (t.dwellAt && typeof t.dwellAt === 'object') ? { ...t.dwellAt } : {},   // 駅ごとの停車の延長[秒]
     note: t.note || '',
   }));
   d.company = doc.company && typeof doc.company === 'object' ? {

@@ -62,7 +62,7 @@ function makePath(points) {
 export function buildNetwork(spec) {
   const doc = newDoc(spec.title);
   // 実在路線のサンプルは、両数の違う列車を同じ編成で回さない（増解結なし）
-  Object.assign(doc.settings, { rosterSameCars: true }, spec.settings || {});
+  Object.assign(doc.settings, { rosterSameCars: true, networkLayout: true }, spec.settings || {});
   const tracks = [], objects = [], formations = [];
   const SP = spec.spacing || 480;
 
@@ -136,8 +136,11 @@ export function buildNetwork(spec) {
       let cur = P0, done = 0, h = heading;
       const turnAt = [];
       for (let i = 0; i < st.length; i++) {
-        const tdeg = L.turns && L.turns[st[i].name];
-        if (tdeg != null && i > 0) turnAt.push({ s: pos[i] + 200, h: tdeg * DEG });
+        // turns = { 駅名: 向き } か { 駅名: { h: 向き, at: 駅からの距離 } }（at: 0 でスイッチバック）
+        const tv = L.turns && L.turns[st[i].name];
+        const tdeg = tv != null && typeof tv === 'object' ? tv.h : tv;
+        const tat = tv != null && typeof tv === 'object' && tv.at != null ? tv.at : 200;
+        if (tdeg != null && i > 0) turnAt.push({ s: pos[i] + tat, h: tdeg * DEG });
       }
       for (const tr of turnAt) {
         cur = add(cur, { x: Math.cos(h), y: Math.sin(h) }, tr.s - done);
@@ -172,11 +175,15 @@ export function buildNetwork(spec) {
       const n = path.nrm(pos[i]);
       const stTracks = [main.id];
       const loops = {};
+      // 経路が曲がっている駅（スイッチバックなど）でも本線と交わらないよう、副本線は本線に沿って点をとる
+      const kinked = L.turns && L.turns[S.name] && typeof L.turns[S.name] === 'object' && L.turns[S.name].at === 0;
       const mkLoop = (side, label) => {
         const a0 = path.at(pos[i] - LOOP_HALF), a1 = path.at(pos[i] + LOOP_HALF);
-        const b0 = add(path.at(pos[i] - LOOP_HALF + 35), path.nrm(pos[i] - LOOP_HALF + 35), side * LOOP_OFF);
-        const b1 = add(path.at(pos[i] + LOOP_HALF - 35), path.nrm(pos[i] + LOOP_HALF - 35), side * LOOP_OFF);
-        const t = T(`${S.name}${label}`, 'platform', [a0, b0, b1, a1], {}, { maxSpeedKmh: 45 });
+        const mids = [];
+        const s0 = pos[i] - LOOP_HALF + 35, s1 = pos[i] + LOOP_HALF - 35;
+        const step = kinked ? 10 : (s1 - s0);
+        for (let q = s0; q <= s1 + 1e-6; q += step) mids.push(add(path.at(q), path.nrm(q), side * LOOP_OFF));
+        const t = T(`${S.name}${label}`, 'platform', [a0, ...mids, a1], {}, { maxSpeedKmh: 45 });
         tracks.push(t); stTracks.push(t.id);
         return t;
       };
@@ -223,7 +230,7 @@ export function buildNetwork(spec) {
       const side = (S.type === 'p' ? LOOP_OFF + 9 : 9) + (L.ring ? 5 : 0);
       const pl = (L.maxCars || 10) * 20 + 10;
       const closing = loopSeam && i === st.length - 1;     // 環状線の終点＝始発駅（ホームは始発側に描く）
-      if (S.type !== 't' && !closing) {
+      if (S.type !== 't' && !closing && !kinked) {
         for (const sg of [-1, 1]) {
           const q = add(p, n, sg * side);
           objects.push(O('platform_side', q.x, q.y, { w: Math.min(pl, 210), h: 5, rot: ang }));
@@ -380,6 +387,12 @@ export function buildNetwork(spec) {
       }
     }
     const type = (sv.types && sv.types[E.key]) || sv.type;
+    // スイッチバックなど、停車時間を延ばす駅（途中駅だけ）
+    const dwellAt = {};
+    for (let i = lo + 1; i < hi; i++) {
+      const d = E.stations[i].extra && E.stations[i].extra.dwell;
+      if (d && !skip.includes(i)) dwellAt[i] = d;
+    }
     return {
       id: uid('tr'), lineId: E.line.id, number, name: sv.label || '', type,
       dir: up ? 'up' : 'down', fromIdx, toIdx, departSec: dep,
@@ -387,7 +400,7 @@ export function buildNetwork(spec) {
       cars: sv.cars || E.spec.maxCars || 10, platforms, holds: {}, delaySec: 0,
       toDepot: false, depotTrackId: null, throughId: null,
       operatorId: opIds[op] || null, color: null, formationId: null, note: sv.name,
-      couple: null,
+      couple: null, dwellAt,
     };
   };
   const throughSources = new Set((spec.through || []).map(t => t.from));

@@ -144,6 +144,8 @@ export function computeSchedule(doc, stations, train, _depth = 0) {
   // 途中駅で付属編成を連結・切り離す列車は、その駅で作業時間だけ長く止まる
   const work = coupleWork(doc, train);
   for (const [i, sec] of Object.entries(work)) holds[i] = (+holds[i] || 0) + sec;
+  // 駅ごとの停車の延長（スイッチバックでの折返しなど）
+  for (const [i, sec] of Object.entries(train.dwellAt || {})) holds[i] = (+holds[i] || 0) + Math.max(0, +sec || 0);
   const stSig = stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',');
   const sig = `${store.rev}|${stSig}|${train.fromIdx},${train.toIdx},${train.departSec},${train.delaySec || 0},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
   const hit = _schedCache.get(key);

@@ -710,7 +710,7 @@ function drawObject(ctx, cam, doc, o, ui) {
 }
 
 /** これより縮小すると路線網の見取り図として描く */
-export const OVERVIEW_ZOOM = 0.06;
+export const OVERVIEW_ZOOM = 0.13;
 
 function drawOverviewStation(ctx, s, o, def, z) {
   ctx.save();
