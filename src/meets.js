@@ -11,6 +11,13 @@ import { computeSchedule, stationTracks, trainPlatform, fmtHM, isCompanion } fro
 const RANK = { ltd: 7, commltd: 6, rapidexp: 5, express: 4, rapid: 3, semi: 2.5, local: 2, deadhead: 1, freight: 0 };
 export const trainRank = t => RANK[t.type] ?? 2;
 
+/** 駅 i と i+1 の間が複々線（緩行線と急行線が別）か */
+export function sectionQuad(line, i) {
+  return !!(line.secQuad && line.secQuad[i]) && !sectionSingle(line, i);
+}
+/** 複々線で緩行線を走る列車（各停・準急） */
+const slowTrack = t => trainRank(t) <= 2.5;
+
 /** 駅 i と i+1 の間が単線か */
 export function sectionSingle(line, i) {
   const ov = line.secSingle ? line.secSingle[i] : undefined;
@@ -68,6 +75,13 @@ function classify(q, r, single, headway) {
   if ((r.end - q.end) * (r.start - q.start) < 0) return 'overtake';
   if (r.start - q.start < headway || r.end - q.end < headway) return 'follow';
   return null;
+}
+
+/** 駅間（数値）・駅（'s'+番号）が複々線の中か */
+function quadTester(line) {
+  return sec => (typeof sec === 'number'
+    ? sectionQuad(line, sec)
+    : sectionQuad(line, +sec.slice(1) - 1) || sectionQuad(line, +sec.slice(1)));
 }
 
 /** 待避線のない複線の駅（駅の中で追い越せない） */
@@ -133,6 +147,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   const runsOf = new Map();
   let maxSpan = headway;          // 駅間の占有のいちばん長いもの（探索の起点を決める）
   const noPass = noPassStations(doc, line, stations);
+  const quadAt = quadTester(line);
   const insertRuns = t => {
     const rs = sectionRuns(sched(t), t.id, noPass);
     runsOf.set(t.id, rs);
@@ -182,10 +197,12 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
           const key = q.trainId < r.trainId ? `${q.trainId}|${r.trainId}|${sec}` : `${r.trainId}|${q.trainId}|${sec}`;
           if (gaveUp.has(key)) continue;
           const opposing = q.up !== r.up;
+          const qT = byId.get(q.trainId), rT = byId.get(r.trainId);
+          // 複々線では緩行線と急行線の列車は互いに支障しない
+          if (quadAt(sec) && slowTrack(qT) !== slowTrack(rT)) continue;
           let kind = classify(q, r, single, headway);
           if (!kind) continue;
           // 同一方向で、あとから来る列車のほうが優等なら、先行の遅い列車が待避する
-          const qT = byId.get(q.trainId), rT = byId.get(r.trainId);
           if (!opposing && trainRank(rT) > trainRank(qT)) kind = 'overtake';
           else if (kind === 'overtake') kind = trainRank(rT) > trainRank(qT) ? 'overtake' : 'follow';
           const at = Math.max(q.start, r.start);
@@ -321,7 +338,10 @@ export function assignPlatforms(doc, line, stations, trains, sched, holds, plats
       return (pb.object.x - pa.object.x) * (m.y - o.y) - (pb.object.y - pa.object.y) * (m.x - o.x) < 0;
     };
     const busy = new Map();                            // key → [[from, to], ...]
-    const keyOf = (t, id) => (id === mainId && splitMain ? `${id}|${t.toIdx < t.fromIdx ? 'u' : 'd'}` : id);
+    const quadHere = sectionQuad(line, idx - 1) || sectionQuad(line, idx);
+    const keyOf = (t, id) => (id === mainId
+      ? `${id}|${splitMain ? (t.toIdx < t.fromIdx ? 'u' : 'd') : ''}|${quadHere ? (slowTrack(t) ? 's' : 'f') : ''}`
+      : id);
     const free = (k, a, b) => !(busy.get(k) || []).some(([x, y]) => a < y && x < b);
     list.sort((p, q) => (p.st.arr ?? p.st.dep) - (q.st.arr ?? q.st.dep));
     for (const { t, st } of list) {
@@ -360,6 +380,7 @@ export function detectConflicts(doc, line, stations, trains, opts = {}) {
   const headway = Math.max(30, opts.headwaySec ?? doc.settings.minHeadwaySec ?? 90);
   const bySec = new Map();
   const noPass = noPassStations(doc, line, stations);
+  const quadAt = quadTester(line);
   for (const t of trains) {
     if (isCompanion(doc, t)) continue;
     for (const r of sectionRuns(computeSchedule(doc, stations, t), t.id, noPass)) {
@@ -375,6 +396,7 @@ export function detectConflicts(doc, line, stations, trains, opts = {}) {
       for (let j = i + 1; j < runs.length; j++) {
         const q = runs[i], r = runs[j];
         if (r.start > q.end + headway) break;
+        if (quadAt(sec) && slowTrack(q.train) !== slowTrack(r.train)) continue;
         const kind = classify(q, r, single, headway);
         if (!kind) continue;
         issues.push({

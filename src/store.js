@@ -256,6 +256,7 @@ export function migrate(doc) {
     color: l.color || '#7fd1ff',
     double: l.double !== false,          // 既定の線路条件（複線かどうか）
     secSingle: (l.secSingle && typeof l.secSingle === 'object') ? { ...l.secSingle } : {},  // 駅間ごとの単線指定
+    secQuad: (l.secQuad && typeof l.secQuad === 'object') ? { ...l.secQuad } : {},        // 駅間ごとの複々線指定
     operatorId: l.operatorId || null,
     safety: Array.isArray(l.safety) ? l.safety.slice() : [],     // 走るのに必要な保安装置
     maxCars: Number.isFinite(l.maxCars) ? l.maxCars : 10,        // ホーム有効長（両数）

@@ -407,6 +407,8 @@ export function trainPlatform(doc, train, stations, idx) {
  */
 function platformUses(doc, line, stations, trains, headwaySec) {
   const dbl = i => !(line && sectionSingleLocal(line, i));
+  // 複々線の駅は、本線が緩行線と急行線に分かれている
+  const quadAt = i => !!(line && line.secQuad && (line.secQuad[i - 1] || line.secQuad[i]));
   const uses = [];
   for (const tr of trains) {
     if (isCompanion(doc, tr)) continue;          // 付属編成は相手の列車と同じ番線に入る
@@ -428,12 +430,15 @@ function platformUses(doc, line, stations, trains, headwaySec) {
       uses.push({
         train: tr, idx: st.idx, trackId, from: a, to: b, skip: st.skip, up,
         // 同じ線路でも駅が違えば番線の競合ではない（駅間の支障は運転整理で見る）
-        key: `${st.idx}|${trackId}|${sepDir ? (up ? 'up' : 'down') : ''}`,
+        key: `${st.idx}|${trackId}|${sepDir ? (up ? 'up' : 'down') : ''}${onMain && quadAt(st.idx) ? (slowType(tr) ? '|緩' : '|急') : ''}`,
       });
     }
   }
   return uses;
 }
+
+/** 複々線で緩行線を走る種別（meets.js の優先度 2.5 以下に合わせる） */
+const slowType = t => ['local', 'semi', 'deadhead', 'freight'].includes(t.type) || !t.type;
 
 // timetable.js からは meets.js を読み込まない（循環参照を避ける）ため、同じ判定をここにも置く
 function sectionSingleLocal(line, i) {

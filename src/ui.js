@@ -28,7 +28,7 @@ import {
   coupledLeader, companionsOf, coupleIssues, runAroundPoints, runAroundSec, coupleSec, splitSec,
 } from './timetable.js';
 import {
-  planMeets, detectConflicts, connections, sectionSingle, canPass, stationTrackCount, holdsSummary,
+  planMeets, detectConflicts, connections, sectionSingle, sectionQuad, canPass, stationTrackCount, holdsSummary,
 } from './meets.js';
 import {
   INSPECTIONS, dutySummary, inspectionStatus, inspectionLoad, depotCapacity, shopFormations,
@@ -1586,16 +1586,19 @@ export function initUI(api) {
       const secs = [];
       for (let i = 0; i < sts.length - 1; i++) {
         const single = sectionSingle(line, i);
+        const quad = sectionQuad(line, i);
         secs.push(h('div', { class: 'listrow' },
-          h('span', { class: 'dot', style: `background:${single ? '#ffb020' : '#4f8cff'}` }),
+          h('span', { class: 'dot', style: `background:${single ? '#ffb020' : quad ? '#2bd4a4' : '#4f8cff'}` }),
           h('span', { class: 'nm' }, `${sts[i].name}〜${sts[i + 1].name}`,
             h('small', { class: 'desc' }, `${((sts[i + 1].km - sts[i].km) / 1000).toFixed(2)} km`)),
-          selectInput(`line.${line.id}.sec.${i}`, single ? 'single' : 'double',
-            [{ value: 'double', label: '複線' }, { value: 'single', label: '単線' }],
+          selectInput(`line.${line.id}.sec.${i}`, single ? 'single' : quad ? 'quad' : 'double',
+            [{ value: 'double', label: '複線' }, { value: 'single', label: '単線' }, { value: 'quad', label: '複々線' }],
             v => {
               const map = { ...(line.secSingle || {}) };
               if ((v === 'single') === !line.double) delete map[i]; else map[i] = (v === 'single');
-              updateLine(line.id, { secSingle: map });
+              const qm = { ...(line.secQuad || {}) };
+              if (v === 'quad') qm[i] = true; else delete qm[i];
+              updateLine(line.id, { secSingle: map, secQuad: qm });
               emit('diagram');
             }),
         ));
@@ -1604,6 +1607,7 @@ export function initUI(api) {
       out.push(h('div', { class: 'card' },
         h('h4', {}, '駅間の線路条件'),
         ...secs,
+        h('p', { class: 'note' }, '複々線では、各停・準急は緩行線、それより速い列車は急行線を走り、互いに待避しなくてよくなります。'),
         h('hr', { class: 'sepline' }),
         h('div', { class: 'kv' }, h('span', {}, '行き違い・待避ができる駅'),
           h('b', {}, `${passable.length} / ${sts.length} 駅`)),

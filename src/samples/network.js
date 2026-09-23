@@ -284,6 +284,7 @@ export function buildNetwork(spec) {
     E.line = {
       id: uid('l'), name: L.name, color: L.color || '#7fd1ff', double: L.double !== false,
       secSingle: singleMap(L, E),
+      secQuad: rangeMap(L.quads, E, L),
       operatorId: opIds[L.op] || null,
       safety: L.safety || [], maxCars: L.maxCars || 10,
       stations: E.stations.map(x => x.obj.id),
@@ -674,6 +675,17 @@ export function buildNetwork(spec) {
   doc.tracks = tracks; doc.objects = objects; doc.formations = formations;
   initCompany(doc);
   return doc;
+}
+
+/** 区間の指定 [[駅名, 駅名], ...] → { 駅間番号: true } */
+function rangeMap(ranges, E, L) {
+  const out = {};
+  for (const [a, b] of ranges || []) {
+    const i = E.stations.findIndex(x => x.name === a), j = E.stations.findIndex(x => x.name === b);
+    if (i < 0 || j < 0) throw new Error(`${L.name}: 区間 ${a}〜${b} の駅がありません`);
+    for (let k = Math.min(i, j); k < Math.max(i, j); k++) out[k] = true;
+  }
+  return out;
 }
 
 /** 単線区間 singles: [[駅名, 駅名], ...] → { 駅間番号: true } */
