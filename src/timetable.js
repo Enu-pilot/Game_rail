@@ -3,16 +3,19 @@
 import { objectDef } from './catalog.js';
 import { store } from './store.js';
 import { findRoute, segmentExtra, pathExtra } from './topology.js';
-import { distToPolyline } from './geom.js';
+import { distToPolyline, pointAt } from './geom.js';
 import { runTimeForPath } from './runcurve.js';
 
 export const TRAIN_TYPES = [
-  { id: 'local',   name: '普通',   color: '#7fd1ff', speed: 60 },
-  { id: 'rapid',   name: '快速',   color: '#8fe06a', speed: 75 },
-  { id: 'express', name: '急行',   color: '#ffb020', speed: 85 },
-  { id: 'ltd',     name: '特急',   color: '#ff5f56', speed: 100 },
-  { id: 'freight', name: '貨物',   color: '#b98cff', speed: 50 },
-  { id: 'deadhead', name: '回送',  color: '#9aa4bb', speed: 60 },
+  { id: 'local',    name: '普通',     color: '#7fd1ff', speed: 60 },
+  { id: 'semi',     name: '準急',     color: '#6ad1a8', speed: 70 },
+  { id: 'rapid',    name: '快速',     color: '#8fe06a', speed: 75 },
+  { id: 'express',  name: '急行',     color: '#ffb020', speed: 85 },
+  { id: 'rapidexp', name: '快速急行', color: '#ff8f3d', speed: 90 },
+  { id: 'commltd',  name: '通勤特急', color: '#ff7aa8', speed: 95 },
+  { id: 'ltd',      name: '特急',     color: '#ff5f56', speed: 100 },
+  { id: 'freight',  name: '貨物',     color: '#b98cff', speed: 50 },
+  { id: 'deadhead', name: '回送',     color: '#9aa4bb', speed: 60 },
 ];
 export const trainType = id => TRAIN_TYPES.find(t => t.id === id) || TRAIN_TYPES[0];
 
@@ -63,8 +66,9 @@ export function lineStations(doc, g, line) {
         } else {
           const r = findRoute(doc, g, { fromTrackId: prev.trackId, toTrackId: o.trackId, trainLength: 0 });
           if (r.found) {
-            d = r.distance + pathExtra(doc, r.path);   // 省略した駅間の距離を加える
-            path = r.path;
+            // 経路は線路の区間単位なので、発駅の位置から着駅の位置までに切りそろえる
+            path = trimHopPath(doc, r.path, prev, o);
+            d = path.reduce((a, p2) => a + Math.abs(p2.toAt - p2.fromAt), 0) + pathExtra(doc, path);
             turnouts = (r.legs || []).flatMap(lg => lg.turnouts || []);
           }
         }
@@ -75,6 +79,36 @@ export function lineStations(doc, g, line) {
   }
   _lineCache.set(line.id, { sig, value: out });
   return out;
+}
+
+/**
+ * 駅間の経路を、発駅の位置から着駅の位置までに切りそろえる。
+ * 探索結果は区間（接続点から接続点まで）の並びなので、両端の余分を落とし、
+ * 発駅の線路上の区間が含まれていなければ補う。
+ */
+function trimHopPath(doc, raw, fromObj, toObj) {
+  const path = raw.map(p => ({ ...p }));
+  if (!path.length) return path;
+  const trackOf = id => doc.tracks.find(t => t.id === id);
+  const atOn = (trackId, x, y) => { const t = trackOf(trackId); return t ? distToPolyline(x, y, t.points).at : 0; };
+  const fromAt = stationAt(doc, fromObj), toAt = stationAt(doc, toObj);
+  // 着駅：着駅の線路上の最後の区間を駅の位置で止める
+  let li = -1;
+  for (let i = path.length - 1; i >= 0; i--) if (path[i].trackId === toObj.trackId) { li = i; break; }
+  if (li >= 0) { path.length = li + 1; path[li].toAt = toAt; }
+  // 発駅：発駅の線路上の区間があれば駅の位置から始め、なければ接続点まで補う
+  const fi = path.findIndex(p => p.trackId === fromObj.trackId);
+  if (fi >= 0) {
+    path.splice(0, fi);
+    path[0].fromAt = fromAt;
+  } else {
+    const t0 = trackOf(path[0].trackId);
+    if (t0) {
+      const q = pointAt(t0.points, path[0].fromAt);
+      path.unshift({ trackId: fromObj.trackId, fromAt, toAt: atOn(fromObj.trackId, q.x, q.y) });
+    }
+  }
+  return path.filter(p => Math.abs(p.toAt - p.fromAt) > 1e-6 || p === path[0]);
 }
 
 const reversePath = path => (path || []).slice().reverse().map(p => ({ trackId: p.trackId, fromAt: p.toAt, toAt: p.fromAt }));
@@ -90,6 +124,9 @@ function hopPath(stations, from, to) {
 }
 
 const _schedCache = new Map();
+/** 駅間の走行時分（停車駅〜停車駅・最高速度ごと）の使い回し */
+const _runCache = new Map();
+let _runCacheRev = -1;
 
 /**
  * 列車の時刻を計算する（各駅の着・発）。
@@ -98,7 +135,8 @@ const _schedCache = new Map();
 export function computeSchedule(doc, stations, train) {
   const key = train.id;
   const holds = train.holds || {};
-  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.delaySec || 0},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
+  const stSig = stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',');
+  const sig = `${store.rev}|${stSig}|${train.fromIdx},${train.toIdx},${train.departSec},${train.delaySec || 0},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
   const hit = _schedCache.get(key);
   if (hit && hit.sig === sig) return hit.stops;
 
@@ -131,7 +169,13 @@ export function computeSchedule(doc, stations, train) {
     const skipped = !isEnd && train.skip.includes(i) && hold <= 0;
     if (skipped) { pendingSkips.push(i); continue; }
 
-    const run = runTimeForPath(doc, segPath, { trainMax, turnouts: segTurnouts, startKmh: 0, endKmh: 0 });
+    if (_runCacheRev !== store.rev || _runCache.size > 50000) { _runCache.clear(); _runCacheRev = store.rev; }
+    const runKey = `${stSig}|${stops[stops.length - 1].idx}|${i}|${trainMax}`;
+    let run = _runCache.get(runKey);
+    if (!run) {
+      run = runTimeForPath(doc, segPath, { trainMax, turnouts: segTurnouts, startKmh: 0, endKmh: 0 });
+      _runCache.set(runKey, run);
+    }
     const t0 = t;
     t += run.time;
     // 通過駅は距離で按分した時刻を入れる
@@ -207,11 +251,12 @@ function platformUses(doc, line, stations, trains, headwaySec) {
     for (const st of stops) {
       const trackId = trainPlatform(doc, tr, stations, st.idx);
       if (!trackId) continue;
-      const nTracks = stations[st.idx] && stations[st.idx].object
-        ? stationTracks(doc, stations[st.idx].object).length : 1;
+      const stObj = stations[st.idx] && stations[st.idx].object;
       const through = !ends.includes(st.idx);
-      // 前後の駅間がどちらも複線なら、上下で別の線路とみなせる
-      const sepDir = through && nTracks <= 1 && dbl(st.idx - 1) && dbl(st.idx);
+      // 本線（駅マーカーが乗っている線路）は複線を1本で表しているので、
+      // 前後が複線なら上下で別の線路とみなす。待避線などの副本線は1本の線路
+      const onMain = !stObj || !stObj.trackId || trackId === stObj.trackId;
+      const sepDir = through && onMain && dbl(st.idx - 1) && dbl(st.idx);
       const up = tr.toIdx < tr.fromIdx;
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;

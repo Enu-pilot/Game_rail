@@ -397,6 +397,11 @@ function drawObject(ctx, cam, doc, o, ui) {
   }
   if (s.x + Math.max(w, h) < -50 || s.y + Math.max(w, h) < -50) { /* 粗いカリング */ }
   const selected = ui.sel && ui.sel.kind === 'object' && ui.sel.id === o.id;
+  // 路線網を見渡す縮尺では、線路上の小さな記号を省き駅名だけを出す
+  if (z < OVERVIEW_ZOOM && !selected) {
+    if (def.shape === 'station') { drawOverviewStation(ctx, s, o, def, z); return; }
+    else if (!['building', 'shed', 'yard', 'label', 'platform'].includes(def.shape)) return;
+  }
 
   ctx.save();
   ctx.translate(s.x, s.y);
@@ -704,6 +709,29 @@ function drawObject(ctx, cam, doc, o, ui) {
   ctx.restore();
 }
 
+/** これより縮小すると路線網の見取り図として描く */
+export const OVERVIEW_ZOOM = 0.06;
+
+function drawOverviewStation(ctx, s, o, def, z) {
+  ctx.save();
+  ctx.fillStyle = '#10141c'; ctx.strokeStyle = def.color; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(s.x, s.y, 3.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  if (o.label && z >= 0.012) {
+    // 駅名は線路と直角の向きに書く（横に走る線は縦書き風になり、隣の駅と重ならない）
+    let a = (o.rot || 0) - Math.PI / 2;
+    while (a <= -Math.PI / 2) a += Math.PI;
+    while (a > Math.PI / 2) a -= Math.PI;
+    ctx.translate(s.x, s.y); ctx.rotate(a);
+    ctx.font = `600 ${z >= 0.03 ? 11 : 9.5}px ${FONT}`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.85)';
+    ctx.strokeText(o.label, 6, 0);
+    ctx.fillStyle = '#dfe6f3';
+    ctx.fillText(o.label, 6, 0);
+  }
+  ctx.restore();
+}
+
 function turnoutPath(ctx, w, h, variant, xang) {
   const x0 = -w / 2, x1 = w / 2;
   ctx.beginPath();
@@ -807,7 +835,7 @@ function drawSignal(ctx, z, def, aspect, o) {
 
 /** 端点の記号（車止め・場外接続・開放） */
 function drawTrackEnds(ctx, cam, doc, t) {
-  if (!t.points || t.points.length < 2) return;
+  if (!t.points || t.points.length < 2 || cam.zoom < OVERVIEW_ZOOM) return;
   const z = cam.zoom;
   const total = polylineLength(t.points);
   const ends = [
@@ -991,6 +1019,7 @@ function drawHoverJunction(ctx, cam, hj) {
 
 /** 分岐器の開通方向（いま開通している側を明るく描く） */
 function drawTurnoutPositions(ctx, cam, doc, g) {
+  if (cam.zoom < OVERVIEW_ZOOM) return;
   const L = turnoutSymbolSize(cam.zoom).w * 0.75;
   ctx.save();
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';

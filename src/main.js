@@ -6,7 +6,7 @@ import { initDiagram } from './diagram.js';
 import { initUI } from './ui.js';
 import { exportJSON, importJSON, exportPNG } from './io.js';
 import { deleteSelected, duplicateSelected, autoDispatch } from './actions.js';
-import { sampleDoc } from './sample.js';
+import { SAMPLES, sampleById } from './samples/index.js';
 
 const canvas = document.getElementById('board');
 const stage = document.getElementById('stage');
@@ -44,8 +44,8 @@ store.ui.mode = 'layout';
 // 起動時は本線を除いた範囲（＝車両基地まわり）に合わせる
 const initialFit = () => api.fitAll({ excludeKinds: ['main', 'platform'] });
 /** サンプルは待避・行き違いを入れた状態で読み込む */
-function loadSample() {
-  loadDoc(sampleDoc());
+function loadSample(id = 'midori') {
+  loadDoc(sampleById(id).build());
   for (const l of store.doc.lines) autoDispatch(l.id, { silent: true });
 }
 if (!restoreLocal()) loadSample();
@@ -65,9 +65,19 @@ on('btn-delete', () => deleteSelected());
 on('btn-zoom-in', () => api.zoomBy(1.25));
 on('btn-zoom-out', () => api.zoomBy(1 / 1.25));
 on('btn-zoom-fit', () => (store.ui.mode === 'diagram' ? diagram.fit() : api.fitAll()));
-on('btn-sample', () => {
-  if (!confirm('現在のレイアウトを破棄してサンプル（みどりが丘車両センター）を読み込みますか？')) return;
-  loadSample(); api.fitAll(); setMessage('サンプルレイアウトを読み込みました');
+const sampleSel = document.getElementById('sample-select');
+sampleSel.innerHTML = '<option value="">サンプル…</option>' + SAMPLES.map(s =>
+  `<option value="${s.id}">${s.no ? `${s.no}. ` : ''}${s.name}</option>`).join('');
+sampleSel.addEventListener('change', () => {
+  const s = sampleById(sampleSel.value);
+  sampleSel.value = '';
+  if (!s || !confirm(`現在のレイアウトを破棄して「${s.name}」を読み込みますか？`)) return;
+  setMessage(`「${s.name}」を作成しています…`);
+  setTimeout(() => {
+    const t0 = performance.now();
+    loadSample(s.id); diagramFitted = false; api.fitAll();
+    setMessage(`サンプル「${s.name}」を読み込みました（${Math.round(performance.now() - t0)} ms）`);
+  }, 30);
 });
 on('btn-new', () => {
   if (!confirm('現在のレイアウトを破棄して新規作成しますか？')) return;

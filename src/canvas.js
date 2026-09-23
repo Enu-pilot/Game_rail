@@ -388,7 +388,7 @@ export function initCanvas(canvas, stage) {
   }, { passive: false });
 
   function setZoom(z, anchorWorld, anchorScreen) {
-    const nz = Math.max(0.08, Math.min(8, z));
+    const nz = Math.max(0.003, Math.min(8, z));
     const cam = ui.camera;
     if (anchorWorld && anchorScreen) {
       cam.zoom = nz;
@@ -409,7 +409,7 @@ export function initCanvas(canvas, stage) {
     const b = contentBounds(store.doc, opts);
     const pad = 40;
     const bw = Math.max(50, b.x1 - b.x0), bh = Math.max(50, b.y1 - b.y0);
-    const z = Math.max(0.08, Math.min(4, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));
+    const z = Math.max(0.003, Math.min(4, Math.min((W - pad * 2) / bw, (H - pad * 2) / bh)));
     ui.camera.zoom = z;
     ui.camera.x = (b.x0 + b.x1) / 2 - W / (2 * z);
     ui.camera.y = (b.y0 + b.y1) / 2 - H / (2 * z);

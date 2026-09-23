@@ -318,7 +318,9 @@ export function initDiagram(canvas, stage) {
     let t0 = 6 * 3600, t1 = 10 * 3600;
     if (trains.length) {
       const all = trains.flatMap(tr => computeSchedule(store.doc, stations, tr).flatMap(s => [s.arr, s.dep].filter(x => x != null)));
-      if (all.length) { t0 = Math.min(...all); t1 = Math.max(...all); }
+      if (all.length) { t0 = all.reduce((a, b) => Math.min(a, b)); t1 = all.reduce((a, b) => Math.max(a, b)); }
+      // 本数の多い路線は朝ラッシュの3時間を表示する
+      if (trains.length > 80) { t0 = Math.max(t0, 6.5 * 3600); t1 = Math.min(t1, t0 + 3 * 3600); }
     }
     const span = Math.max(1800, (t1 - t0) * 1.15);
     d().sec = span / Math.max(100, W - PAD.left - PAD.right);

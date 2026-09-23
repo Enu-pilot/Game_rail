@@ -13,12 +13,16 @@ export const SAFETY_DEVICES = [
   { id: 'cs_atc', name: 'CS-ATC',   short: 'CS',  note: '地下鉄の車内信号式ATC' },
   { id: 'd_atc',  name: 'D-ATC',    short: 'D',   note: 'デジタルATC。一段ブレーキ制御' },
   { id: 'atacs',  name: 'ATACS/CBTC', short: 'C', note: '無線式列車制御' },
+  { id: 'tdatc',  name: 'T-DATC',   short: 'TD',  note: '東武のデジタルATC' },
+  { id: 'ats_seibu', name: '西武形ATS', short: 'SB', note: '西武鉄道の車上速度照査式ATS' },
+  { id: 'ats_kintetsu', name: '近鉄形ATS', short: 'KT', note: '近畿日本鉄道の連続照査式ATS' },
+  { id: 'ats_hanshin', name: '阪神形ATS', short: 'HS', note: '阪神電気鉄道の車上速度照査式ATS' },
   { id: 'tasc',   name: 'TASC',     short: 'T',   note: '定位置停止装置。ホームドア対応に必要' },
   { id: 'radio_d', name: 'デジタル列車無線', short: '無', note: '会社ごとに周波数・方式が異なる' },
 ];
 export const safetyDef = id => SAFETY_DEVICES.find(d => d.id === id) || { id, name: id, short: '?' };
 export const safetyNames = ids => (ids || []).map(id => safetyDef(id).name).join('・');
-export const safetyShorts = ids => (ids || []).map(id => safetyDef(id).short).join('');
+export const safetyShorts = ids => (ids || []).map(id => safetyDef(id).short).join('·');
 
 /** 既定の事業者（自社） */
 export const selfOperator = doc => (doc.operators || []).find(o => o.self) || (doc.operators || [])[0] || null;

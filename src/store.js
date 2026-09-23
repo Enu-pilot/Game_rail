@@ -110,7 +110,11 @@ export function emit(reason = '') { for (const fn of store._subs) fn(reason); }
 /** 変更前に呼ぶ: 現在のドキュメントを履歴に積む */
 export function snapshot() {
   store._history.push(JSON.stringify(store.doc));
-  if (store._history.length > 100) store._history.shift();
+  // 大きな路線網でもメモリを使いすぎないよう、履歴は件数と合計サイズで上限を設ける
+  let bytes = store._history.reduce((s, h) => s + h.length, 0);
+  while (store._history.length > 1 && (store._history.length > 100 || bytes > 40e6)) {
+    bytes -= store._history.shift().length;
+  }
   store._future.length = 0;
 }
 
