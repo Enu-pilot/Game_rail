@@ -123,7 +123,7 @@ export function simulateDemand(doc, line, stations, trains) {
   for (const tr of trains) {
     // 付属編成は相手の列車と一体の1本として扱い、両数（定員）だけ足す
     if (isCompanion(doc, tr)) continue;
-    const stops = computeSchedule(doc, stations, tr).filter(s => !s.skip);
+    const stops = computeSchedule(doc, stations, tr).filter(s => !s.skip && !s.oper);   // 運転停車では乗り降りしない
     if (stops.length < 2) continue;
     const comps = companionsOf(doc, tr.id).filter(c => c.lineId === tr.lineId);
     const carsAt = idx => (tr.cars || 10) + comps.reduce((a, c) => {
@@ -270,8 +270,12 @@ export function simulateDemand(doc, line, stations, trains) {
   generateUntil(endT);
 
   // 積み残し
+  const leftPairs = [];
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
+      let lp = 0;
+      for (const q of queues[i][j]) lp += q.c > 1e-9 ? q.c : 0;
+      if (lp >= 1) leftPairs.push({ from: i, to: j, n: lp });
       for (const q of queues[i][j]) {
         if (q.c <= 1e-9) continue;
         stats.left += q.c;
@@ -281,6 +285,7 @@ export function simulateDemand(doc, line, stations, trains) {
     }
   }
 
+  stats.leftPairs = leftPairs.sort((a, b) => b.n - a.n).slice(0, 10);
   stats.peakCongestion = stats.sections.reduce((m, s) => Math.max(m, s.peak), 0);
   const waited = stats.byHour.reduce((s, x) => s + x.waitN, 0);
   stats.avgWait = waited ? stats.byHour.reduce((s, x) => s + x.wait, 0) / waited : 0;

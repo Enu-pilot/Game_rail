@@ -418,9 +418,8 @@ function platformUses(doc, line, stations, trains, headwaySec) {
       // 本線（駅マーカーが乗っている線路）は複線を1本で表しているので、
       // 前後が複線なら上下で別の線路とみなす。待避線などの副本線は1本の線路
       const onMain = !stObj || !stObj.trackId || trackId === stObj.trackId;
-      // 番線が本線1本だけの駅は、始発・終着でも上下別（直通先へ抜ける途中駅として扱う）
-      const single = stObj ? stationTracks(doc, stObj).length <= 1 : true;
-      const sepDir = (through || single) && onMain && dbl(st.idx - 1) && dbl(st.idx);
+      // 本線は前後が複線なら上下別の線路（始発・終着の列車も、渡り線で反対側の線へ移るとみなす）
+      const sepDir = onMain && dbl(st.idx - 1) && dbl(st.idx);
       const up = tr.toIdx < tr.fromIdx;
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;

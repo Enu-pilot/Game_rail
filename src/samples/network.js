@@ -268,7 +268,7 @@ export function buildNetwork(spec) {
     const E = lines[L.key];
     E.line = {
       id: uid('l'), name: L.name, color: L.color || '#7fd1ff', double: L.double !== false,
-      secSingle: L.secSingle || {},
+      secSingle: singleMap(L, E),
       operatorId: opIds[L.op] || null,
       safety: L.safety || [], maxCars: L.maxCars || 10,
       stations: E.stations.map(x => x.obj.id),
@@ -523,32 +523,36 @@ export function buildNetwork(spec) {
 
   /* ---- 6) 自社の編成をダイヤから逆算し、車両基地に置く ---- */
   const selfMain = spec.lines.find(L => L.op === spec.self);
-  const fleet = spec.fleet || {};
-  const fleetSets = () => {
+  // 車両の一覧：本線の車両（spec.fleet）と、線区ごとの専用車両（spec.fleets: [{ line, depot, ... }]）
+  const fleetDefs = [];
+  if (selfMain) fleetDefs.push({ ...(spec.fleet || {}), line: selfMain.key, main: true });
+  for (const f of spec.fleets || []) fleetDefs.push({ ...f, main: false });
+  const fleetSets = fd => {
     let fleetGroups = [];
-    if (selfMain) {
-      const E = lines[selfMain.key];
+    const E = lines[fd.line];
+    if (E) {
       store.rev++;
       const sts = lineStations(doc, buildGraph(doc), E.line);
       const own = trains.filter(t => t.lineId === E.line.id && t.operatorId === opIds[spec.self]);
       const rosters = buildRosters(doc, E.line, sts, own);
       const groups = new Map();
       for (const r of rosters) {
-        const key = `${r.cars}|${[...r.req.safety].sort().join(',')}`;
-        if (!groups.has(key)) groups.set(key, { cars: r.cars, safety: [...r.req.safety], n: 0 });
+        const key = `${r.cars}|${[...r.req.safety].sort().join(',')}|${r.loco ? 'L' : ''}`;
+        if (!groups.has(key)) groups.set(key, { cars: r.cars, safety: [...r.req.safety], loco: r.loco, n: 0 });
         groups.get(key).n++;
       }
       fleetGroups = [...groups.values()].sort((a, b) => b.n - a.n);
     }
-    const allSafety = [...new Set(fleetGroups.flatMap(g => g.safety).concat(fleet.extraSafety || []))];
+    const allSafety = [...new Set(fleetGroups.flatMap(g => g.safety).concat(fd.extraSafety || []))];
     const out = [];
-    let serial = 1;
+    let serial = fd.start || 1;
     for (const gp of fleetGroups) {
-      const count = gp.n + Math.max(1, Math.ceil(gp.n * 0.15));
+      const count = gp.n + Math.max(1, Math.ceil(gp.n * (fd.spare ?? 0.15)));
       for (let k = 0; k < count; k++) {
         out.push({
-          name: `${fleet.prefix || ''}${String(serial++).padStart(2, '0')}${fleet.suffix || '編成'}`,
-          series: fleet.series || '', cars: gp.cars,
+          name: `${fd.prefix || ''}${String(serial++).padStart(2, '0')}${fd.suffix ?? '編成'}`,
+          series: fd.series || '', cars: gp.cars, vehicle: gp.loco ? (fd.locoVehicle || 'coach') : (fd.vehicle || 'emu'),
+          fleet: fd,
           // 予備車は全線対応にしておく（運用の入れ替えがきくように）
           safety: k >= gp.n ? allSafety : gp.safety,
         });
@@ -557,7 +561,8 @@ export function buildNetwork(spec) {
     return out;
   };
   // 車両基地の大きさは待避を入れる前のダイヤから見積もる（待避で運用が延びるぶん多めに）
-  const estSets = Math.ceil(fleetSets().length * 1.25) + 1;
+  const est = new Map(fleetDefs.map(fd => [fd, Math.ceil(fleetSets(fd).length * 1.25) + 1]));
+  const estMain = fleetDefs.filter(fd => fd.main).reduce((a, fd) => a + est.get(fd), 0);
 
   // 車両基地
   const depotTracks = [];
@@ -565,13 +570,15 @@ export function buildNetwork(spec) {
     const E = lines[dp.line];
     const S = E.stations.find(x => x.name === dp.at);
     if (!S) continue;
-    const setsHere = dp.own ? (dp.share != null ? Math.ceil(estSets * dp.share) : estSets) : 0;
+    // 本線の車両は share の割合で、線区専用の車両は depot に名前を指定された基地に置く
+    const extra = fleetDefs.filter(fd => !fd.main && fd.depot === dp.name).reduce((a, fd) => a + est.get(fd), 0);
+    const setsHere = (dp.own && !dp.reserved ? (dp.share != null ? Math.ceil(estMain * dp.share) : estMain) : 0) + extra;
     const lenM = Math.max(220, (dp.cars || 10) * 21 + 30) * 2;   // 1線に2編成
     const nStable = Math.max(dp.min || 4, Math.ceil(setsHere / 2) + 1);
     const yard = buildDepot(E, S, dp, nStable, lenM);
     tracks.push(...yard.tracks);
     objects.push(...yard.objects);
-    if (dp.own) {
+    if (dp.own || extra) {
       depotTracks.push(...yard.stabling.map(t => ({ t, left: 2, depot: dp })));
       if (yard.shop) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
     }
@@ -600,26 +607,32 @@ export function buildNetwork(spec) {
   dispatchAll(multiSeg ? 2 : 1, true);
 
   /* ---- 9) 待避を入れたダイヤから編成数を決めて、車両基地に置く ---- */
-  const sets = fleetSets();
-  // 編成を留置線へ（最後の1本は交番検査中にする）
+  const sets = fleetDefs.flatMap(fd => fleetSets(fd));
+  // 編成を留置線へ（本線の最後の1本は交番検査中にする）
+  const mainSets = sets.filter(x => x.fleet.main);
   sets.forEach((st, i) => {
-    const spot = depotTracks.find(d => !d.shop && d.left > 0);
-    const shop = i === sets.length - 1 ? depotTracks.find(d => d.shop && d.left > 0) : null;
+    const fits = d => (st.fleet.main ? (!d.depot.reserved && d.depot.own) : d.depot.name === st.fleet.depot);
+    const spot = depotTracks.find(d => !d.shop && d.left > 0 && fits(d));
+    const shop = st === mainSets[mainSets.length - 1] ? depotTracks.find(d => d.shop && d.left > 0 && fits(d)) : null;
     const place = shop || spot;
     if (place) place.left--;
     formations.push({
-      id: uid('f'), name: st.name, series: st.series, vehicle: fleet.vehicle || 'emu',
-      cars: st.cars, carLengthM: fleet.carLengthM ?? null, loco: null,
+      id: uid('f'), name: st.name, series: st.series, vehicle: st.vehicle,
+      cars: st.cars, carLengthM: st.fleet.carLengthM ?? null, loco: null,
       color: FORMATION_COLORS[i % FORMATION_COLORS.length],
       trackId: place ? place.t.id : null, note: shop ? '交番検査中' : '',
       operatorId: opIds[spec.self], safety: st.safety, odoKm: 0, inspection: null,
     });
   });
 
-
   /* ---- 10) 1日の最後の列車は車両基地へ入庫させる（終着駅で夜を明かさない） ---- */
   const depotOf = {};
   for (const d of depotTracks) if (!d.shop && !depotOf[d.depot.line]) depotOf[d.depot.line] = d.t.id;
+  for (const fd of fleetDefs) {
+    if (fd.main || !fd.depot) continue;
+    const d = depotTracks.find(x => !x.shop && x.depot.name === fd.depot);
+    if (d) depotOf[fd.line] = d.t.id;
+  }
   const anyDepot = depotTracks.find(d => !d.shop);
   store.rev++;
   const gE = buildGraph(doc);
@@ -639,6 +652,21 @@ export function buildNetwork(spec) {
   doc.tracks = tracks; doc.objects = objects; doc.formations = formations;
   initCompany(doc);
   return doc;
+}
+
+/** 単線区間 singles: [[駅名, 駅名], ...] → { 駅間番号: true } */
+function singleMap(L, E) {
+  const out = { ...(L.secSingle || {}) };
+  for (const [a, b] of L.singles || []) {
+    const i = E.stations.findIndex(x => x.name === a), j = E.stations.findIndex(x => x.name === b);
+    if (i < 0 || j < 0) throw new Error(`${L.name}: 単線区間 ${a}〜${b} の駅がありません`);
+    for (let k = Math.min(i, j); k < Math.max(i, j); k++) out[k] = true;
+  }
+  for (const [a, b] of L.doubles || []) {
+    const i = E.stations.findIndex(x => x.name === a), j = E.stations.findIndex(x => x.name === b);
+    for (let k = Math.min(i, j); k < Math.max(i, j); k++) out[k] = false;
+  }
+  return out;
 }
 
 /** 走行時間を測るための仮の列車 */

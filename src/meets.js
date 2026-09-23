@@ -120,49 +120,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     }
     return s;
   };
-  // 駅ごとに、そこを通る列車（停車・通過とも）
-  const atStation = new Map();
-  /** 待避・交換する列車を、対向（通過）列車と別の番線に入れる */
-  const sidePlatform = (yTrain, oTrain, idx, from, to) => {
-    const stn = stations[idx];
-    const listT = stn && stn.object ? stationTracks(doc, stn.object) : [];
-    if (listT.length < 2) return null;
-    const used = trainPlatform(doc, { ...oTrain, platforms: plats[oTrain.id] }, stations, idx);
-    // ほかの列車が使っていない番線を選ぶ。いま割り当てている副本線（向きに合ったもの）を先に、本線は最後に
-    const upOf = t => t.toIdx < t.fromIdx;
-    const mainId = stn && stn.object ? stn.object.trackId : null;
-    const mine = plats[yTrain.id] && plats[yTrain.id][idx];
-    // 左側通行：進行方向の左にある副本線を先に選ぶ
-    const up = upOf(yTrain);
-    const pa = stations[up ? idx + 1 : idx - 1], pb = stations[up ? idx - 1 : idx + 1];
-    const o = stn.object;
-    const leftOf = id => {
-      if (!pa || !pb || !pa.object || !pb.object) return false;
-      const t = doc.tracks.find(k => k.id === id);
-      if (!t || !t.points.length) return false;
-      const m = t.points[Math.floor(t.points.length / 2)];
-      const tx = pb.object.x - pa.object.x, ty = pb.object.y - pa.object.y;
-      return tx * (m.y - o.y) - ty * (m.x - o.x) < 0;
-    };
-    const rank = id => (id === mine && id !== mainId ? 0 : id === mainId ? 3 : leftOf(id) ? 1 : 2);
-    const cands = listT.filter(id => id !== used).sort((a, b) => rank(a) - rank(b));
-    for (const id of cands) {
-      let free = true;
-      for (const t of atStation.get(idx) || []) {
-        if (t.id === yTrain.id || t.id === oTrain.id) continue;
-        const stop = sched(t).byIdx.get(idx);
-        if (!stop) continue;
-        const a0 = (stop.arr ?? stop.dep) - headway / 2, b0 = (stop.dep ?? stop.arr) + headway / 2;
-        if (b0 <= from || a0 >= to) continue;           // 時間が重ならない列車は番線を見ない
-        if (trainPlatform(doc, { ...t, platforms: plats[t.id] }, stations, idx) !== id) continue;
-        if (id === mainId && upOf(t) !== upOf(yTrain)) continue;   // 本線は上下別
-        const a = (stop.arr ?? stop.dep) - headway / 2, b = (stop.dep ?? stop.arr) + headway / 2;
-        if (Math.min(b, to) - Math.max(a, from) > 0) { free = false; break; }
-      }
-      if (free) return id;
-    }
-    return cands[0] || null;
-  };
+
   const byId = new Map(list.map(t => [t.id, t]));
   const events = [];
   const conflicts = [];
@@ -195,13 +153,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     }
     runsOf.delete(id);
   };
-  for (const t of list) {
-    insertRuns(t);
-    for (const st of sched(t)) {
-      if (!atStation.has(st.idx)) atStation.set(st.idx, []);
-      atStation.get(st.idx).push(t);
-    }
-  }
+  for (const t of list) insertRuns(t);
   // 待ち時間は増やす一方なので、支障が新たに生じるのは「前回の最早の支障」か
   // 「待ちを入れた駅に着く時刻」のどちらか早いほう以降に限られる
   let lowBound = -Infinity;
@@ -248,16 +200,39 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     // 待つ列車を決める：追い越しは遅い方（先に入った方）、それ以外は後から入る方
     const { kind, q, r, sec, key } = worst;
     const slowFirst = kind === 'overtake';
-    const yielder = slowFirst ? q : r;
-    const other = slowFirst ? r : q;
+    let yielder = slowFirst ? q : r;
+    let other = slowFirst ? r : q;
+    // 単線の行き違いは、どちらを待たせるか短く済むほうを選ぶ（優等列車はなるべく待たせない）
+    // 行き違いは、待つ駅に対向列車が着くまで待つ（間の単線区間をまとめて明け渡す）
+    const meetNeed = (y, o, h) => {
+      const ot = byId.get(o.trainId), yt = byId.get(y.trainId);
+      const oa = h && ot ? sched(ot).byIdx.get(h.idx) : null;
+      const yd = h && yt ? sched(yt).byIdx.get(h.idx) : null;
+      const until = oa ? (oa.arr ?? oa.dep) : o.end;
+      const from = yd ? (yd.dep ?? yd.arr) : y.start;
+      return Math.max(o.end + headway - y.start, until + headway - from);
+    };
+    if (kind === 'meet') {
+      const opt = (y, o) => {
+        const yt = byId.get(y.trainId);
+        const h = yt ? holdStation(doc, stations, yt, sched(yt), y.from) : null;
+        const need = meetNeed(y, o, h);
+        const cur = h ? (holds[y.trainId][h.idx] || 0) : 0;
+        const ok = !!h && need > 0 && cur + need <= maxHold;
+        return { y, o, ok, cost: need * (1 + 0.35 * trainRank(yt || {})) };
+      };
+      const a = opt(r, q), b = opt(q, r);
+      const pick = (b.ok && (!a.ok || b.cost < a.cost)) ? b : a;
+      yielder = pick.y; other = pick.o;
+    }
     const yTrain = byId.get(yielder.trainId);
     const oTrain = byId.get(other.trainId);
-    const yStops = sched(yTrain);
     if (!yTrain || !oTrain) { gaveUp.add(key); continue; }
+    const yStops = sched(yTrain);
     const hs = holdStation(doc, stations, yTrain, yStops, yielder.from);
     // 単線は「対向が抜けるまで」、複線は「前後の間隔を確保できるまで」待つ
     const raw = worst.single
-      ? other.end + headway - yielder.start
+      ? (kind === 'meet' ? meetNeed(yielder, other, hs) : other.end + headway - yielder.start)
       : yielder.station
         ? other.end + headway * 2 / 3 - yielder.start  // 駅：前の列車が出て（通過して）から入る
         : Math.max(headway - (yielder.start - other.start), headway - (yielder.end - other.end));
@@ -285,10 +260,6 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     removeRuns(yTrain.id);
     schedCache.delete(yTrain.id);
     insertRuns(yTrain);
-    const hStop = yStops.find(x => x.idx === hs.idx);
-    const hFrom = hStop ? (hStop.arr ?? hStop.dep) : yielder.start;
-    const side = sidePlatform(yTrain, oTrain, hs.idx, hFrom - headway / 2, hFrom + cur + need + headway);
-    if (side) plats[yielder.trainId][hs.idx] = side;
     const ev = events.find(e => e.trainId === yielder.trainId && e.idx === hs.idx && e.otherId === other.trainId);
     if (ev) { ev.wait += need; }
     else {
@@ -299,17 +270,8 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     }
   }
 
-  // 収束後に、待避する列車の番線をもう一度選び直す（他の列車の最終時刻で判定する）
-  for (const e of events) {
-    const yTrain = byId.get(e.trainId), oTrain = byId.get(e.otherId);
-    if (!yTrain || !oTrain) continue;
-    const stop = sched(yTrain).find(x => x.idx === e.idx);
-    if (!stop) continue;
-    const from = (stop.arr ?? stop.dep) - headway / 2;
-    const to = (stop.dep ?? stop.arr) + headway / 2;
-    const side = sidePlatform(yTrain, oTrain, e.idx, from, to);
-    if (side) plats[e.trainId][e.idx] = side;
-  }
+  // 収束後に、駅ごとに全列車の番線を時刻順に割り当て直す（待つ列車は副本線、通過する列車は本線）
+  assignPlatforms(doc, line, stations, list, sched, holds, plats);
 
   // 待ち時間の合計・時刻を添える
   for (const e of events) {
@@ -324,6 +286,65 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   events.sort((a, b) => (a.arr ?? a.dep ?? 0) - (b.arr ?? b.dep ?? 0));
   const exhausted = iterations >= maxSteps - 1;
   return { holds, platforms: plats, events, conflicts, iterations, exhausted };
+}
+
+/**
+ * 駅ごとに番線を割り当てる（区間スケジューリング）。
+ * 列車を着時刻順に見て、空いている番線のうち好ましい順に入れる：
+ *   待ち（待避・行き違い）のある列車 … 進行方向左の副本線 → ほかの副本線 → 本線
+ *   待たない列車                     … これまでの割り当て → 本線 → 副本線
+ * 本線は、前後が複線なら上下で別の線路とみなす（1本の線で複線を表しているため）。
+ */
+export function assignPlatforms(doc, line, stations, trains, sched, holds, plats, gapSec = 60) {
+  const byStation = new Map();
+  for (const t of trains) {
+    for (const st of sched(t)) {
+      if (!byStation.has(st.idx)) byStation.set(st.idx, []);
+      byStation.get(st.idx).push({ t, st });
+    }
+  }
+  const dbl = i => !sectionSingle(line, i);
+  for (const [idx, list] of byStation) {
+    const stn = stations[idx];
+    if (!stn || !stn.object) continue;
+    const ids = stationTracks(doc, stn.object);
+    if (ids.length < 2) continue;                      // 番線が1本なら選びようがない
+    const mainId = stn.object.trackId;
+    const splitMain = dbl(idx - 1) && dbl(idx);
+    const trackPts = new Map(ids.map(id => [id, (doc.tracks.find(k => k.id === id) || {}).points || []]));
+    const leftOf = (t, id) => {
+      const up = t.toIdx < t.fromIdx;
+      const pa = stations[up ? idx + 1 : idx - 1], pb = stations[up ? idx - 1 : idx + 1];
+      const pts = trackPts.get(id);
+      if (!pa || !pb || !pa.object || !pb.object || !pts.length) return false;
+      const m = pts[Math.floor(pts.length / 2)], o = stn.object;
+      return (pb.object.x - pa.object.x) * (m.y - o.y) - (pb.object.y - pa.object.y) * (m.x - o.x) < 0;
+    };
+    const busy = new Map();                            // key → [[from, to], ...]
+    const keyOf = (t, id) => (id === mainId && splitMain ? `${id}|${t.toIdx < t.fromIdx ? 'u' : 'd'}` : id);
+    const free = (k, a, b) => !(busy.get(k) || []).some(([x, y]) => a < y && x < b);
+    list.sort((p, q) => (p.st.arr ?? p.st.dep) - (q.st.arr ?? q.st.dep));
+    for (const { t, st } of list) {
+      const a = (st.arr ?? st.dep) - gapSec / 2, b = (st.dep ?? st.arr) + gapSec / 2;
+      const waits = (+((holds[t.id] || {})[idx]) || 0) > 0;
+      const ends = idx === t.fromIdx || idx === t.toIdx;
+      const hint = (t.platforms || {})[idx] || (plats[t.id] || {})[idx];
+      const score = id => {
+        if (id === hint && (!waits || id !== mainId)) return 0;
+        if (waits) return id === mainId ? 4 : leftOf(t, id) ? 1 : 2;
+        if (ends) return id === mainId ? 2 : leftOf(t, id) ? 1 : 3;
+        return id === mainId ? 1 : leftOf(t, id) ? 2 : 3;
+      };
+      const order = ids.slice().sort((x, y) => score(x) - score(y));
+      const pick = order.find(id => free(keyOf(t, id), a, b)) || order[0];
+      const k = keyOf(t, pick);
+      if (!busy.has(k)) busy.set(k, []);
+      busy.get(k).push([a, b]);
+      if (!plats[t.id]) plats[t.id] = {};
+      if (pick === mainId && !(t.platforms || {})[idx]) delete plats[t.id][idx];
+      else plats[t.id][idx] = pick;
+    }
+  }
 }
 
 const num = t => t.number || t.name || '列車';
