@@ -196,6 +196,16 @@ kbd{
 .cbar .seg.carried.top{border-radius:4px 4px 1px 1px}
 .cbar .clabel{position:absolute;bottom:-14px;left:0;right:0;text-align:center;font-size:9px;color:var(--fg-dim)}
 .cbar .cpeak{position:absolute;top:-14px;left:-12px;right:-12px;text-align:center;font-size:10px;color:var(--fg)}
+/* 年度別の損益（正負） */
+.chart-bars.zeroline{align-items:stretch;height:88px;gap:3px;padding-top:6px;padding-bottom:14px;
+  background:linear-gradient(to bottom,transparent calc(50% - 1px),var(--line-2) calc(50% - 1px),var(--line-2) calc(50% + 1px),transparent calc(50% + 1px))}
+.zbar{flex:1;position:relative;min-width:8px}
+.zbar > i{position:absolute;left:22%;right:22%;display:block}
+.zbar > i.up{bottom:50%;border-radius:3px 3px 0 0}
+.zbar > i.dn{top:50%;border-radius:0 0 3px 3px}
+.chart-bars.baseline{background:none;border-bottom:1px solid var(--line-2)}
+.chart-bars.baseline .zbar > i.up{bottom:0}
+.zbar .clabel{position:absolute;bottom:-14px;left:0;right:0;text-align:center;font-size:9px;color:var(--fg-dim)}
 .chart-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:16px}
 .hero{font-size:26px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
 .hero.small{font-size:19px}
@@ -216,3 +226,5 @@ table.mini{width:100%;border-collapse:collapse;font-size:11px;font-variant-numer
 table.mini th,table.mini td{text-align:right;padding:2px 3px;border-bottom:1px solid var(--line)}
 table.mini th:first-child,table.mini td:first-child{text-align:left}
 table.mini th{color:var(--fg-dim);font-weight:500}
+table.mini.nowrap th,table.mini.nowrap td{white-space:nowrap}
+table.mini .wrap{white-space:normal;text-align:left}

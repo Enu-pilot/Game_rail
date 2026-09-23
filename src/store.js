@@ -43,6 +43,19 @@ export function defaultSettings() {
     costPerDepotTrackDay: 20000,// 車両基地[円/線・日]
     targetCongestion: 180,  // 目標のピーク混雑率[%]
     targetWaitMin: 8,       // 目標の平均待ち時間[分]
+    // --- 長期経営 ---
+    startCashOku: 60,       // 初期資金[億円]
+    debtLimitOku: 300,      // 借入枠[億円]
+    interestRate: 0.02,     // 金利[/年]
+    operatingDaysFactor: 340,   // 年間の営業日換算
+    capexPerTrackKmOku: 18,     // 線路の建設費[億円/km]
+    capexPerStationOku: 25,     // 駅の建設費[億円/駅]
+    capexPerCarOku: 1.6,        // 車両の価格[億円/両]
+    capexPerDepotTrackOku: 2.5, // 基地・側線[億円/線]
+    capexPerBuildingOku: 1.2,   // 建物[億円/棟]
+    baseGrowthPct: 0.4,     // 沿線人口の基礎成長率[%/年]
+    targetCashOku: 200,     // 目標の純資産[億円]
+    targetYears: 10,        // 目標年数
     decelMs2: 0.9,          // 減速度[m/s^2]
     reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
@@ -62,6 +75,7 @@ export function newDoc(name = '無題の車両基地') {
     routes: [],        // 構成済みの進路（連動）
     lines: [],         // 路線（駅の並び）
     trains: [],        // ダイヤの列車（スジ）
+    company: null,     // 長期経営（資金・決算履歴）
   };
 }
 
@@ -221,6 +235,16 @@ export function migrate(doc) {
     formationId: t.formationId || null,
     note: t.note || '',
   }));
+  d.company = doc.company && typeof doc.company === 'object' ? {
+    year: Math.max(1, +doc.company.year || 1),
+    cash: +doc.company.cash || 0,
+    debt: +doc.company.debt || 0,
+    economy: +doc.company.economy || 0,
+    seed: +doc.company.seed || 12345,
+    assets: doc.company.assets || null,
+    history: Array.isArray(doc.company.history) ? doc.company.history : [],
+    events: Array.isArray(doc.company.events) ? doc.company.events : [],
+  } : null;
   d.version = DOC_VERSION;
   return d;
 }

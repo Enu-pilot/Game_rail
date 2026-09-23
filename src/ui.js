@@ -18,6 +18,10 @@ import {
   simulateDemand, finance, evaluate, congestionBand, STATION_KINDS, stationKind, fareFor,
 } from './demand.js';
 import {
+  initCompany, assetSnapshot, capexBetween, growthRate, advanceYear,
+  borrow, repay, longTermStatus, oku, OKU,
+} from './company.js';
+import {
   TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
   timetableConflicts, platformConflicts, platformDemand, stationTracks, trainPlatform,
   nearbyTracks, fmtHM, parseHM,
@@ -1427,6 +1431,165 @@ export function initUI(api) {
   const man = v => `${(v / 10000).toFixed(0)} 万円`;
   const nin = v => `${Math.round(v).toLocaleString('ja-JP')} 人`;
 
+  /* --- 長期経営（年度・資金・設備投資） --- */
+  const okuS = v => `${(v / OKU).toFixed(1)}億`;
+  function longTermCards(doc, stats, fin) {
+    const c = initCompany(doc);
+    const lt = longTermStatus(doc);
+    const s = doc.settings;
+    const days = s.operatingDaysFactor ?? 340;
+    const cur = assetSnapshot(doc);
+    const capex = capexBetween(doc, c.assets || cur, cur);
+    const g = growthRate(doc, stats, fin);
+    const interest = c.debt * (s.interestRate ?? 0.02);
+    const yearProfit = fin.revenue * days - fin.cost * days - interest;
+    const net = lt.netWorth;
+    const goalRate = Math.max(0, Math.min(1, net / Math.max(1, lt.targetCash)));
+    const out = [];
+
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '長期経営', h('span', { class: 'tag' }, `${c.year} 年目 / 目標 ${lt.targetYears} 年`)),
+      h('div', { class: 'hero', style: `color:${net >= 0 ? '#2bd4a4' : '#e0344a'}` }, oku(net)),
+      h('p', { class: 'note', style: 'margin-top:-2px' }, `純資産（現金 − 借入）　目標 ${oku(lt.targetCash)}`),
+      h('div', { class: 'congbar', style: 'margin:6px 0 10px' },
+        h('i', { style: `width:${(goalRate * 100).toFixed(1)}%;background:${lt.achieved ? '#2bd4a4' : '#4f8cff'}` }),
+        h('span', {}, `${(goalRate * 100).toFixed(0)}%`)),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '現金'),
+          h('b', { style: `color:${c.cash >= 0 ? '' : '#e0344a'}` }, oku(c.cash))),
+        h('div', { class: 'tile' }, h('label', {}, '借入残高'),
+          h('b', { style: c.debt > 0 ? 'color:#ffd23f' : '' }, oku(c.debt))),
+      ),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '沿線人口'),
+          h('b', {}, `${Math.round(lt.population).toLocaleString('ja-JP')} 人`)),
+        h('div', { class: 'tile' }, h('label', {}, '開業比'),
+          h('b', { style: `color:${lt.popGrowth >= 0 ? '#2bd4a4' : '#e0344a'}` },
+            `${lt.popGrowth >= 0 ? '+' : ''}${lt.popGrowth.toFixed(1)}%`)),
+      ),
+      lt.bankrupt
+        ? h('p', { class: 'note', style: 'color:#e0344a' }, '⚠ 資金がマイナスです。借入・運賃改定・費用の見直しが必要です。')
+        : null,
+    ));
+
+    // 今年度の見込みと、年度を進める
+    const loanOku = store.ui.loanOku ?? 20;
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, `${c.year} 年目の見込み`, h('span', { class: 'tag' }, `営業 ${days} 日換算`)),
+      h('table', { class: 'mini' },
+        h('tr', {}, h('th', {}, '項目'), h('th', {}, '年額')),
+        h('tr', {}, h('td', {}, '運賃収入'), h('td', { style: 'color:#2bd4a4' }, oku(fin.revenue * days))),
+        h('tr', {}, h('td', {}, '営業費用'), h('td', {}, `−${oku(fin.cost * days)}`)),
+        h('tr', {}, h('td', {}, `支払利息（年 ${((s.interestRate ?? 0.02) * 100).toFixed(1)}%）`), h('td', {}, `−${oku(interest)}`)),
+        h('tr', {}, h('td', {}, h('b', {}, '経常損益')),
+          h('td', {}, h('b', { style: `color:${yearProfit >= 0 ? '#2bd4a4' : '#e0344a'}` }, oku(yearProfit)))),
+        capex.total > 0
+          ? h('tr', {}, h('td', {}, '設備投資（前年度からの増設）'), h('td', { style: 'color:#ffd23f' }, `−${oku(capex.total)}`))
+          : null,
+      ),
+      capex.items.length
+        ? h('div', { style: 'margin-top:6px' }, ...capex.items.map(i => h('div', { class: 'listrow' },
+          h('span', { class: 'nm' }, `${i.name}　${i.fmt(i.qty)}`),
+          h('span', { class: 'sub' }, oku(i.qty * i.unit)))))
+        : h('p', { class: 'note' }, '設備の増設はありません。線路・駅・車両を増やすと、年度を進めたときに設備投資として計上されます。'),
+      h('p', { class: 'note' }, `沿線人口の成長見込み ${g.rate >= 0 ? '+' : ''}${g.rate.toFixed(1)}%／年　（${g.reasons.join('・')}）`),
+      h('div', { class: 'btn-row', style: 'margin-top:8px' },
+        h('button', {
+          class: 'btn primary wide', onclick: () => {
+            const d = businessData(); if (!d) return;
+            snapshot();
+            const rec = advanceYear(store.doc, d.stats, d.fin);
+            commit('year');
+            setMessage(`${rec.year} 年目 決算：損益 ${oku(rec.profit - rec.capex)}／${rec.event}`);
+          }
+        }, `▶ ${c.year} 年目を終えて決算する`)),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        field('金額（億円）', numberInput('lt.loan', loanOku, v => { store.ui.loanOku = Math.max(0, v || 0); }, { min: 0, step: 5 })),
+        h('div', { class: 'field' }, h('label', {}, '資金調達'),
+          h('div', { class: 'btn-row' },
+            h('button', {
+              class: 'btn sm', onclick: () => {
+                snapshot();
+                const got = borrow(store.doc, (store.ui.loanOku ?? 20) * OKU);
+                commit('borrow');
+                setMessage(got > 0 ? `${oku(got)} を借り入れました` : '借入限度額に達しています');
+              }
+            }, '借入'),
+            h('button', {
+              class: 'btn sm', onclick: () => {
+                snapshot();
+                const paid = repay(store.doc, (store.ui.loanOku ?? 20) * OKU);
+                commit('repay');
+                setMessage(paid > 0 ? `${oku(paid)} を返済しました` : '返済できる残高がありません');
+              }
+            }, '返済'))),
+      ),
+      h('p', { class: 'note' }, `借入限度額 ${oku((s.debtLimitOku ?? 300) * OKU)}。借入は現金を増やしますが、毎年の利息が損益を圧迫します。`),
+    ));
+
+    // 設備の規模
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '設備の規模'),
+      h('table', { class: 'mini' },
+        h('tr', {}, h('th', {}, '設備'), h('th', {}, '現在'), h('th', {}, '前年度末')),
+        h('tr', {}, h('td', {}, '線路延長'), h('td', {}, `${cur.trackKm.toFixed(2)} km`), h('td', {}, `${(c.assets ? c.assets.trackKm : 0).toFixed(2)} km`)),
+        h('tr', {}, h('td', {}, '駅'), h('td', {}, `${cur.stations}`), h('td', {}, `${c.assets ? c.assets.stations : 0}`)),
+        h('tr', {}, h('td', {}, '車両'), h('td', {}, `${cur.cars} 両`), h('td', {}, `${c.assets ? c.assets.cars : 0} 両`)),
+        h('tr', {}, h('td', {}, '基地・側線'), h('td', {}, `${cur.depotTracks} 線`), h('td', {}, `${c.assets ? c.assets.depotTracks : 0} 線`)),
+        h('tr', {}, h('td', {}, '建物'), h('td', {}, `${cur.buildings} 棟`), h('td', {}, `${c.assets ? c.assets.buildings : 0} 棟`)),
+      ),
+      h('p', { class: 'note' }, '配線図で設備を増やすと差分が設備投資になります（撤去しても払い戻しはありません）。'),
+    ));
+
+    // 年度の推移
+    if (c.history.length) {
+      const hist = c.history;
+      const vals = hist.map(r => r.profit - r.capex);
+      const maxA = Math.max(1, ...vals.map(v => Math.abs(v))) * 1.1;
+      const anyNeg = vals.some(v => v < 0);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '年度の推移', h('span', { class: 'tag' }, `${hist.length} 年分`)),
+        h('div', { class: 'chart-legend' },
+          h('span', {}, h('i', { style: 'background:#2bd4a4' }), '黒字'),
+          h('span', {}, h('i', { style: 'background:#e0344a' }), '赤字')),
+        h('div', { class: 'chart zero' },
+          h('div', { class: 'chart-bars zeroline' + (anyNeg ? '' : ' baseline') }, ...hist.map((r, i) => {
+            const v = vals[i];
+            const hp = (Math.abs(v) / maxA) * (anyNeg ? 50 : 100);
+            return h('div', {
+              class: 'zbar',
+              title: `${r.year} 年目　収入 ${oku(r.revenue)}／費用 ${oku(r.opCost)}／投資 ${oku(r.capex)}／増減 ${oku(v)}／${r.event}`,
+            },
+              h('i', {
+                class: v >= 0 ? 'up' : 'dn',
+                style: `height:${Math.max(1.5, hp).toFixed(1)}%;background:${v >= 0 ? '#2bd4a4' : '#e0344a'}`,
+              }),
+              h('span', { class: 'clabel' }, r.year));
+          }))),
+        h('table', { class: 'mini nowrap' },
+          h('tr', {}, h('th', {}, '年'), h('th', {}, '収入'), h('th', {}, '損益'), h('th', {}, '現金'), h('th', {}, '混雑'), h('th', { class: 'wrap' }, 'できごと')),
+          ...hist.slice(-12).reverse().map(r => h('tr', {},
+            h('td', {}, `${r.year}`),
+            h('td', {}, okuS(r.revenue)),
+            h('td', { style: `color:${r.profit - r.capex >= 0 ? '#2bd4a4' : '#e0344a'}` }, okuS(r.profit - r.capex)),
+            h('td', {}, okuS(r.cash)),
+            h('td', {}, `${(r.peakCongestion * 100).toFixed(0)}%`),
+            h('td', { class: 'wrap' }, r.event)))),
+      ));
+    }
+
+    if (c.events.length) {
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, 'できごと'),
+        ...c.events.slice(0, 8).map(e => h('div', { class: 'listrow' },
+          h('span', { class: 'dot', style: `background:${e.cost ? '#e0344a' : '#4f8cff'}` }),
+          h('span', { class: 'nm', style: 'white-space:normal' }, `${e.year}年目　${e.name}：${e.text}`),
+          e.cost ? h('span', { class: 'sub' }, `−${oku(e.cost)}`) : null))),
+      );
+    }
+    return out;
+  }
+
   function buildBusiness() {
     const doc = store.doc;
     const data = businessData();
@@ -1437,6 +1600,8 @@ export function initUI(api) {
     }
     const { sts, trains, stats, fin, ev } = data;
     const out = [];
+
+    out.push(...longTermCards(doc, stats, fin));
 
     // 評価
     out.push(h('div', { class: 'card' },

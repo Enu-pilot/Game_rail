@@ -6,6 +6,7 @@ import { objectDef, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT } from './catalog.
 import { buildGraph, junctionNodes, turnoutSpecAt } from './topology.js';
 import { TRACK_KIND_MAP } from './catalog.js';
 import { polylineLength, pointAt, distToPolyline } from './geom.js';
+import { initCompany } from './company.js';
 
 const T = (name, kind, points, extra = {}) => ({
   id: uid('t'), name, kind, points,
@@ -333,5 +334,6 @@ export function sampleDoc() {
   doc.tracks = t; doc.objects = o; doc.formations = f;
   doc.lines = [line];
   doc.trains = trains;
+  initCompany(doc);     // 開業1年目として長期経営を初期化
   return doc;
 }
