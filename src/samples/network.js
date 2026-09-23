@@ -16,6 +16,7 @@ import { buildGraph, junctionNodes, turnoutSpecAt } from '../topology.js';
 import { polylineLength, pointAt } from '../geom.js';
 import { lineStations, computeSchedule } from '../timetable.js';
 import { buildRosters } from '../duty.js';
+import { planMeets } from '../meets.js';
 import { initCompany } from '../company.js';
 
 const DEG = Math.PI / 180;
@@ -456,6 +457,25 @@ export function buildNetwork(spec) {
     }
   }
   doc.trains = trains;
+
+  /* ---- 5.5) 路線ごとに行き違い・待避を入れておく（編成数はこのダイヤから逆算する） ---- */
+  store.rev++;
+  for (const E of Object.values(lines)) {
+    const sts = stsOf[E.key];
+    const own = trains.filter(t => t.lineId === E.line.id);
+    if (!own.length) continue;
+    const plan = planMeets(doc, E.line, sts, own);
+    for (const t of own) {
+      if (plan.holds[t.id]) t.holds = plan.holds[t.id];
+      if (plan.platforms[t.id]) t.platforms = plan.platforms[t.id];
+    }
+    store.rev++;
+    for (const t of own) {
+      if (!t.couple) continue;
+      const st0 = computeSchedule(doc, sts, t)[0];
+      if (st0 && st0.dep != null) t.departSec = st0.dep;
+    }
+  }
 
   /* ---- 6) 自社の編成をダイヤから逆算し、車両基地に置く ---- */
   const selfMain = spec.lines.find(L => L.op === spec.self);

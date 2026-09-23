@@ -112,6 +112,9 @@ export function simulateDemand(doc, line, stations, trains) {
   };
   const selfId = selfOperator(doc) ? selfOperator(doc).id : null;
 
+  // 直通の列車で行ける駅の組（行けない組は途中駅で乗り換える）
+  const served = Array.from({ length: n }, () => new Uint8Array(n));
+
   // 列車の停車イベントを時刻順に並べる
   const events = [];
   for (const tr of trains) {
@@ -120,7 +123,8 @@ export function simulateDemand(doc, line, stations, trains) {
     const cars = tr.cars || 10;
     const cap = cars * capPerCar;
     const order = stops.map(s => s.idx);
-    const run = { train: tr, cars, cap, stops, order, onboard: new Float64Array(n), load: 0 };
+    const run = { train: tr, cars, cap, stops, order, onboard: new Float64Array(n), load: 0, xfer: new Map() };
+    for (let a = 0; a < order.length; a++) for (let b = a + 1; b < order.length; b++) served[order[a]][order[b]] = 1;
     stops.forEach((s, k) => events.push({ t: s.dep ?? s.arr, run, k }));
     // 走行キロ
     const dist = Math.abs(stations[order[order.length - 1]].km - stations[order[0]].km) / 1000;
@@ -162,9 +166,14 @@ export function simulateDemand(doc, line, stations, trains) {
     const idx = run.stops[k].idx;
     const h = Math.floor((ev.t / 3600) % 24);
 
-    // 降車
+    // 降車（乗り換える人は、この駅で行先への列車を待つ）
     const off = run.onboard[idx];
     if (off > 0) { run.onboard[idx] = 0; run.load -= off; }
+    const xs = run.xfer.get(idx);
+    if (xs) {
+      for (const x of xs) queues[idx][x.j].push({ c: x.c, t: ev.t, x: true });
+      run.xfer.delete(idx);
+    }
 
     // 乗車（この列車がこの先に停まる駅が行先の人）
     const ahead = run.order.slice(k + 1);
@@ -178,15 +187,46 @@ export function simulateDemand(doc, line, stations, trains) {
         q[qi].c -= take;
         run.onboard[j] += take; run.load += take;
         const km = Math.abs(stations[j].km - stations[idx].km) / 1000;
-        stats.totalPassengers += take;
+        const xf = !!q[qi].x;                     // 乗り換えてきた人（運賃は通しで、人数は数えない）
+        if (!xf) stats.totalPassengers += take;
         stats.passengerKm += take * km;
-        stats.revenue += take * fareFor(doc, km);
-        stats.byHour[h].carried += take;
+        stats.revenue += take * (fareFor(doc, km) - (xf ? (doc.settings.fareBase ?? 150) : 0));
+        if (!xf) stats.byHour[h].carried += take;
         stats.byHour[h].wait += take * (ev.t - q[qi].t);
         stats.byHour[h].waitN += take;
         if (q[qi].c <= 1e-9) qi++;
       }
       if (qi) q.splice(0, qi);
+    }
+    // 乗換え：直通の列車がない行先へは、この列車で行先にいちばん近い停車駅まで乗る
+    if (ahead.length && room() > 1e-6) {
+      const up = run.order[run.order.length - 1] < idx;
+      for (let j = 0; j < n && room() > 1e-6; j++) {
+        if (served[idx][j] || j === idx || (up ? j > idx : j < idx)) continue;
+        const q = queues[idx][j];
+        if (!q.length) continue;
+        let m = -1;
+        for (const a of ahead) if (up ? (a >= j && a < idx) : (a <= j && a > idx)) m = a;
+        if (m < 0) continue;
+        let qi = 0;
+        while (qi < q.length && room() > 1e-6) {
+          const take = Math.min(q[qi].c, room());
+          if (take <= 1e-9) break;
+          q[qi].c -= take;
+          run.onboard[m] += take; run.load += take;
+          if (!run.xfer.has(m)) run.xfer.set(m, []);
+          run.xfer.get(m).push({ c: take, j });
+          const km = Math.abs(stations[m].km - stations[idx].km) / 1000;
+          if (!q[qi].x) stats.totalPassengers += take;
+          stats.passengerKm += take * km;
+          stats.revenue += take * (fareFor(doc, km) - (q[qi].x ? (doc.settings.fareBase ?? 150) : 0));
+          stats.byHour[h].carried += q[qi].x ? 0 : take;
+          stats.byHour[h].wait += take * (ev.t - q[qi].t);
+          stats.byHour[h].waitN += take;
+          if (q[qi].c <= 1e-9) qi++;
+        }
+        if (qi) q.splice(0, qi);
+      }
     }
 
     // 区間の混雑率（この駅を発車したあとの乗車人員）

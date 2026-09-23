@@ -45,8 +45,9 @@ store.ui.mode = 'layout';
 const initialFit = () => api.fitAll({ excludeKinds: ['main', 'platform'] });
 /** サンプルは待避・行き違いを入れた状態で読み込む */
 function loadSample(id = 'midori') {
-  loadDoc(sampleById(id).build());
-  for (const l of store.doc.lines) autoDispatch(l.id, { silent: true });
+  const s = sampleById(id);
+  loadDoc(s.build());
+  if (!s.dispatched) for (const l of store.doc.lines) autoDispatch(l.id, { silent: true });
 }
 if (!restoreLocal()) loadSample();
 setTimeout(initialFit, 0);

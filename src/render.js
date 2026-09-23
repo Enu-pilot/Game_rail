@@ -719,8 +719,9 @@ function drawOverviewStation(ctx, s, o, def, z) {
   if (o.label && z >= 0.012) {
     // 駅名は線路と直角の向きに書く（横に走る線は縦書き風になり、隣の駅と重ならない）
     let a = (o.rot || 0) - Math.PI / 2;
-    while (a <= -Math.PI / 2) a += Math.PI;
-    while (a > Math.PI / 2) a -= Math.PI;
+    // 縦書きに近いときは向きをそろえる（ほぼ水平な線で駅ごとに上下が入れ替わらないように）
+    while (a <= -Math.PI / 2 - 0.3) a += Math.PI;
+    while (a > Math.PI / 2 - 0.3) a -= Math.PI;
     ctx.translate(s.x, s.y); ctx.rotate(a);
     ctx.font = `600 ${z >= 0.03 ? 11 : 9.5}px ${FONT}`;
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
