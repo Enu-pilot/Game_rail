@@ -223,10 +223,11 @@ export function sampleDoc() {
 
   /* ---- 編成 ---- */
   const stabling = t.filter(x => x.kind === 'stabling');
+  // 9運用を回せる陣容（10両編成 × 8本を留置線に、1本を洗浄線に、1本は交番検査中）
   const plan = [
     ['H01編成', 'E233系', 10], ['H02編成', 'E233系', 10], ['H03編成', 'E233系', 10],
-    ['H04編成', 'E233系', 10], ['H05編成', 'E233系', 8], ['K11編成', '209系', 6],
-    ['K12編成', '209系', 6],
+    ['H04編成', 'E233系', 10], ['H05編成', 'E233系', 10], ['H06編成', 'E233系', 10],
+    ['H07編成', 'E233系', 10], ['H08編成', 'E233系', 10],
   ];
   plan.forEach(([name, series, cars], i) => {
     f.push({
@@ -261,8 +262,20 @@ export function sampleDoc() {
     trackId: track('扇形庫2番線'), note: '',
   });
   f.push({
-    id: uid('f'), name: 'H06編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
+    id: uid('f'), name: 'H09編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
+    color: FORMATION_COLORS[8 % FORMATION_COLORS.length], trackId: track('洗浄線'), note: '洗浄待ち',
+  });
+  f.push({
+    id: uid('f'), name: 'H10編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
     color: FORMATION_COLORS[7], trackId: t.find(x => x.name === '検修1番線').id, note: '交番検査中',
+  });
+  f.push({
+    id: uid('f'), name: 'K11編成', series: '209系', vehicle: 'emu', cars: 6, carLengthM: null, loco: null,
+    color: FORMATION_COLORS[5], trackId: track('引上線'), note: '',
+  });
+  f.push({
+    id: uid('f'), name: 'K12編成', series: '209系', vehicle: 'emu', cars: 6, carLengthM: null, loco: null,
+    color: FORMATION_COLORS[6], trackId: track('試運転線'), note: '',
   });
   f.push({
     id: uid('f'), name: 'W01', series: 'モーターカー', vehicle: 'mowcar', cars: 2, carLengthM: null, loco: null,

@@ -2,6 +2,7 @@
 
 import { stationKind, fareFor } from './demand.js';
 import { objectDef } from './catalog.js';
+import { INSPECTIONS, accrue, inspectionStatus, doInspection, availableFormations } from './duty.js';
 
 export const OKU = 1e8;   // 億円
 
@@ -142,7 +143,31 @@ function applyGrowth(doc, rate) {
  * @param {object} daily simulateDemand の結果
  * @param {object} fin   finance の結果
  */
-export function advanceYear(doc, daily, fin) {
+/**
+ * 1年ぶんの走行キロと日数を編成に足し、期限の来た検査を実施する。
+ * 費用は日々の「検査費」に織り込んであるので、ここでは回数だけ数える。
+ */
+function runInspections(doc, duty, days) {
+  const counts = {};
+  for (const i of INSPECTIONS) counts[i.id] = 0;
+  if (!duty) return counts;
+  for (const f of doc.formations) {
+    const kmPerDay = duty.kmByFormation ? (duty.kmByFormation[f.id] || 0) : 0;
+    accrue(f, kmPerDay * days, 365);
+    // 運用についている編成だけ、期限が来るたびに検査したとして回数を数える
+    if (kmPerDay > 0) {
+      for (const def of INSPECTIONS) {
+        const byKm = def.km != null ? def.km / kmPerDay : Infinity;
+        const interval = Math.max(1, Math.min(def.days, byKm));
+        counts[def.id] += Math.floor(365 / interval);
+      }
+    }
+    for (const s of inspectionStatus(f, kmPerDay)) if (s.over) doInspection(f, s.id);
+  }
+  return counts;
+}
+
+export function advanceYear(doc, daily, fin, duty = null) {
   const c = initCompany(doc);
   const s = doc.settings;
   const days = s.operatingDaysFactor ?? 340;
@@ -157,6 +182,7 @@ export function advanceYear(doc, daily, fin) {
   const profit = revenue - opCost - interest - ev.cost;
   c.cash += profit - capex.total;
 
+  const inspections = runInspections(doc, duty, days);
   const g = growthRate(doc, daily, fin);
   applyGrowth(doc, g.rate);
 
@@ -173,6 +199,9 @@ export function advanceYear(doc, daily, fin) {
     event: ev.event.name,
     eventText: ev.event.text,
     trains: (doc.trains || []).length,
+    inspections,
+    duties: duty ? duty.need : 0,
+    fleet: availableFormations(doc).length,
     cars: cur.cars,
     trackKm: cur.trackKm,
   };

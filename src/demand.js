@@ -218,7 +218,10 @@ export function finance(doc, stats, stations) {
   const stationCost = (stations ? stations.length : 0) * (s.costPerStationDay ?? 70000);
   const depotTracks = doc.tracks.filter(t => ['stabling', 'inspection', 'daily', 'periodic', 'special', 'washing', 'wheellathe'].includes(t.kind)).length;
   const depotCost = depotTracks * (s.costPerDepotTrackDay ?? 9000);
-  const cost = carKmCost + rollingStock + trackCost + stationCost + depotCost;
+  // 検査費：仕業・全般は日数で、交番・重要部は走行キロで効いてくる
+  const inspectCost = cars * (s.inspectCostPerCarDay ?? 4500)
+    + (stats ? stats.carKm : 0) * (s.inspectCostPerCarKm ?? 8);
+  const cost = carKmCost + rollingStock + inspectCost + trackCost + stationCost + depotCost;
   const revenue = stats ? stats.revenue : 0;
   return {
     revenue,
@@ -228,11 +231,12 @@ export function finance(doc, stats, stations) {
     breakdown: [
       { name: '運行費（車両キロ）', value: carKmCost },
       { name: '車両費', value: rollingStock },
+      { name: '検査費', value: inspectCost },
       { name: '線路保守', value: trackCost },
       { name: '駅運営', value: stationCost },
       { name: '車両基地', value: depotCost },
     ],
-    cars, routeKm, depotTracks,
+    cars, routeKm, depotTracks, inspectCost,
   };
 }
 

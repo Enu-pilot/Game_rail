@@ -30,6 +30,9 @@ import {
   planMeets, detectConflicts, connections, sectionSingle, canPass, stationTrackCount, holdsSummary,
 } from './meets.js';
 import {
+  INSPECTIONS, dutySummary, inspectionStatus, inspectionLoad, depotCapacity, shopFormations,
+} from './duty.js';
+import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
   constructRoute, setRouteState, deleteRoute,
@@ -118,6 +121,7 @@ export function initUI(api) {
     route: document.getElementById('panel-route'),
     sim: document.getElementById('panel-sim'),
     timetable: document.getElementById('panel-timetable'),
+    duty: document.getElementById('panel-duty'),
     business: document.getElementById('panel-business'),
     settings: document.getElementById('panel-settings'),
     statusPos: document.getElementById('status-pos'),
@@ -1505,6 +1509,153 @@ export function initUI(api) {
 
   function ui_showSim() { showTab('right', 'sim'); }
 
+  /* ---------------- 運用（車両運用と検査） ---------------- */
+  let dutyCache = { rev: -1, data: null };
+
+  function dutyData() {
+    const doc = store.doc;
+    const line = doc.lines.find(l => l.id === (store.ui.diagram || {}).lineId) || doc.lines[0];
+    if (!line) return null;
+    if (dutyCache.rev === store.rev && dutyCache.data && dutyCache.data.line === line) return dutyCache.data;
+    const sts = lineStations(doc, graph(), line);
+    const trains = doc.trains.filter(t => t.lineId === line.id);
+    if (!trains.length) return null;
+    const duty = dutySummary(doc, sts, trains);
+    const data = { line, sts, trains, duty };
+    dutyCache = { rev: store.rev, data };
+    return data;
+  }
+
+  const km0 = v => `${Math.round(v).toLocaleString('ja-JP')} km`;
+  const left = d => (d >= 365 ? `${(d / 365).toFixed(1)}年` : `${Math.max(0, Math.round(d))}日`);
+
+  function buildDuty() {
+    const doc = store.doc;
+    const data = dutyData();
+    if (!data) {
+      return [h('div', { class: 'card' },
+        h('h4', {}, '車両運用'),
+        h('p', { class: 'note' }, 'ダイヤタブで路線と列車を作ると、終着駅で折り返せる列車どうしをつないで1日の運用（行路）を組み、必要な編成数と検査の期限を計算します。'))];
+    }
+    const { duty, sts } = data;
+    const out = [];
+    const shop = shopFormations(doc);
+    const kmOf = f => duty.kmByFormation[f.id] || 0;
+
+    // 概要
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '車両運用', h('span', { class: 'tag' }, `${data.line.name}・${data.trains.length} 本/日`)),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '必要な運用数'), h('b', {}, `${duty.need} 運用`)),
+        h('div', { class: 'tile' }, h('label', {}, '使える編成'),
+          h('b', { style: `color:${duty.short ? '#e0344a' : '#2bd4a4'}` }, `${duty.have} 本`)),
+      ),
+      h('div', { class: 'tiles' },
+        h('div', { class: 'tile' }, h('label', {}, '延べ走行'), h('b', {}, km0(duty.totalKm))),
+        h('div', { class: 'tile' }, h('label', {}, '検査・修繕中'), h('b', {}, `${shop.length} 本`)),
+      ),
+      duty.short
+        ? h('div', { class: 'warnbox' }, `⚠ 編成が ${duty.short} 本足りません（両数が足りないか、検査で使えない編成があります）`)
+        : h('p', { class: 'note' }, '✓ いまの陣容で1日のダイヤを回せます'),
+      duty.coupling
+        ? h('p', { class: 'note' }, `※ ${duty.coupling} 運用は1日の途中で両数が変わります。実際には基地での増解結か車両交換が要ります（列車の両数を揃えると解消します）。`)
+        : null,
+      h('p', { class: 'note' }, `夜間滞泊：${Object.entries(duty.stay).map(([k, v]) => `${k === 'depot' ? '車両基地' : k} ${v}本`).join('・') || '—'}`),
+      duty.stayIssues && duty.stayIssues.length
+        ? h('div', { class: 'warnbox' },
+          `⚠ 夜間滞泊できない駅があります：${duty.stayIssues.map(i => `${i.name}（${i.need}本 ＞ 番線 ${i.have}本）`).join('・')}`,
+          h('div', { class: 'note', style: 'margin-top:4px' }, '終端駅に留置線を作るか、終電を車両基地へ入庫させる回送にすると解消できます。'))
+        : null,
+    ));
+
+    // 運用の一覧
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '運用（行路）', h('span', { class: 'tag' }, `${duty.rosters.length} 本`)),
+      h('table', { class: 'mini nowrap' },
+        h('tr', {}, h('th', {}, '運用'), h('th', {}, '時間'), h('th', {}, '列車'), h('th', {}, '走行'), h('th', { class: 'wrap' }, '充当編成')),
+        ...duty.rosters.map(r => {
+          const f = doc.formations.find(x => x.id === duty.assign[r.id]);
+          return h('tr', {
+            style: 'cursor:pointer',
+            onclick: () => {
+              store.ui.diagram.selected = r.trains[0].id;
+              if (f) { store.ui.sel = { kind: 'formation', id: f.id }; }
+              emit('diagram');
+            },
+          },
+            h('td', {}, `${r.no}`),
+            h('td', {}, `${fmtHM(r.start)}–${fmtHM(r.end)}`),
+            h('td', {}, `${r.trains.length}`),
+            h('td', {}, `${Math.round(r.km)}km`),
+            h('td', { class: 'wrap', style: f ? `color:${f.color}` : 'color:#e0344a' }, f ? f.name : '（不足）'));
+        })),
+      h('p', { class: 'note' }, `${duty.rosters[0] ? `例：${duty.rosters[0].name} は ${duty.rosters[0].startName} 発 ${fmtHM(duty.rosters[0].start)} 〜 ${duty.rosters[0].endName} 着 ${fmtHM(duty.rosters[0].end)}。` : ''}行をクリックするとダイヤでその運用の初列車を選びます。折返しは ${(doc.settings.reversalMinutes ?? 2) + 3} 分以上あける想定です。`),
+    ));
+
+    // 検査の期限
+    const forms = doc.formations.filter(f => ['emu', 'dmu', 'coach'].includes(f.vehicle));
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '検査の期限', h('span', { class: 'tag' }, `${forms.length} 編成`)),
+      h('table', { class: 'mini nowrap' },
+        h('tr', {}, h('th', {}, '編成'), h('th', {}, '日走行'), h('th', {}, '累計'),
+          ...INSPECTIONS.slice(1).map(i => h('th', { title: i.name }, i.name.replace('検査', '')))),
+        ...forms.map(f => {
+          const st = inspectionStatus(f, kmOf(f));
+          const daily = st[0];
+          return h('tr', {
+            style: 'cursor:pointer',
+            title: `仕業検査：残り ${daily.leftDays} 日`,
+            onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); showTab('right', 'formations'); },
+          },
+            h('td', { style: `color:${f.color}` }, f.name),
+            h('td', {}, `${Math.round(kmOf(f))}km`),
+            h('td', {}, `${Math.round((f.odoKm || 0) / 1000)}千km`),
+            ...st.slice(1).map(s => h('td', {
+              style: `color:${s.over ? '#e0344a' : s.soon ? '#ffd23f' : ''}`,
+              title: `${s.name}：前回から ${s.days} 日 / ${Math.round(s.km)} km`,
+            }, s.daysLeft === Infinity ? '—' : left(s.daysLeft))));
+        })),
+      h('p', { class: 'note' }, `仕業検査 3日・交番検査 90日または3万km・重要部検査 4年または60万km・全般検査 8年。残り日数は日走行キロから計算しています。年度を進めると走行と日数が溜まり、期限の来た検査が実施されます。`),
+      shop.length
+        ? h('div', { style: 'margin-top:6px' }, ...shop.map(f => {
+          const t = doc.tracks.find(x => x.id === f.trackId);
+          return h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: `background:${f.color}` }),
+            h('span', { class: 'nm' }, f.name, h('small', { class: 'desc' }, `${t ? t.name : '?'} で${f.note || '検査中'}`)),
+            h('button', {
+              class: 'btn sm', onclick: () => {
+                const free = doc.tracks.find(x => trackKind(x.kind).stabling && x.kind === 'stabling');
+                if (!free) { setMessage('留置線がありません'); return; }
+                snapshot();
+                f.trackId = free.id; f.note = '';
+                for (const i of INSPECTIONS) if (f.inspection && f.inspection[i.id]) f.inspection[i.id] = { days: 0, km: 0 };
+                commit('inspect');
+                setMessage(`${f.name} の検査を終了し、${free.name} に戻しました`);
+              },
+            }, '検査終了'));
+        }))
+        : null,
+    ));
+
+    // 検修設備の能力
+    const load = inspectionLoad(doc, forms, kmOf);
+    const cap = depotCapacity(doc);
+    out.push(h('div', { class: 'card' },
+      h('h4', {}, '検修設備の能力'),
+      h('table', { class: 'mini' },
+        h('tr', {}, h('th', {}, '検査'), h('th', {}, '必要な線数'), h('th', {}, '配線にある線'), h('th', {}, '判定')),
+        ...load.map(l => h('tr', {},
+          h('td', {}, l.def.name),
+          h('td', {}, l.need.toFixed(2)),
+          h('td', {}, `${l.have}`),
+          h('td', { style: `color:${l.short ? '#e0344a' : '#2bd4a4'}` }, l.short ? '不足' : 'OK')))),
+      h('div', { class: 'kv' }, h('span', {}, '留置線'), h('b', {}, `${cap.stabling} 本`)),
+      h('div', { class: 'kv' }, h('span', {}, '洗浄線'), h('b', {}, `${cap.washing} 本`)),
+      h('p', { class: 'note' }, '必要な線数は「検査の所要時間 ÷ 周期」の合計です。編成が増えるほど検修線が必要になります。配線図で検査線を増やすと、長期経営では設備投資として計上されます。'),
+    ));
+    return out;
+  }
+
   /* ---------------- 経営 ---------------- */
   let bizCache = { rev: -1, data: null };
 
@@ -1594,8 +1745,9 @@ export function initUI(api) {
         h('button', {
           class: 'btn primary wide', onclick: () => {
             const d = businessData(); if (!d) return;
+            const dd = dutyData();
             snapshot();
-            const rec = advanceYear(store.doc, d.stats, d.fin);
+            const rec = advanceYear(store.doc, d.stats, d.fin, dd ? dd.duty : null);
             commit('year');
             setMessage(`${rec.year} 年目 決算：損益 ${oku(rec.profit - rec.capex)}／${rec.event}`);
           }
@@ -1663,6 +1815,15 @@ export function initUI(api) {
               }),
               h('span', { class: 'clabel' }, r.year));
           }))),
+        (() => {
+          const last = hist[hist.length - 1];
+          const ins = last && last.inspections;
+          return ins
+            ? h('p', { class: 'note' }, `${last.year} 年目の検査：` +
+              INSPECTIONS.filter(i => ins[i.id]).map(i => `${i.name} ${ins[i.id]} 回`).join('・') +
+              `（運用 ${last.duties} ／ 使える編成 ${last.fleet} 本）`)
+            : null;
+        })(),
         h('table', { class: 'mini nowrap' },
           h('tr', {}, h('th', {}, '年'), h('th', {}, '収入'), h('th', {}, '損益'), h('th', {}, '現金'), h('th', {}, '混雑'), h('th', { class: 'wrap' }, 'できごと')),
           ...hist.slice(-12).reverse().map(r => h('tr', {},
@@ -1923,6 +2084,7 @@ export function initUI(api) {
       withFocus(els.route, buildRoute, selKey);
       withFocus(els.sim, buildSim, 'sim');
       withFocus(els.timetable, buildTimetable, `tt:${(store.ui.diagram || {}).lineId}:${(store.ui.diagram || {}).selected}`);
+      withFocus(els.duty, buildDuty, `duty:${(store.ui.diagram || {}).lineId}`);
       withFocus(els.business, buildBusiness, `biz:${(store.ui.diagram || {}).lineId}`);
       withFocus(els.settings, buildSettings, 'settings');
       buildStatus();
