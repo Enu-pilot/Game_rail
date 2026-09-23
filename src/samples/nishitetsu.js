@@ -1,5 +1,5 @@
 // サンプル4：西鉄電車 全線（天神大牟田線・太宰府線・甘木線・貝塚線）
-// 配線：配線略図.net（西鉄天神大牟田線ほか）　キロ程：Wikipedia 各線の駅一覧
+// 配線：配線略図.net（西鉄天神大牟田線ほか）、駅の番線数：Wikipedia 各駅記事（docs/sample-stations.md）　キロ程：Wikipedia 各線の駅一覧
 // 天神大牟田線は 聖マリア病院前〜大善寺・蒲池〜開 が単線。太宰府線・甘木線・貝塚線は全線単線。
 // 貝塚線はほかの線とつながっていない（独立した車庫を持つ）。
 
@@ -25,7 +25,7 @@ export default {
       turns: { '西鉄二日市': 95, '西鉄久留米': 118, '西鉄柳川': 95 },
       singles: [['聖マリア病院前', '大善寺'], ['蒲池', '開']],
       stations: [
-        ['西鉄福岡（天神）', 0.0, 't', P(130, 'urban', { stubs: 4 })],
+        ['西鉄福岡（天神）', 0.0, 't', P(130, 'urban', { stubs: 3 })],
         ['薬院', 0.8, 's', P(25, 'mixed')], ['西鉄平尾', 1.8, 's', P(15, 'residential')],
         ['高宮', 2.9, 's', P(12, 'residential')], ['大橋', 4.3, 'p', P(30, 'mixed')],
         ['井尻', 6.1, 's', P(10, 'residential')], ['雑餉隈', 8.0, 's', P(10, 'residential')],
@@ -39,18 +39,18 @@ export default {
         ['西鉄小郡', 28.7, 'p', P(8, 'mixed')], ['端間', 30.7, 's', P(2, 'residential')],
         ['味坂', 33.7, 's', P(1, 'residential')], ['宮の陣', 36.5, 's', P(3, 'residential')],
         ['櫛原', 37.7, 's', P(3, 'residential')], ['西鉄久留米', 38.6, 'p', P(25, 'urban')],
-        ['花畑', 39.5, 'p', P(7, 'mixed')], ['聖マリア病院前', 40.1, 's', P(3, 'mixed')],
-        ['津福', 41.4, 's', P(2, 'residential')], ['安武', 42.8, 'pd', P(2, 'residential')],
+        ['花畑', 39.5, 'p', P(7, 'mixed')], ['聖マリア病院前', 40.1, 'pd', P(3, 'mixed')],
+        ['津福', 41.4, 'pd', P(2, 'residential')], ['安武', 42.8, 'pd', P(2, 'residential')],
         ['大善寺', 45.1, 'p', P(3, 'residential')], ['三潴', 46.9, 's', P(2, 'residential')],
         ['犬塚', 48.0, 's', P(1, 'residential')], ['大溝', 50.6, 's', P(1, 'residential')],
-        ['八丁牟田', 52.9, 's', P(1, 'residential')], ['蒲池', 55.5, 's', P(1, 'residential')],
+        ['八丁牟田', 52.9, 's', P(1, 'residential')], ['蒲池', 55.5, 'pd', P(1, 'residential')],
         ['矢加部', 57.3, 's', P(1, 'residential')], ['西鉄柳川', 58.4, 'p', P(8, 'tourist')],
-        ['徳益', 59.7, 's', P(1, 'residential')], ['塩塚', 61.1, 's', P(1, 'residential')],
-        ['西鉄中島', 63.5, 'pd', P(1, 'residential')], ['江の浦', 65.1, 'pd', P(1, 'residential')],
-        ['開', 66.6, 's', P(1, 'residential')], ['西鉄渡瀬', 67.9, 'p', P(2, 'residential')],
+        ['徳益', 59.7, 's', P(1, 'residential')], ['塩塚', 61.1, 'pd', P(1, 'residential')],
+        ['西鉄中島', 63.5, 's', P(1, 'residential')], ['江の浦', 65.1, 'pd', P(1, 'residential')],
+        ['開', 66.6, 'pd', P(1, 'residential')], ['西鉄渡瀬', 67.9, 'p', P(2, 'residential')],
         ['倉永', 69.6, 's', P(1, 'residential')], ['東甘木', 70.8, 's', P(1, 'residential')],
         ['西鉄銀水', 72.1, 's', P(2, 'residential')], ['新栄町', 73.7, 's', P(3, 'mixed')],
-        ['大牟田', 74.8, 't', P(8, 'mixed', { stubs: 2 })],
+        ['大牟田', 74.8, 't', P(8, 'mixed', { stubs: 3 })],
       ],
     },
     {
@@ -59,7 +59,7 @@ export default {
       attach: { line: 'omuta', at: '西鉄二日市', mode: 'branch', offset: 250, ownStation: true },
       turns: { '西鉄五条': 10 },
       stations: [
-        ['西鉄二日市', 0.0, 's', P(4, 'mixed')], ['西鉄五条', 1.4, 's', P(4, 'residential')],
+        ['西鉄二日市', 0.0, 's', P(4, 'mixed')], ['西鉄五条', 1.4, 'pd', P(4, 'residential')],
         ['太宰府', 2.4, 't', P(15, 'tourist', { stubs: 2 })],
       ],
     },
@@ -70,22 +70,22 @@ export default {
       turns: { '五郎丸': 0 },
       stations: [
         ['宮の陣', 0.0, 's', P(1, 'residential')], ['五郎丸', 0.9, 's', P(1, 'residential')],
-        ['学校前', 1.7, 's', P(2, 'school')], ['古賀茶屋', 3.9, 's', P(1, 'residential')],
+        ['学校前', 1.7, 'pd', P(2, 'school')], ['古賀茶屋', 3.9, 's', P(1, 'residential')],
         ['北野', 5.4, 'pd', P(2, 'residential')], ['大城', 8.0, 's', P(1, 'residential')],
-        ['金島', 9.4, 's', P(1, 'residential')], ['大堰', 11.6, 's', P(1, 'residential')],
+        ['金島', 9.4, 'pd', P(1, 'residential')], ['大堰', 11.6, 's', P(1, 'residential')],
         ['本郷', 13.1, 'pd', P(1, 'residential')], ['上浦', 14.9, 's', P(1, 'residential')],
-        ['馬田', 16.1, 's', P(1, 'residential')], ['甘木', 17.9, 's', P(3, 'mixed')],
+        ['馬田', 16.1, 's', P(1, 'residential')], ['甘木', 17.9, 'pd', P(3, 'mixed')],
       ],
     },
     {
       key: 'kaizuka', name: '貝塚線', color: '#1065ab', op: 'nnr', vmax: 85, double: false,
       safety: ['ats_sn'], maxCars: 2, heading: 315, origin: { x: 5200, y: -2600 },
       stations: [
-        ['貝塚', 0.0, 't', P(10, 'mixed', { stubs: 2 })], ['名島', 1.4, 's', P(3, 'residential')],
+        ['貝塚', 0.0, 't', P(10, 'mixed', { stubs: 2 })], ['名島', 1.4, 'pd', P(3, 'residential')],
         ['西鉄千早', 2.5, 'pd', P(8, 'mixed')], ['香椎宮前', 3.0, 's', P(3, 'residential')],
         ['西鉄香椎', 3.6, 'pd', P(6, 'mixed')], ['香椎花園前', 5.0, 'pd', P(3, 'residential')],
-        ['唐の原', 6.1, 's', P(3, 'residential')], ['和白', 7.2, 'pd', P(6, 'residential')],
-        ['三苫', 9.0, 'pd', P(3, 'residential')], ['西鉄新宮', 11.0, 's', P(4, 'residential')],
+        ['唐の原', 6.1, 'pd', P(3, 'residential')], ['和白', 7.2, 'pd', P(6, 'residential')],
+        ['三苫', 9.0, 'pd', P(3, 'residential')], ['西鉄新宮', 11.0, 'pd', P(4, 'residential')],
       ],
     },
   ],

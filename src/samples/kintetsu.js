@@ -1,5 +1,5 @@
 // サンプル2：近鉄奈良線（大阪難波〜近鉄奈良）と阪神なんば線・京都線・橿原線
-// 配線：配線略図.net（近鉄奈良線・難波線）　キロ程：Wikipedia 各線の駅一覧
+// 配線：配線略図.net（近鉄奈良線・難波線）、駅の番線数：Wikipedia 各駅記事（docs/sample-stations.md）　キロ程：Wikipedia 各線の駅一覧
 // 奈良線は運転系統上の「大阪難波〜近鉄奈良」（難波線・大阪線 上本町〜布施を含む）。
 // 大和西大寺では京都線と橿原線が奈良線をまたいで平面交差する。
 
@@ -25,11 +25,11 @@ export default {
       safety: ['ats_kintetsu'], maxCars: 10, heading: 0, startEnd: 'open',
       turns: { '布施': 352, '生駒': 5, '学園前': 0 },
       stations: [
-        ['大阪難波', 0.0, 'p', P(150, 'urban')],
+        ['大阪難波', 0.0, 'pd', P(150, 'urban')],
         ['近鉄日本橋', 0.8, 's', P(40, 'business')],
         ['大阪上本町', 2.0, 's', P(60, 'urban')],
         ['鶴橋', 3.1, 's', P(170, 'urban')],
-        ['布施', 6.1, 's', P(42, 'mixed')],
+        ['布施', 6.1, 'p', P(42, 'mixed')],
         ['河内永和', 6.9, 's', P(10, 'mixed')],
         ['河内小阪', 7.7, 's', P(30, 'school')],
         ['八戸ノ里', 8.5, 'p', P(24, 'residential')],
@@ -40,7 +40,7 @@ export default {
         ['枚岡', 14.4, 's', P(5, 'residential')],
         ['額田', 15.1, 's', P(4, 'residential')],
         ['石切', 16.2, 'p', P(11, 'residential')],
-        ['生駒', 20.3, 'pd', P(50, 'mixed')],
+        ['生駒', 20.3, 'p', P(50, 'mixed')],
         ['東生駒', 21.5, 'p', P(19, 'residential')],
         ['富雄', 23.8, 's', P(29, 'residential')],
         ['学園前', 25.2, 's', P(45, 'residential')],
@@ -60,15 +60,15 @@ export default {
         ['九条', 2.5, 's', P(12, 'mixed')], ['西九条', 3.8, 's', P(20, 'mixed')], ['千鳥橋', 4.6, 's', P(5, 'residential')],
         ['伝法', 5.3, 's', P(4, 'residential')], ['福', 6.8, 's', P(3, 'residential')], ['出来島', 7.8, 's', P(4, 'residential')],
         ['大物', 9.2, 'p', P(3, 'residential')], ['尼崎', 10.1, 'p', P(30, 'mixed')],
-        ['出屋敷', 11.3, 's', P(8, 'mixed')], ['尼崎センタープール前', 12.0, 's', P(3, 'residential')],
+        ['出屋敷', 11.3, 's', P(8, 'mixed')], ['尼崎センタープール前', 12.0, 'p', P(3, 'residential')],
         ['武庫川', 13.2, 's', P(8, 'residential')], ['鳴尾・武庫川女子大前', 14.4, 's', P(12, 'school')],
         ['甲子園', 15.3, 'p', P(35, 'tourist')], ['久寿川', 16.0, 's', P(4, 'residential')], ['今津', 16.6, 's', P(15, 'mixed')],
         ['西宮', 17.9, 'p', P(28, 'mixed')], ['香櫨園', 19.0, 's', P(6, 'residential')], ['打出', 20.2, 's', P(6, 'residential')],
-        ['芦屋', 21.4, 's', P(15, 'residential')], ['深江', 22.7, 's', P(8, 'residential')], ['青木', 23.8, 's', P(8, 'residential')],
-        ['魚崎', 25.0, 'p', P(15, 'residential')], ['住吉', 25.8, 's', P(4, 'residential')], ['御影', 26.3, 'p', P(20, 'residential')],
+        ['芦屋', 21.4, 's', P(15, 'residential')], ['深江', 22.7, 's', P(8, 'residential')], ['青木', 23.8, 'p', P(8, 'residential')],
+        ['魚崎', 25.0, 's', P(15, 'residential')], ['住吉', 25.8, 's', P(4, 'residential')], ['御影', 26.3, 'p', P(20, 'residential')],
         ['石屋川', 26.9, 's', P(4, 'residential')], ['新在家', 27.8, 's', P(8, 'residential')], ['大石', 28.8, 'p', P(8, 'residential')],
         ['西灘', 29.4, 's', P(4, 'residential')], ['岩屋', 30.0, 's', P(8, 'mixed')], ['春日野道', 31.1, 's', P(15, 'mixed')],
-        ['神戸三宮', 32.4, 'p', P(90, 'urban')],
+        ['神戸三宮', 32.4, 'pu', P(90, 'urban')],
       ],
     },
     {
@@ -79,12 +79,12 @@ export default {
       stations: [
         ['大和西大寺', 0.0], ['平城', 1.1, 's', P(5, 'residential')], ['高の原', 3.8, 'p', P(25, 'residential')],
         ['山田川', 5.4, 's', P(4, 'residential')], ['木津川台', 6.4, 's', P(4, 'residential')], ['新祝園', 7.9, 'p', P(12, 'school')],
-        ['狛田', 10.2, 's', P(4, 'residential')], ['近鉄宮津', 11.5, 's', P(2, 'residential')], ['三山木', 12.2, 's', P(8, 'school')],
+        ['狛田', 10.2, 's', P(4, 'residential')], ['近鉄宮津', 11.5, 'p', P(2, 'residential')], ['三山木', 12.2, 's', P(8, 'school')],
         ['興戸', 13.5, 's', P(8, 'school')], ['新田辺', 15.0, 'p', P(22, 'mixed')], ['富野荘', 17.2, 's', P(5, 'residential')],
         ['寺田', 18.7, 's', P(10, 'residential')], ['久津川', 20.0, 's', P(6, 'residential')], ['大久保', 21.0, 'p', P(20, 'mixed')],
         ['伊勢田', 21.9, 's', P(5, 'residential')], ['小倉', 23.2, 's', P(10, 'residential')], ['向島', 26.0, 'p', P(10, 'residential')],
-        ['桃山御陵前', 28.1, 's', P(15, 'mixed')], ['近鉄丹波橋', 28.6, 'p', P(30, 'mixed')], ['伏見', 29.7, 's', P(4, 'residential')],
-        ['竹田', 31.0, 'p', P(25, 'mixed')], ['上鳥羽口', 32.1, 's', P(4, 'residential')], ['十条', 33.1, 's', P(5, 'residential')],
+        ['桃山御陵前', 28.1, 's', P(15, 'mixed')], ['近鉄丹波橋', 28.6, 's', P(30, 'mixed')], ['伏見', 29.7, 's', P(4, 'residential')],
+        ['竹田', 31.0, 'p', P(25, 'mixed')], ['上鳥羽口', 32.1, 'p', P(4, 'residential')], ['十条', 33.1, 's', P(5, 'residential')],
         ['東寺', 33.7, 's', P(6, 'tourist')], ['京都', 34.6, 't', P(90, 'urban', { stubs: 4 })],
       ],
     },
@@ -94,10 +94,10 @@ export default {
       attach: { line: 'nara', at: '大和西大寺', mode: 'branch', offset: 290 },
       stations: [
         ['大和西大寺', 0.0], ['尼ヶ辻', 1.6, 's', P(5, 'residential')], ['西ノ京', 2.8, 's', P(4, 'tourist')],
-        ['九条（奈良）', 4.0, 's', P(3, 'residential')], ['近鉄郡山', 5.5, 'p', P(14, 'mixed')], ['筒井', 8.4, 's', P(5, 'residential')],
+        ['九条（奈良）', 4.0, 's', P(3, 'residential')], ['近鉄郡山', 5.5, 's', P(14, 'mixed')], ['筒井', 8.4, 's', P(5, 'residential')],
         ['平端', 9.9, 'p', P(6, 'residential')], ['ファミリー公園前', 10.9, 's', P(2, 'residential')], ['結崎', 12.4, 's', P(4, 'residential')],
-        ['石見', 13.8, 's', P(4, 'residential')], ['田原本', 15.9, 'p', P(10, 'mixed')], ['笠縫', 17.3, 's', P(3, 'residential')],
-        ['新ノ口', 19.1, 's', P(4, 'residential')], ['大和八木', 20.5, 'p', P(40, 'mixed')], ['畝傍御陵前', 22.8, 's', P(4, 'residential')],
+        ['石見', 13.8, 's', P(4, 'residential')], ['田原本', 15.9, 's', P(10, 'mixed')], ['笠縫', 17.3, 's', P(3, 'residential')],
+        ['新ノ口', 19.1, 's', P(4, 'residential')], ['大和八木', 20.5, 's', P(40, 'mixed')], ['畝傍御陵前', 22.8, 's', P(4, 'residential')],
         ['橿原神宮前', 23.8, 't', P(15, 'tourist', { stubs: 3 })],
       ],
     },

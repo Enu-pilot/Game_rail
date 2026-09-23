@@ -34,6 +34,21 @@ export function stationTrackCount(doc, st) {
 export const canPass = (doc, st) => stationTrackCount(doc, st) >= 2;
 
 /**
+ * 複線の駅で、その向きの列車が待避できるか。
+ * 副本線が「下り副本線」だけ（または「上り副本線」だけ）の駅は、反対向きの列車は待避できない。
+ * 名前で向きがわからない番線（手で描いた待避線・頭端線など）は上下どちらにも使えるとみなす。
+ */
+export function canPassDir(doc, st, up) {
+  if (!canPass(doc, st)) return false;
+  const main = st.object.trackId;
+  const names = stationTracks(doc, st.object).filter(id => id !== main)
+    .map(id => (doc.tracks.find(t => t.id === id) || {}).name || '');
+  const down = names.some(n => !n.endsWith('上り副本線'));
+  const upOk = names.some(n => !n.endsWith('下り副本線'));
+  return up ? upOk : down;
+}
+
+/**
  * 列車が各駅間を占有する時間帯。
  * noPass（待避線のない駅の番号の集合）を渡すと、その駅での停車・通過も
  * 「駅」の区間（sec = 's'+駅番号）として加える（駅の中での追い越し・続行を見つけるため）。
@@ -42,8 +57,9 @@ export function sectionRuns(stops, trainId, noPass = null) {
   const runs = [];
   if (noPass) {
     const up = stops.length > 1 && stops[stops.length - 1].idx < stops[0].idx;
+    const set = noPass instanceof Set ? noPass : up ? noPass.up : noPass.down;
     for (const st of stops) {
-      if (!noPass.has(st.idx)) continue;
+      if (!set.has(st.idx)) continue;
       const a = st.arr ?? st.dep, b = st.dep ?? st.arr;
       if (a == null) continue;
       runs.push({ trainId, sec: `s${st.idx}`, station: true, from: st.idx, to: st.idx, start: a, end: b, up });
@@ -86,22 +102,29 @@ function quadTester(line) {
 
 /** 待避線のない複線の駅（駅の中で追い越せない） */
 function noPassStations(doc, line, stations) {
-  const set = new Set();
+  const down = new Set(), up = new Set();
   stations.forEach((st, i) => {
     const dbl = !sectionSingle(line, i) || !sectionSingle(line, i - 1);
-    if (dbl && !canPass(doc, st)) set.add(i);
+    if (!dbl) return;
+    // 前後とも複線なら、副本線のある向きだけ待避できる
+    const both = !sectionSingle(line, i) && !sectionSingle(line, i - 1);
+    if (!(both ? canPassDir(doc, st, false) : canPass(doc, st))) down.add(i);
+    if (!(both ? canPassDir(doc, st, true) : canPass(doc, st))) up.add(i);
   });
-  return set;
+  return { down, up };
 }
 
 /** 待ちを入れられる駅（進行方向の手前側で、いちばん近い交換可能駅）を探す */
-function holdStation(doc, stations, train, stops, enterIdx) {
+function holdStation(doc, line, stations, train, stops, enterIdx) {
   const order = stops.map(s => s.idx);
   const pos = order.indexOf(enterIdx);
   if (pos < 0) return null;
+  const up = order.length > 1 && order[order.length - 1] < order[0];
   for (let k = pos; k >= 0; k--) {
     const idx = order[k];
-    if (canPass(doc, stations[idx]) || k === 0) return { idx, atOrigin: k === 0 };
+    const both = !sectionSingle(line, idx) && !sectionSingle(line, idx - 1);
+    const ok = both ? canPassDir(doc, stations[idx], up) : canPass(doc, stations[idx]);
+    if (ok || k === 0) return { idx, atOrigin: k === 0 };
   }
   return null;
 }
@@ -232,7 +255,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     if (kind === 'meet') {
       const opt = (y, o) => {
         const yt = byId.get(y.trainId);
-        const h = yt ? holdStation(doc, stations, yt, sched(yt), y.from) : null;
+        const h = yt ? holdStation(doc, line, stations, yt, sched(yt), y.from) : null;
         const need = meetNeed(y, o, h);
         const cur = h ? (holds[y.trainId][h.idx] || 0) : 0;
         const ok = !!h && need > 0 && cur + need <= maxHold;
@@ -246,7 +269,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
     const oTrain = byId.get(other.trainId);
     if (!yTrain || !oTrain) { gaveUp.add(key); continue; }
     const yStops = sched(yTrain);
-    const hs = holdStation(doc, stations, yTrain, yStops, yielder.from);
+    const hs = holdStation(doc, line, stations, yTrain, yStops, yielder.from);
     // 単線は「対向が抜けるまで」、複線は「前後の間隔を確保できるまで」待つ
     const raw = worst.single
       ? (kind === 'meet' ? meetNeed(yielder, other, hs) : other.end + headway - yielder.start)
