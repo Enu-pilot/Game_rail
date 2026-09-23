@@ -132,9 +132,18 @@ let _runCacheRev = -1;
  * 列車の時刻を計算する（各駅の着・発）。
  * 駅間は走行計算（線路の最高速度・速度制限・分岐制限＋加減速）で所要時間を求める。
  */
-export function computeSchedule(doc, stations, train) {
+export function computeSchedule(doc, stations, train, _depth = 0) {
+  // 併結列車（付属編成）は、相手の列車の時刻に従って走る
+  const leader = _depth < 3 ? coupledLeader(doc, train) : null;
+  if (leader) {
+    const own = companionSchedule(doc, stations, train, leader, _depth);
+    if (own) return own;
+  }
   const key = train.id;
-  const holds = train.holds || {};
+  const holds = { ...(train.holds || {}) };
+  // 途中駅で付属編成を連結・切り離す列車は、その駅で作業時間だけ長く止まる
+  const work = coupleWork(doc, train);
+  for (const [i, sec] of Object.entries(work)) holds[i] = (+holds[i] || 0) + sec;
   const stSig = stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',');
   const sig = `${store.rev}|${stSig}|${train.fromIdx},${train.toIdx},${train.departSec},${train.delaySec || 0},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
   const hit = _schedCache.get(key);
@@ -197,6 +206,137 @@ export function computeSchedule(doc, stations, train) {
   return stops;
 }
 
+/* ---------------- 連結・分離（併結運転） ---------------- */
+
+/** 併結の相手（この列車が付属編成として連結される列車） */
+export function coupledLeader(doc, t) {
+  const id = t && t.couple && t.couple.withId;
+  if (!id || id === t.id) return null;
+  return (doc.trains || []).find(x => x.id === id) || null;
+}
+
+/** 併結して走る付属編成か */
+export const isCompanion = (doc, t) => !!coupledLeader(doc, t);
+
+/** 主となる列車 → 併結する付属編成の一覧 */
+let _compIndex = { doc: null, rev: -1, n: -1, map: new Map() };
+export function companionsOf(doc, leaderId) {
+  const trains = doc.trains || [];
+  if (_compIndex.doc !== doc || _compIndex.rev !== store.rev || _compIndex.n !== trains.length) {
+    const map = new Map();
+    for (const t of trains) {
+      const id = t.couple && t.couple.withId;
+      if (!id) continue;
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(t);
+    }
+    _compIndex = { doc, rev: store.rev, n: trains.length, map };
+  }
+  return _compIndex.map.get(leaderId) || [];
+}
+
+/** 連結・切り離しの作業時分 */
+export const coupleSec = doc => Math.max(0, (doc.settings.coupleMinutes ?? 3) * 60);
+export const splitSec = doc => Math.max(0, (doc.settings.splitMinutes ?? 2) * 60);
+
+/** 主となる列車が途中駅で連結・切り離しをする駅と作業時間 { 駅番号: 秒 } */
+export function coupleWork(doc, train) {
+  const out = {};
+  for (const c of companionsOf(doc, train.id)) {
+    if (c.lineId !== train.lineId) continue;
+    if (c.fromIdx !== train.fromIdx) out[c.fromIdx] = Math.max(out[c.fromIdx] || 0, coupleSec(doc));
+    if (c.toIdx !== train.toIdx) out[c.toIdx] = Math.max(out[c.toIdx] || 0, splitSec(doc));
+  }
+  return out;
+}
+
+/** 付属編成の時刻：相手の列車の時刻から、併結している区間を切り出す */
+function companionSchedule(doc, stations, train, leader, depth) {
+  if (leader.lineId !== train.lineId) return null;
+  const ls = computeSchedule(doc, stations, leader, depth + 1);
+  const a = ls.findIndex(x => x.idx === train.fromIdx);
+  const b = ls.findIndex(x => x.idx === train.toIdx);
+  if (a < 0 || b < 0 || b <= a) return null;
+  const out = ls.slice(a, b + 1).map(x => ({ ...x }));
+  const first = out[0], last = out[out.length - 1];
+  first.arr = null; first.skip = false;
+  last.dep = null; last.skip = false;
+  return out;
+}
+
+/**
+ * 併結の設定の誤り（相手がいない・向きが逆・区間の外・両数超過など）
+ * @returns {Array<{level, message, train}>}
+ */
+export function coupleIssues(doc, line, stations, trains) {
+  const out = [];
+  const nm = t => t.number || '列車';
+  for (const t of trains) {
+    if (!t.couple || !t.couple.withId) continue;
+    const L = coupledLeader(doc, t);
+    const push = (level, message) => out.push({ level, message, train: t });
+    if (!L) { push('error', `${nm(t)} の併結相手の列車がありません`); continue; }
+    if (L.lineId !== t.lineId) { push('error', `${nm(t)} と ${nm(L)} は別の路線です（併結は同じ路線の列車どうし）`); continue; }
+    if (L.couple && L.couple.withId) push('warn', `${nm(L)} 自身も別の列車に併結しています（${nm(t)} は ${nm(L)} の相手に従います）`);
+    const dirT = Math.sign(t.toIdx - t.fromIdx), dirL = Math.sign(L.toIdx - L.fromIdx);
+    if (dirT !== dirL) { push('error', `${nm(t)} と ${nm(L)} は進行方向が逆です`); continue; }
+    const inRange = i => dirL > 0 ? (i >= L.fromIdx && i <= L.toIdx) : (i <= L.fromIdx && i >= L.toIdx);
+    if (!inRange(t.fromIdx) || !inRange(t.toIdx)) {
+      push('error', `${nm(t)} の併結区間（${stName(stations, t.fromIdx)}〜${stName(stations, t.toIdx)}）が ${nm(L)} の運転区間の外にはみ出しています`);
+      continue;
+    }
+    for (const i of [t.fromIdx, t.toIdx]) {
+      if (i !== L.fromIdx && i !== L.toIdx && (L.skip || []).includes(i)) {
+        push('warn', `${nm(L)} は ${stName(stations, i)} を通過扱いですが、連結・切り離しのため運転停車します`);
+      }
+    }
+    const cars = (L.cars || 0) + companionsOf(doc, L.id).reduce((s2, c) => s2 + (c.cars || 0), 0);
+    if (line && cars > (line.maxCars || 99)) {
+      push('error', `${nm(L)}＋付属編成で ${cars} 両になり、ホーム有効長（${line.maxCars} 両）を超えます`);
+    }
+  }
+  return out;
+}
+const stName = (stations, i) => (stations[i] ? stations[i].name : '?');
+
+/* ---------------- 機回し ---------------- */
+
+/** 駅で機回し（機関車を反対側へ付け替える）ができるか：両端のつながった線が2本以上 */
+export function canRunAround(doc, station) {
+  if (!station || !station.object) return false;
+  const ids = stationTracks(doc, station.object);
+  const loops = ids.map(id => doc.tracks.find(t => t.id === id)).filter(t => t && t.ends.a !== 'buffer' && t.ends.b !== 'buffer');
+  return loops.length >= 2 || nearbyTracks(doc, station.object, 120).some(n => n.track.kind === 'runaround');
+}
+
+/** 駅の近くに転車台があるか（蒸気機関車などの向きを変えられる） */
+export function hasTurntable(doc, station, radius = 800) {
+  if (!station || !station.object) return false;
+  const o = station.object;
+  return doc.objects.some(x => x.type === 'turntable' && Math.hypot(x.x - o.x, x.y - o.y) <= radius);
+}
+
+export const runAroundSec = doc => Math.max(0, (doc.settings.runAroundMinutes ?? 10) * 60);
+
+/**
+ * 機関車牽引の列車が折り返す駅の一覧（機回しできるか・転車台があるか）。
+ * 終着後に入庫・直通する列車や、付属編成として切り離される列車は数えない。
+ */
+export function runAroundPoints(doc, stations, trains) {
+  const map = new Map();
+  for (const t of trains) {
+    if (!t.loco || t.toDepot || t.throughId) continue;
+    const st = stations[t.toIdx];
+    if (!st) continue;
+    if (!map.has(t.toIdx)) {
+      map.set(t.toIdx, { idx: t.toIdx, name: st.name, count: 0, ok: canRunAround(doc, st), turntable: hasTurntable(doc, st), trains: [] });
+    }
+    const m = map.get(t.toIdx);
+    m.count++; m.trains.push(t);
+  }
+  return [...map.values()].sort((a, b) => a.idx - b.idx);
+}
+
 /** 列車のスジ（時刻・キロ程の折れ線） */
 export function trainPolyline(stops) {
   const pts = [];
@@ -246,6 +386,7 @@ function platformUses(doc, line, stations, trains, headwaySec) {
   const dbl = i => !(line && sectionSingleLocal(line, i));
   const uses = [];
   for (const tr of trains) {
+    if (isCompanion(doc, tr)) continue;          // 付属編成は相手の列車と同じ番線に入る
     const stops = computeSchedule(doc, stations, tr);
     const ends = [tr.fromIdx, tr.toIdx];
     for (const st of stops) {

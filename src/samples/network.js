@@ -191,6 +191,19 @@ export function buildNetwork(spec) {
           loops[`stub${j}`] = t;
         }
       }
+      if (S.extra.ra) {
+        // 機回し線：本線から分かれて駅の外側を回る線（機関車を列車の反対側へ付け替える）
+        const side = S.type === 'p' || S.type === 'pd' ? 1 : -1;
+        const off = (S.type === 'p' ? 2 : 1) * LOOP_OFF * side;
+        const a0 = path.at(pos[i] - LOOP_HALF - 40), a1 = path.at(pos[i] + LOOP_HALF + 20);
+        const b0 = add(path.at(pos[i] - LOOP_HALF + 10), path.nrm(pos[i] - LOOP_HALF + 10), off);
+        const b1 = add(path.at(pos[i] + LOOP_HALF - 20), path.nrm(pos[i] + LOOP_HALF - 20), off);
+        tracks.push(T(`${S.name}機回し線`, 'runaround', [a0, b0, b1, a1], {}, { maxSpeedKmh: 25 }));
+      }
+      if (S.extra.tt) {
+        const q = add(p, n, (S.type === 'p' ? -3 : -2) * LOOP_OFF - 20);
+        objects.push(O('turntable', q.x, q.y, { label: `${S.name}転車台` }));
+      }
       const loopSeam = L.ring && (i === 0 || i === st.length - 1) && st[0].name === st[st.length - 1].name;
       const half = loopSeam ? 0.5 : 1;
       const obj = O('station_mark', p.x, p.y, {
@@ -378,31 +391,65 @@ export function buildNetwork(spec) {
     }
     return found ? thIds[found.key] : null;
   };
-  const runService = (sv, route, dep, n) => {
+  // 生成した列車：`${系統}|${回}|${向き}|${路線}` → 列車（併結の相手を探すのに使う）
+  const runs = new Map();
+  const segDuration = (E, tr) => {
+    const stops = computeSchedule(doc, stsOf[E.key], tr);
+    const last = stops[stops.length - 1];
+    return (last.arr ?? tr.departSec) - tr.departSec;
+  };
+  const runService = (sv, route, dep, n, dirKey) => {
     const op = pickOp(sv, n);
     const no = (counters[sv.prefix || sv.type] = (counters[sv.prefix || sv.type] || 0) + 1);
     const number = `${sv.prefix || ''}${no}${sv.suffix || ''}`;
-    let t = dep;
-    const made = [];
-    route.forEach((seg, k) => {
+    const transfer = sv.transfer ?? 60;
+    const made = route.map((seg, k) => {
       const E = lines[seg[0]];
-      const tr = makeTrain(E, seg[1], seg[2], t, sv, op, number);
+      const tr = makeTrain(E, seg[1], seg[2], dep, sv, op, number);
       if (throughSources.has(seg[0])) tr.throughId = throughFor(route, k);
-      const stops = computeSchedule(doc, stsOf[E.key], tr);
-      const last = stops[stops.length - 1];
-      t = (last.arr ?? t) + (sv.transfer ?? 60);
-      made.push(tr);
+      if (sv.loco) tr.loco = true;
+      // 併結：相手の系統の同じ回・同じ向きの列車に付属編成として連結する
+      if (sv.with && sv.with.on.includes(seg[0])) {
+        const L = runs.get(`${sv.with.service}|${n}|${dirKey}|${seg[0]}`);
+        if (L) tr.couple = { withId: L.id };
+      }
+      runs.set(`${sv.prefix}|${n}|${dirKey}|${seg[0]}`, tr);
+      return { E, tr };
     });
-    return made;
+    // 時刻：併結区間は相手の時刻に合わせ、その前後の区間を前詰め・後詰めでつなぐ
+    const anchor = made.findIndex(m => m.tr.couple);
+    if (anchor < 0) {
+      let t = dep;
+      for (const m of made) { m.tr.departSec = t; t += segDuration(m.E, m.tr) + transfer; }
+    } else {
+      store.rev++;
+      doc.trains = trains.concat(made.map(m => m.tr));
+      const depAt = m => computeSchedule(doc, stsOf[m.E.key], m.tr)[0].dep;
+      let t = depAt(made[anchor]);
+      made[anchor].tr.departSec = t;
+      for (let k = anchor - 1; k >= 0; k--) {
+        made[k].tr.departSec = 0;
+        const d = segDuration(made[k].E, made[k].tr);
+        made[k].tr.departSec = t - transfer - d;
+        t = made[k].tr.departSec;
+      }
+      t = made[anchor].tr.departSec + segDuration(made[anchor].E, made[anchor].tr) + transfer;
+      for (let k = anchor + 1; k < made.length; k++) {
+        if (made[k].tr.couple) { made[k].tr.departSec = depAt(made[k]); }
+        else made[k].tr.departSec = t;
+        t = made[k].tr.departSec + segDuration(made[k].E, made[k].tr) + transfer;
+      }
+    }
+    return made.map(m => m.tr);
   };
   for (const sv of spec.services || []) {
     let n = 0;
     for (const [from, to, every, offset = 0] of sv.slots) {
       for (let t = hm(from) + offset * 60; t < hm(to); t += every * 60) {
-        trains.push(...runService(sv, sv.route, t, n));
+        trains.push(...runService(sv, sv.route, t, n, 'f'));
         if (sv.both !== false) {
           const rev = sv.route.slice().reverse().map(([k, a, b]) => [k, b, a]);
-          trains.push(...runService(sv, rev, t + (sv.revOffset ?? 0) * 60, n));
+          trains.push(...runService(sv, rev, t + (sv.revOffset ?? 0) * 60, n, 'r'));
         }
         n++;
       }

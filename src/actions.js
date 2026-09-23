@@ -5,7 +5,7 @@ import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, TURNOUT_TYPE_BY_VA
 import { distToPolyline, pointAt } from './geom.js';
 import { routeFromLeg, findConflicts, routeAligned } from './interlocking.js';
 import { getGraph, crossoverUnits } from './topology.js';
-import { lineStations } from './timetable.js';
+import { lineStations, computeSchedule, isCompanion } from './timetable.js';
 import { planMeets } from './meets.js';
 import { buildRosters } from './duty.js';
 import { throughChain } from './operators.js';
@@ -325,6 +325,7 @@ export function updateTrain(id, patch) {
 export function deleteTrain(id) {
   snapshot();
   store.doc.trains = store.doc.trains.filter(t => t.id !== id);
+  for (const t of store.doc.trains) if (t.couple && t.couple.withId === id) t.couple = null;   // 併結の相手を失った付属編成
   if (store.ui.diagram && store.ui.diagram.selected === id) store.ui.diagram.selected = null;
   commit('delete-train');
 }
@@ -333,7 +334,7 @@ export function duplicateTrain(id) {
   const t = store.doc.trains.find(x => x.id === id);
   if (!t) return;
   snapshot();
-  const copy = { ...t, id: uid('tr'), number: `${t.number}'`, departSec: t.departSec + 1800, skip: t.skip.slice() };
+  const copy = { ...t, id: uid('tr'), number: `${t.number}'`, departSec: t.departSec + 1800, skip: t.skip.slice(), couple: null };
   store.doc.trains.push(copy);
   store.ui.diagram = { ...(store.ui.diagram || {}), selected: copy.id };
   commit('duplicate-train');
@@ -459,9 +460,11 @@ export function autoDispatch(lineId, { silent = false, reset = true } = {}) {
   const plan = planMeets(doc, line, sts, trains, { reset });
   if (!silent) snapshot();
   for (const t of trains) {
+    if (isCompanion(doc, t)) continue;          // 付属編成は相手の列車に従う
     t.holds = plan.holds[t.id] || {};
     if (plan.platforms[t.id]) t.platforms = plan.platforms[t.id];
   }
+  syncCompanions(doc, sts, trains);
   commit('dispatch');
   if (!silent) {
     const mins = Math.round(Object.values(plan.holds).reduce((s, h) =>
@@ -471,6 +474,16 @@ export function autoDispatch(lineId, { silent = false, reset = true } = {}) {
       : `待避・行き違い ${plan.events.length} 件（計 ${mins} 分）を挿入しました`);
   }
   return plan;
+}
+
+/** 付属編成の発時刻を、相手の列車の時刻（待避・連結作業を含む）にそろえる */
+export function syncCompanions(doc, sts, trains) {
+  store.rev++;
+  for (const t of trains) {
+    if (!isCompanion(doc, t)) continue;
+    const st0 = computeSchedule(doc, sts, t)[0];
+    if (st0 && st0.dep != null) t.departSec = st0.dep;
+  }
 }
 
 /** 挿入した待ち時間をすべて消す */

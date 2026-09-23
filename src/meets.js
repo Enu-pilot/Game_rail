@@ -5,7 +5,7 @@
 //   ・後続の速い列車が追いつく         → 手前の待避可能駅で待避
 // となるよう、発時刻の早い順に貪欲に待ち時間を決める。
 
-import { computeSchedule, stationTracks, trainPlatform, fmtHM } from './timetable.js';
+import { computeSchedule, stationTracks, trainPlatform, fmtHM, isCompanion } from './timetable.js';
 
 /** 種別の優先度（大きいほど優等） */
 const RANK = { ltd: 7, commltd: 6, rapidexp: 5, express: 4, rapid: 3, semi: 2.5, local: 2, deadhead: 1, freight: 0 };
@@ -61,7 +61,8 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   const headway = Math.max(30, opts.headwaySec ?? doc.settings.minHeadwaySec ?? 90);
   const maxHold = Math.max(60, opts.maxHoldSec ?? 20 * 60);
   const reset = opts.reset !== false;
-  const list = trains.slice().sort((a, b) => a.departSec - b.departSec);
+  // 併結している付属編成は相手の列車と一体で走るので、計画の対象から外す
+  const list = trains.filter(t => !isCompanion(doc, t)).sort((a, b) => a.departSec - b.departSec);
   const holds = {};
   const plats = {};
   for (const t of list) {
@@ -271,6 +272,7 @@ export function detectConflicts(doc, line, stations, trains, opts = {}) {
   const headway = Math.max(30, opts.headwaySec ?? doc.settings.minHeadwaySec ?? 90);
   const bySec = new Map();
   for (const t of trains) {
+    if (isCompanion(doc, t)) continue;
     for (const r of sectionRuns(computeSchedule(doc, stations, t), t.id)) {
       if (!bySec.has(r.sec)) bySec.set(r.sec, []);
       bySec.get(r.sec).push({ ...r, train: t });
@@ -343,6 +345,7 @@ export function connections(doc, stations, trains, opts = {}) {
   // 駅ごと・方向ごとにまとめる
   const at = new Map();   // key: `${idx}|${up}` → [{train, stop}]
   for (const t of trains) {
+    if (isCompanion(doc, t)) continue;
     for (const st of stopsOf(t)) {
       if (st.skip) continue;
       const key = `${st.idx}|${t.toIdx < t.fromIdx ? 'up' : 'down'}`;

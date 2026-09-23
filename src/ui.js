@@ -25,6 +25,7 @@ import {
   TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
   platformConflicts, platformDemand, stationTracks, trainPlatform,
   nearbyTracks, fmtHM, parseHM,
+  coupledLeader, companionsOf, coupleIssues, runAroundPoints, runAroundSec, coupleSec, splitSec,
 } from './timetable.js';
 import {
   planMeets, detectConflicts, connections, sectionSingle, canPass, stationTrackCount, holdsSummary,
@@ -1504,6 +1505,34 @@ export function initUI(api) {
               ? `⚠ ${th.name}は ${th.maxCars} 両までです（この列車は ${sel.cars} 両）`
               : `${th.name}へ直通：片道 ${c.km.toFixed(1)}km・${c.min}分。編成は往復＋折返しのあいだ戻ってきません`);
         })(),
+        (() => {
+          // 併結：同じ向きで、この列車の区間を含む列車に付属編成として連結する
+          const dirS = Math.sign(sel.toIdx - sel.fromIdx);
+          const covers = t => {
+            const lo = Math.min(t.fromIdx, t.toIdx), hi = Math.max(t.fromIdx, t.toIdx);
+            return Math.sign(t.toIdx - t.fromIdx) === dirS && sel.fromIdx >= lo && sel.fromIdx <= hi && sel.toIdx >= lo && sel.toIdx <= hi;
+          };
+          const cands = trains.filter(t => t.id !== sel.id && !(t.couple && t.couple.withId) && covers(t) &&
+            Math.abs(t.departSec - sel.departSec) < 3 * 3600).sort((a, b) => a.departSec - b.departSec);
+          const L = coupledLeader(doc, sel);
+          if (L && !cands.includes(L)) cands.unshift(L);
+          const mine = companionsOf(doc, sel.id);
+          return h('div', {},
+            field('併結する列車（付属編成として連結）', selectInput(`tr.${sel.id}.couple`, L ? L.id : '',
+              [{ value: '', label: '— 単独で走る —' },
+                ...cands.map(t => ({ value: t.id, label: `${t.number || '列車'}　${fmtHM(t.departSec)} ${sts[t.fromIdx] ? sts[t.fromIdx].name : '?'}→${sts[t.toIdx] ? sts[t.toIdx].name : '?'}（${t.cars}両）` }))],
+              v => { updateTrain(sel.id, { couple: v ? { withId: v } : null }); emit('diagram'); })),
+            L ? h('p', { class: 'note' }, `${L.number || '列車'} に連結して走ります（時刻は ${L.number || '列車'} に従います）。` +
+              `${sel.fromIdx !== L.fromIdx ? `${sts[sel.fromIdx].name}で連結、` : ''}${sel.toIdx !== L.toIdx ? `${sts[sel.toIdx].name}で切り離し` : ''}`) : null,
+            mine.length ? h('p', { class: 'note' }, `付属編成：${mine.map(c => `${c.number || '列車'}（${c.cars}両）`).join('・')}　合計 ${(sel.cars || 0) + mine.reduce((a, c) => a + (c.cars || 0), 0)} 両`) : null);
+        })(),
+        h('div', { class: 'checkline' },
+          (() => {
+            const i = h('input', { type: 'checkbox', checked: !!sel.loco });
+            i.addEventListener('change', () => { updateTrain(sel.id, { loco: i.checked }); emit('diagram'); });
+            return i;
+          })(),
+          h('span', {}, '機関車牽引（折り返す駅で機回しが要る）')),
         h('div', { class: 'checkline' },
           (() => {
             const i = h('input', { type: 'checkbox', checked: !!sel.toDepot });
@@ -1586,7 +1615,10 @@ export function initUI(api) {
 
     // 運転整理（行き違い・待避）
     if (trains.length) {
-      const plan = planMeets(doc, line, sts, trains);
+      if (planCache.rev !== store.rev || planCache.lineId !== line.id || planCache.doc !== doc) {
+        planCache = { rev: store.rev, lineId: line.id, doc, plan: planMeets(doc, line, sts, trains) };
+      }
+      const plan = planCache.plan;
       const cur = holdsSummary(trains);
       const issues2 = detectConflicts(doc, line, sts, trains);
       const planned = Math.round(plan.events.reduce((a, e) => a + e.wait, 0) / 60);
@@ -1643,6 +1675,7 @@ export function initUI(api) {
             h('p', { class: 'note' }, '普通から優等列車に乗り換えると終着まで何分早いかを出しています。待避のときに接続が取れていると、待避は「待たされる」だけでなく「速く着く」手段になります。'))
           : h('p', { class: 'note' }, '優等列車（快速・急行・特急）を普通列車の少しあとに設定し、待避のある駅で追い越させると接続が生まれます。'),
       ));
+      out.push(buildCoupleCard(doc, line, sts, trains, dg));
     }
 
     // 配線との整合（番線数・留置本数）
@@ -1691,7 +1724,54 @@ export function initUI(api) {
     return out;
   }
 
+  /** 連結・分離（併結）と機回しのまとめ */
+  function buildCoupleCard(doc, line, sts, trains, dg) {
+    const comps = trains.filter(t => coupledLeader(doc, t));
+    const ra = runAroundPoints(doc, sts, trains);
+    const issues = coupleIssues(doc, line, sts, trains);
+    const nm = t => t.number || '列車';
+    const stn = i => (sts[i] ? sts[i].name : '?');
+    const pick = id => () => { dg.selected = id; emit('diagram'); };
+    return h('div', { class: 'card' },
+      h('h4', {}, '連結・分離・機回し', h('span', { class: 'tag' }, `併結 ${comps.length} 本・機回し ${ra.reduce((a, r) => a + r.count, 0)} 回`)),
+      comps.length
+        ? h('div', {},
+          ...comps.slice(0, 12).map(c => {
+            const L = coupledLeader(doc, c);
+            const joinMid = c.fromIdx !== L.fromIdx, splitMid = c.toIdx !== L.toIdx;
+            return h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${trainType(L.type).color}` }),
+              h('span', { class: 'nm', style: 'cursor:pointer', onclick: pick(c.id) }, `${nm(L)}＋${nm(c)}`,
+                h('small', { class: 'desc' },
+                  `${joinMid ? `${stn(c.fromIdx)}で連結` : `${stn(c.fromIdx)}から併結`}・${splitMid ? `${stn(c.toIdx)}で切り離し` : `${stn(c.toIdx)}まで併結`}`)),
+              h('span', { class: 'num' }, `${(L.cars || 0) + companionsOf(doc, L.id).reduce((a, x) => a + (x.cars || 0), 0)}両`));
+          }),
+          comps.length > 12 ? h('p', { class: 'note' }, `ほか ${comps.length - 12} 本`) : null)
+        : null,
+      ra.length
+        ? h('div', { style: 'margin-top:6px' },
+          h('div', { class: 'kv' }, h('span', {}, '機関車牽引の折返し駅'), h('b', {}, `機回し ${Math.round(runAroundSec(doc) / 60)}分`)),
+          ...ra.map(r => h('div', { class: 'listrow' },
+            h('span', { class: 'dot', style: `background:${r.ok ? '#3ddc84' : '#ff5f56'}` }),
+            h('span', { class: 'nm', style: 'white-space:normal' }, r.name,
+              h('small', { class: 'desc' }, r.ok
+                ? `機回しできます${r.turntable ? '・転車台で機関車の向きも変えられます' : ''}`
+                : '⚠ 機回しできません（両端のつながった線が2本以上か、機回し線が要ります）')),
+            h('span', { class: 'num' }, `${r.count}回`))))
+        : null,
+      issues.length
+        ? h('div', { style: 'margin-top:6px' }, ...issues.slice(0, 8).map(i => h('div', { class: 'listrow' },
+          h('span', { class: 'dot', style: `background:${i.level === 'error' ? '#ff5f56' : '#ffb020'}` }),
+          h('span', { class: 'nm', style: 'white-space:normal', onclick: pick(i.train.id) }, i.message))))
+        : null,
+      h('p', { class: 'note' },
+        `列車の設定で「併結する列車」を選ぶと、付属編成としてその列車に連結して走ります（時刻は相手に従います）。途中駅での連結は ${Math.round(coupleSec(doc) / 60)} 分、切り離しは ${Math.round(splitSec(doc) / 60)} 分の作業時間を相手の列車の停車に加えます。` +
+        '「機関車牽引」の列車は、折り返す駅で機関車を反対側へ付け替える機回しが要ります。運用はその時間を空けてつながれ、機回しできない駅では折り返せません。'),
+    );
+  }
+
   function ui_showSim() { showTab('right', 'sim'); }
+  let planCache = { rev: -1, lineId: null, doc: null, plan: null };
 
   /* ---------------- 運用（車両運用と検査） ---------------- */
   let dutyCache = { rev: -1, data: null };

@@ -10,6 +10,7 @@ export const TRACK_KINDS = [
   { id: 'entryexit',   name: '入出区線',            color: '#b98cff', stabling: false, desc: '入出区兼用の線路' },
   { id: 'stabling',    name: '留置線',              color: '#4f8cff', stabling: true,  desc: '車両を留置するための線路' },
   { id: 'shunting',    name: '引上線（入換線）',    color: '#9aa4bb', stabling: true,  desc: '入換のために引上げる線路' },
+  { id: 'runaround',   name: '機回し線',            color: '#8fd0a0', stabling: false, desc: '機関車を列車の反対側へ付け替えるための線路' },
   { id: 'washing',     name: '洗浄線',              color: '#2bd4a4', stabling: true,  desc: '車両を洗浄するための線路' },
   { id: 'mow',         name: '保守用車基地',        color: '#c8a24a', stabling: true,  desc: '各種保守用車のための線路' },
   { id: 'testrun',     name: '試運転線',            color: '#ff8fd0', stabling: true,  desc: '車両の試運転に用いる線路' },

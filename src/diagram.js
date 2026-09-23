@@ -3,7 +3,7 @@
 import { store, emit, snapshot, commit, setMessage } from './store.js';
 import { getGraph } from './topology.js';
 import {
-  lineStations, computeSchedule, trainPolyline, trainType, fmtHM,
+  lineStations, computeSchedule, trainPolyline, trainType, fmtHM, coupledLeader,
 } from './timetable.js';
 import { detectConflicts, sectionSingle, canPass } from './meets.js';
 import { operatorOf, selfOperator } from './operators.js';
@@ -132,10 +132,17 @@ export function initDiagram(canvas, stage) {
       }
     }
 
-    // スジ
+    // スジ（枠の外にははみ出さない。列車番号の分だけ上下に余裕を残す）
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(PAD.left, PAD.top - 16, W - PAD.left - PAD.right, H - PAD.top - PAD.bottom + 32);
+    ctx.clip();
     for (const tr of trains) {
       const stops = computeSchedule(doc, stations, tr);
-      const pts = trainPolyline(stops).map(p => ({ x: xOf(p.t), y: yOf(p.km) }));
+      // 付属編成（併結）は相手のスジに沿わせて少しずらした破線で描く
+      const leader = coupledLeader(doc, tr);
+      const shift = leader && leader.lineId === tr.lineId ? 3 : 0;
+      const pts = trainPolyline(stops).map(p => ({ x: xOf(p.t) + shift, y: yOf(p.km) }));
       if (pts.length < 2) continue;
       const tt = trainType(tr.type);
       const sel = d().selected === tr.id;
@@ -145,10 +152,19 @@ export function initDiagram(canvas, stage) {
       ctx.strokeStyle = stroke;
       ctx.lineWidth = sel ? 3.2 : 1.8;
       ctx.globalAlpha = sel ? 1 : .92;
+      if (shift) ctx.setLineDash([6, 3]);
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
+      ctx.setLineDash([]);
+      if (shift) {
+        // 途中駅での連結・切り離しに印
+        if (tr.fromIdx !== leader.fromIdx) diagMark(ctx, pts[0], '併', stroke);
+        if (tr.toIdx !== leader.toIdx) diagMark(ctx, pts[pts.length - 1], '分', stroke);
+      }
+      // 機関車牽引の列車は、折り返す終着駅で機回し
+      if (tr.loco && !tr.toDepot && !tr.throughId) diagMark(ctx, pts[pts.length - 1], '機', stroke);
       if (sel) {
         ctx.fillStyle = stroke;
         for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); }
@@ -199,6 +215,7 @@ export function initDiagram(canvas, stage) {
       }
       ctx.globalAlpha = 1;
     }
+    ctx.restore();
 
     // 競合の表示
     const issues = detectConflicts(doc, line, stations, trains);
@@ -217,6 +234,19 @@ export function initDiagram(canvas, stage) {
     ctx.strokeStyle = '#2c3344';
     ctx.lineWidth = 1;
     ctx.strokeRect(PAD.left + .5, PAD.top + .5, W - PAD.left - PAD.right, H - PAD.top - PAD.bottom);
+  }
+
+  /** スジの端に付ける小さな丸印（併＝連結、分＝切り離し、機＝機回し） */
+  function diagMark(ctx, p, text, color) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#10141c'; ctx.strokeStyle = color; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = `700 9px ${FONT}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, p.x, p.y + .5);
+    ctx.restore();
   }
 
   /* ---------- 当たり判定 ---------- */
@@ -252,7 +282,9 @@ export function initDiagram(canvas, stage) {
     if (tr && e.button === 0) {
       d().selected = tr.id;
       snapshot();
-      drag = { type: 'train', train: tr, x0: p.x, dep0: tr.departSec, moved: false };
+      // 付属編成をつかんだときは、相手の列車ごと動かす
+      const mover = coupledLeader(store.doc, tr) || tr;
+      drag = { type: 'train', train: mover, x0: p.x, dep0: mover.departSec, moved: false };
       emit('diagram');
       invalidate();
       return;

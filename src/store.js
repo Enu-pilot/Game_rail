@@ -61,6 +61,9 @@ export function defaultSettings() {
     targetYears: 10,        // 目標年数
     decelMs2: 0.9,          // 減速度[m/s^2]
     reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
+    coupleMinutes: 3,       // 途中駅での連結作業[分]
+    splitMinutes: 2,        // 途中駅での切り離し作業[分]
+    runAroundMinutes: 10,   // 機回し（機関車の付け替え）[分]
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
     minHeadwaySec: 90,      // 同一方向の最小運転時隔[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
@@ -278,6 +281,9 @@ export function migrate(doc) {
     operatorId: t.operatorId || null,      // 担当する事業者（他社車両の列車）
     color: t.color || null,
     formationId: t.formationId || null,
+    // 併結：withId の列車に付属編成として連結して走る（始発で連結・終着で切り離し）
+    couple: t.couple && t.couple.withId ? { withId: t.couple.withId } : null,
+    loco: !!t.loco,                        // 機関車牽引（折返しに機回しが必要）
     note: t.note || '',
   }));
   d.company = doc.company && typeof doc.company === 'object' ? {

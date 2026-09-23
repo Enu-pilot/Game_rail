@@ -4,7 +4,7 @@
 // 運用ごとに編成を充当する。編成には走行キロと経過日数が溜まり、
 // 仕業検査・交番検査・重要部検査・全般検査の期限が来ると検修線に入れる必要がある。
 
-import { computeSchedule, stationName, nearbyTracks } from './timetable.js';
+import { computeSchedule, stationName, nearbyTracks, canRunAround, runAroundSec, isCompanion } from './timetable.js';
 import { trackKind } from './catalog.js';
 import { formationCars } from './store.js';
 import {
@@ -46,7 +46,12 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
   const maxIdle = opts.maxIdleSec ?? 4 * 3600;
   const self = selfOperator(doc);
   const selfId = self ? self.id : null;
-  const list = trains.slice().sort((a, b) => a.departSec - b.departSec);
+  // 発時刻は時刻表から取る（併結する付属編成は相手の列車の時刻で走る）
+  const depOf = new Map(trains.map(t => {
+    const st0 = computeSchedule(doc, stations, t)[0];
+    return [t.id, st0 && st0.dep != null ? st0.dep : t.departSec];
+  }));
+  const list = trains.slice().sort((a, b) => depOf.get(a.id) - depOf.get(b.id));
   const rosters = [];
   /** 直通に出ている間、編成は戻ってこない（往復＋折返し） */
   const awaySec = t => {
@@ -62,21 +67,30 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
     const op = t.operatorId || selfId;
     let best = null;
     const treq = trainRequirement(doc, line, t);
+    let bestRA = false;
     for (const r of rosters) {
       if (r.lastIdx !== t.fromIdx) continue;
       if (r.toDepot) continue;                       // 入庫した運用にはつながない
       if ((r.operatorId || selfId) !== op) continue; // 他社の車両とはつながない
       // 1運用は1編成が通しで担当するので、両数と乗入れ制限が両立しない列車はつなげない
       if (Math.max(r.cars, t.cars || 1) > Math.min(r.reqMaxCars, treq.maxCars)) continue;
-      const gap = t.departSec - r.lastArr;
-      if (gap < r.needGap || gap > maxIdle + r.needGap) continue;
+      // 機関車牽引の列車は機関車牽引どうしでつなぐ。折り返すときは機回しが要る
+      const prev = r.trains[r.trains.length - 1];
+      if (!!prev.loco !== !!t.loco) continue;
+      const reverse = Math.sign(prev.toIdx - prev.fromIdx) !== Math.sign(t.toIdx - t.fromIdx);
+      const ra = !!t.loco && reverse;
+      if (ra && !canRunAround(doc, stations[t.fromIdx])) continue;
+      const need = r.needGap + (ra ? runAroundSec(doc) : 0);
+      const gap = depOf.get(t.id) - r.lastArr;
+      if (gap < need || gap > maxIdle + need) continue;
       // 先着順（いちばん長く待っている運用から使う）＝必要編成数が最小になる
-      if (!best || r.lastArr < best.lastArr) best = r;
+      if (!best || r.lastArr < best.lastArr) { best = r; bestRA = ra; }
     }
     if (best) {
+      if (bestRA) best.runArounds.push({ idx: t.fromIdx, name: stations[t.fromIdx] ? stations[t.fromIdx].name : '?', at: depOf.get(t.id) });
       best.trains.push(t);
       best.lastIdx = t.toIdx;
-      best.lastArr = arr.arr ?? arr.dep ?? t.departSec;
+      best.lastArr = arr.arr ?? arr.dep ?? depOf.get(t.id);
       best.distance += dist + awayKm(t) * 1000;
       best.toDepot = !!t.toDepot;
       best.end = best.lastArr + awaySec(t);
@@ -92,8 +106,8 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
         no: rosters.length + 1,
         trains: [t], cars: t.cars || 1,
         lastIdx: t.toIdx,
-        lastArr: arr.arr ?? arr.dep ?? t.departSec,
-        start: t.departSec, end: (arr.arr ?? t.departSec) + awaySec(t),
+        lastArr: arr.arr ?? arr.dep ?? depOf.get(t.id),
+        start: depOf.get(t.id), end: (arr.arr ?? depOf.get(t.id)) + awaySec(t),
         startIdx: t.fromIdx,
         distance: dist + awayKm(t) * 1000,
         toDepot: !!t.toDepot,
@@ -101,6 +115,8 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
         needGap: minTurn + awaySec(t),
         throughIds: new Set(t.throughId ? [t.throughId] : []),
         reqMaxCars: treq.maxCars,
+        runArounds: [],
+        loco: !!t.loco,
       });
     }
   }
@@ -115,6 +131,7 @@ export function buildRosters(doc, line, stations, trains, opts = {}) {
     r.through = r.req.through;
     r.foreign = (r.operatorId || selfId) !== selfId;
     r.operator = operatorOf(doc, r.operatorId);
+    r.coupled = r.trains.filter(t => isCompanion(doc, t)).length;   // 付属編成として併結する列車の数
   }
   return rosters;
 }
