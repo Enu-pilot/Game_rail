@@ -3,7 +3,7 @@
 import { objectDef } from './catalog.js';
 import { distToPolyline, polylineLength } from './geom.js';
 import { formationsOn, formationRangesOn } from './store.js';
-import { nodeRoutes, currentNodeRoute, endType, DEFAULT_MAX_TURN } from './topology.js';
+import { nodeRoutes, currentNodeRoute, endType, DEFAULT_MAX_TURN, crossoverUnits } from './topology.js';
 
 /** 信号機・入換標識のオブジェクトか */
 export const isSignal = o => !!objectDef(o.type).signal;
@@ -66,9 +66,22 @@ export function routeFromLeg(doc, leg, { name, toExt } = {}) {
 
 const overlap = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 1e-6;
 
-/** 2つの進路が同時に構成できるか */
-export function conflictsBetween(r1, r2) {
+/**
+ * 2つの進路が同時に構成できるか。
+ * シーサスクロッシングは2本の渡り線がダイヤモンドで交差するため、
+ * 別々の渡り線を使う進路どうしも同時には構成できない。
+ */
+export function conflictsBetween(r1, r2, units = null) {
   const reasons = [];
+  if (units) {
+    for (const u of units) {
+      if (u.kind !== 'scissors') continue;
+      const ids = u.connectors.map(c => c.id);
+      const a = r1.path.find(p => ids.includes(p.trackId));
+      const b = r2.path.find(p => ids.includes(p.trackId));
+      if (a && b && a.trackId !== b.trackId) reasons.push('シーサスのダイヤモンドを共用');
+    }
+  }
   for (const t1 of r1.turnouts) {
     const t2 = r2.turnouts.find(x => x.objectId === t1.objectId);
     if (t2 && t2.index !== t1.index) reasons.push('転てつ器の開通方向が競合');
@@ -86,11 +99,11 @@ export function conflictsBetween(r1, r2) {
 }
 
 /** 構成済みの進路のうち、与えた進路と競合するもの */
-export function findConflicts(doc, route) {
+export function findConflicts(doc, route, units = null) {
   const out = [];
   for (const r of doc.routes || []) {
     if (!r.set || r.id === route.id) continue;
-    const reasons = conflictsBetween(route, r);
+    const reasons = conflictsBetween(route, r, units);
     if (reasons.length) out.push({ route: r, reasons });
   }
   return out;
@@ -316,7 +329,7 @@ export const ASPECT_SHORT = {
 export function routeStatus(doc, g, route) {
   const aligned = routeAligned(doc, g, route);
   const occupied = routeOccupied(doc, route);
-  const conflicts = route.set ? findConflicts(doc, route) : [];
+  const conflicts = route.set ? findConflicts(doc, route, crossoverUnits(doc, g, g.rev ?? 0)) : [];
   const signal = route.signalId ? doc.objects.find(o => o.id === route.signalId) : null;
   let aspect = 'stop';
   if (route.set && aligned) aspect = signal && isShuntSignal(signal) ? 'shunt' : (occupied.length ? 'caution' : 'proceed');

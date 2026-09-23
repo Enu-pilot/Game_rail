@@ -95,9 +95,12 @@ export const OBJECT_GROUPS = [
       { id: 'turnout_single', name: 'ポイント（片開き）', w: 12, h: 5, color: '#ffe08a', shape: 'turnout', variant: 'single' },
       { id: 'turnout_double', name: 'ポイント（両開き）', w: 12, h: 6, color: '#ffe08a', shape: 'turnout', variant: 'double' },
       { id: 'turnout_three',  name: 'ポイント（三枝）',   w: 12, h: 6, color: '#ffe08a', shape: 'turnout', variant: 'three' },
-      { id: 'scissors',       name: 'シーサスクロッシング', w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'scissors' },
-      { id: 'crossover',      name: '渡り線',            w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'crossover' },
-      { id: 'diamond',        name: 'ダイヤモンドクロッシング', w: 12, h: 8, color: '#ffc04d', shape: 'turnout', variant: 'diamond' },
+      { id: 'diamond',        name: 'ダイヤモンドクロッシング', w: 12, h: 8, color: '#ffc04d', shape: 'turnout', variant: 'diamond', crossing: true, desc: '交差するだけで渡れない平面交差' },
+      { id: 'slip_single',    name: 'シングルスリップ',   w: 18, h: 12, color: '#ffd166', shape: 'turnout', variant: 'slip_single', crossing: true, slip: 1, desc: '片側にトングをもつ交差分岐器（3方向）' },
+      { id: 'slip_double',    name: 'ダブルスリップ',     w: 20, h: 13, color: '#ffd166', shape: 'turnout', variant: 'slip_double', crossing: true, slip: 2, desc: '両側にトングをもつ交差分岐器（4方向）' },
+      // 渡り線・シーサスは2線にまたがる装置なので、点としては置かず線路のつながりから判定する
+      { id: 'scissors',       name: 'シーサスクロッシング', w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'scissors', derived: true },
+      { id: 'crossover',      name: '渡り線',            w: 14, h: 8, color: '#ffe08a', shape: 'turnout', variant: 'crossover', derived: true },
       { id: 'point_machine',  name: '転轍機',            w: 6,  h: 6,  color: '#ff9f43', shape: 'pointmachine' },
       { id: 'signal_start',   name: '出発信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4, onTrack: true, signal: true },
       { id: 'signal_home',    name: '場内信号機',        w: 5,  h: 5,  color: '#ff5f56', shape: 'signal', lamps: 4, onTrack: true, signal: true },
@@ -130,6 +133,7 @@ export const objectDef = id => OBJECT_MAP[id] || { id, name: id, w: 20, h: 20, c
 export const TURNOUT_TYPE_BY_VARIANT = {
   single: 'turnout_single', double: 'turnout_double', three: 'turnout_three',
   scissors: 'scissors', crossover: 'crossover', diamond: 'diamond',
+  slip_single: 'slip_single', slip_double: 'slip_double',
 };
 
 /**

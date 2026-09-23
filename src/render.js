@@ -3,7 +3,7 @@
 import { trackKind, objectDef, vehicleDef } from './catalog.js';
 import { trackLength, trackCapacity, trackUsage, trackCarLength, formationsOn, formationLength, formationVehicles, formationCars, formationRangesOn } from './store.js';
 import { pointAt, subPolyline, polylineLength } from './geom.js';
-import { getGraph, endType, currentNodeRoute } from './topology.js';
+import { getGraph, endType, currentNodeRoute, crossoverUnits } from './topology.js';
 import { signalAspects, signalDetails, ASPECT_COLORS } from './interlocking.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
@@ -56,6 +56,7 @@ export function render(ctx, W, H, doc, ui) {
   if (ui.route && ui.route.path) drawRoute(ctx, cam, doc, ui.route);
   for (const t of doc.tracks) drawTrackEnds(ctx, cam, doc, t);
   if (doc.settings.showJunctions && ui.graphRev !== false) drawJunctions(ctx, cam, doc, ui);
+  if (ui._graph) drawCrossovers(ctx, cam, doc, ui);
   if (doc.settings.showFormations) for (const t of doc.tracks) drawFormations(ctx, cam, doc, t, ui);
   for (const tr of (ui.simTrains || [])) drawMovingTrain(ctx, cam, doc, tr);
   for (const o of above) drawObject(ctx, cam, doc, o, ui);
@@ -718,11 +719,23 @@ function turnoutPath(ctx, w, h, variant, xang) {
     ctx.moveTo(x0, -h / 2); ctx.lineTo(x1, -h / 2);
     ctx.moveTo(x0, h / 2); ctx.lineTo(x1, h / 2);
     ctx.moveTo(x0 + w * .15, -h / 2); ctx.lineTo(x1 - w * .15, h / 2);
-  } else if (variant === 'diamond') {
+  } else if (variant === 'diamond' || variant === 'slip_single' || variant === 'slip_double') {
+    // 斜めに交差する2線。スリップは交差部に曲線の渡りが入る
     const a = Number.isFinite(xang) ? xang : Math.atan2(h, w);
     const L = Math.max(w, h) / 2;
+    const cx = Math.cos(a) * L, cy = Math.sin(a) * L;
     ctx.moveTo(x0, 0); ctx.lineTo(x1, 0);
-    ctx.moveTo(-Math.cos(a) * L, -Math.sin(a) * L); ctx.lineTo(Math.cos(a) * L, Math.sin(a) * L);
+    ctx.moveTo(-cx, -cy); ctx.lineTo(cx, cy);
+    if (variant !== 'diamond') {
+      // スリップは交差部に渡りが入る。ひし形の外形で「トングがある交差」と分かるようにする
+      const k = 0.7;
+      const px = x1 * k, py = Math.max(3, Math.abs(cy) * k);
+      ctx.moveTo(-px, 0); ctx.lineTo(0, -py); ctx.lineTo(px, 0); ctx.lineTo(0, py); ctx.closePath();
+      ctx.moveTo(x0 * k, 0); ctx.quadraticCurveTo(-cx * k * .3, -cy * k * .3, -cx * k, -cy * k);
+      if (variant === 'slip_double') {
+        ctx.moveTo(x1 * k, 0); ctx.quadraticCurveTo(cx * k * .3, cy * k * .3, cx * k, cy * k);
+      }
+    }
   } else { ctx.moveTo(x0 + w * .15, 0); ctx.lineTo(x1, -h / 2); }  // 片開き
 }
 
@@ -742,6 +755,13 @@ function drawTurnout(ctx, w, h, color, variant, xang) {
   if (variant === 'single' || variant === 'double' || variant === 'three') {
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(-w / 2 + w * .15, 0, Math.max(1.6, lw * .8), 0, Math.PI * 2); ctx.fill();
+  } else if (variant === 'slip_single' || variant === 'slip_double') {
+    ctx.fillStyle = color;
+    const r = Math.max(1.4, lw * .7);
+    const spots = variant === 'slip_double'
+      ? [[-w / 2 * .62, 0], [w / 2 * .62, 0]]
+      : [[-w / 2 * .62, 0]];
+    for (const [sx, sy] of spots) { ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill(); }
   }
 }
 
@@ -850,6 +870,59 @@ function drawJunctions(ctx, cam, doc, ui) {
     ctx.strokeStyle = '#7fd1ff';
     ctx.lineWidth = 1.4;
     ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * 渡り線・シーサスクロッシングは2本の線路にまたがる装置なので、
+ * 点ではなく「範囲」として描く（枠＋ダイヤモンドクロッシングの印＋名前）。
+ */
+function drawCrossovers(ctx, cam, doc, ui) {
+  let units;
+  try { units = crossoverUnits(doc, ui._graph, ui.graphRev ?? 0); } catch { return; }
+  if (!units.length || cam.zoom < 0.22) return;
+  ctx.save();
+  for (const u of units) {
+    const pts = u.nodes.map(n => toScreen(cam, n.x, n.y));
+    const pad = Math.max(5, 3.2 * cam.zoom);
+    const x0 = Math.min(...pts.map(p => p.x)) - pad, x1 = Math.max(...pts.map(p => p.x)) + pad;
+    const y0 = Math.min(...pts.map(p => p.y)) - pad, y1 = Math.max(...pts.map(p => p.y)) + pad;
+    const scissors = u.kind === 'scissors';
+    ctx.setLineDash([5, 3]);
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = scissors ? 'rgba(255,224,138,.85)' : 'rgba(255,224,138,.55)';
+    ctx.fillStyle = 'rgba(255,224,138,.06)';
+    const r = Math.min(6, (x1 - x0) / 4);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x0, y0, x1 - x0, y1 - y0, r);
+    else ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.fill(); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // ダイヤモンドクロッシング（渡り線どうしの交差点）
+    if (u.crossing) {
+      const c = toScreen(cam, u.crossing.x, u.crossing.y);
+      const d = Math.max(3.5, 1.6 * cam.zoom);
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y - d); ctx.lineTo(c.x + d, c.y);
+      ctx.lineTo(c.x, c.y + d); ctx.lineTo(c.x - d, c.y);
+      ctx.closePath();
+      ctx.fillStyle = '#ffc04d';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(12,16,22,.9)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    if (cam.zoom >= 0.45) {
+      ctx.font = `${Math.max(9, Math.min(12, 3.4 * cam.zoom))}px ${FONT}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      const label = scissors ? 'シーサス' : '渡り線';
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.85)';
+      ctx.strokeText(label, (x0 + x1) / 2, y0 - 2);
+      ctx.fillStyle = '#ffe08a';
+      ctx.fillText(label, (x0 + x1) / 2, y0 - 2);
+    }
   }
   ctx.restore();
 }

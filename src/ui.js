@@ -9,7 +9,7 @@ import {
   TRACK_KINDS, OBJECT_GROUPS, objectDef, trackKind, FORMATION_COLORS,
   VEHICLE_TYPES, LOCO_TYPES, vehicleDef,
 } from './catalog.js';
-import { getGraph, findRoute, validateLayout, END_TYPES, endType, nodeRoutes, currentNodeRoute } from './topology.js';
+import { getGraph, findRoute, validateLayout, END_TYPES, endType, nodeRoutes, currentNodeRoute, crossoverUnits } from './topology.js';
 import { signalAspects, signalDetails, ASPECT_NAMES, ASPECT_SHORT, ASPECT_COLORS, routeStatus, isSignal } from './interlocking.js';
 import { layoutChecks } from './checks.js';
 import { entryAnalysis, stablingSummary } from './analysis.js';
@@ -212,7 +212,8 @@ export function initUI(api) {
 
     for (const g of OBJECT_GROUPS) {
       if (store.ui.tool === 'place' && g.items.some(i => i.id === store.ui.placeType)) paletteOpen.add(g.id);
-      out.push(paletteGroup(g.id, g.name, g.items.length, g.items.map(it =>
+      const items = g.items.filter(i => !i.derived);
+      out.push(paletteGroup(g.id, g.name, items.length, items.map(it =>
         h('button', {
           class: 'pitem' + (store.ui.tool === 'place' && store.ui.placeType === it.id ? ' active' : ''),
           title: `${it.name}（${it.w}×${it.h}m）${it.onTrack ? ' / 最寄りの線路にスナップ' : ''}`,
@@ -288,7 +289,7 @@ export function initUI(api) {
           'パレット → 線路種別 → クリックで折線を敷設（ダブルクリックで確定）<br>' +
           '構造物はパレットから選んでキャンバスをクリック<br>' +
           '洗車機・検査台などは最寄りの線路に自動スナップします<br>' +
-          '<b>線路が交わる点をクリックすると分岐器を自動設置</b>（向き・開く側は配線から判定。接続のない交差点にはダイヤモンドクロッシング）' }),
+          '<b>線路が交わる点をクリックすると分岐器を自動設置</b>（向き・開く側は配線から判定。接続のない交差点にはダイヤモンドクロッシング。パレットでスリップを選んでから交点をクリックすると、渡れる交差分岐器になります）' }),
       )];
     }
     if (sel.kind === 'track') return buildTrackInspector(findTrack(sel.id));
@@ -418,7 +419,7 @@ export function initUI(api) {
     const def = objectDef(o.type);
     const track = o.trackId ? findTrack(o.trackId) : null;
     const isTurnout = def.shape === 'turnout';
-    const turnoutTypes = OBJECT_GROUPS.flatMap(g => g.items).filter(i => i.shape === 'turnout');
+    const turnoutTypes = OBJECT_GROUPS.flatMap(g => g.items).filter(i => i.shape === 'turnout' && !i.derived);
     const out = [];
     out.push(h('div', { class: 'card' },
       h('h4', {}, def.name, h('span', { class: 'tag' }, isTurnout ? '結節点の記号' : (def.groupName || ''))),
@@ -437,10 +438,18 @@ export function initUI(api) {
       def.shape === 'turntable' ? field('直径（m）', numberInput(`obj.${o.id}.dia`, Math.max(o.w, o.h),
         v => { const d = Math.max(4, v || 25); updateEntity('object', o.id, { w: d, h: d }, { history: false }); }, { min: 4, step: 0.5 })) : null,
       def.shape === 'roundhouse' ? h('p', { class: 'note' }, '幅Wが扇形庫の外径になります。転車台の中心に合わせて配置し、回転で向きを調整してください。') : null,
-      def.variant === 'diamond' ? field('交差角（度）', numberInput(`obj.${o.id}.xang`,
+      def.crossing ? field('交差角（度）', numberInput(`obj.${o.id}.xang`,
         Math.round((o.xang ?? Math.PI / 4) * 180 / Math.PI),
         v => updateEntity('object', o.id, { xang: Math.max(5, Math.min(90, v || 45)) * Math.PI / 180 }, { history: false }),
         { min: 5, max: 90, step: 5 })) : null,
+      def.crossing ? h('p', { class: 'note' }, def.slip
+        ? `${def.name}：交差部で2本の線路がつながります（${def.slip === 2 ? '直進2＋渡り2の4方向' : '直進2＋渡り1の3方向'}）。開通方向は下で切り替えられます。`
+        : 'ダイヤモンドクロッシング：線路は交差するだけでつながりません。渡れるようにするにはスリップに変更してください。') : null,
+      def.slip === 1 ? h('div', { class: 'btn-row' },
+        h('button', {
+          class: 'btn sm', title: 'トングレールを置く側を入れ替えます',
+          onclick: () => updateEntity('object', o.id, { mirror: !o.mirror }),
+        }, '⇅ 渡りの向きを反転')) : null,
       isTurnout ? field('分岐側の制限速度（km/h）', numberInput(`obj.${o.id}.div`, o.divergeSpeedKmh ?? '',
         v => updateEntity('object', o.id, { divergeSpeedKmh: v }, { history: false }),
         { min: 5, step: 5, allowEmpty: true })) : null,
@@ -1005,6 +1014,39 @@ export function initUI(api) {
 
     // 入線効率の解析
     out.push(buildAnalysisCard(doc, g));
+
+    // 分岐器・交差の装置（点で表せないものは装置としてまとめる）
+    {
+      const units = crossoverUnits(doc, g, store.rev);
+      const nm = id => (doc.tracks.find(t => t.id === id) || {}).name || '?';
+      const crossingObjs = doc.objects.filter(o => objectDef(o.type).crossing);
+      const cnt = k => crossingObjs.filter(o => o.type === k).length;
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '分岐器・交差の装置', h('span', { class: 'tag' }, `${units.length + crossingObjs.length} 件`)),
+        units.length
+          ? h('div', {}, ...units.map(u => h('div', {
+            class: 'listrow', style: 'cursor:pointer',
+            onclick: () => { api.focusOn({ x: u.center.x, y: u.center.y, w: 40, h: 40 }); },
+          },
+            h('span', { class: 'dot', style: `background:${u.kind === 'scissors' ? '#ffe08a' : '#ffd166'}` }),
+            h('span', { class: 'nm' }, u.name,
+              h('small', { class: 'desc' }, `${u.trackIds.map(nm).join(' ⇔ ')}／転てつ器 ${u.turnouts}${u.diamonds ? `・ダイヤモンド ${u.diamonds}` : ''}`)),
+            h('span', { class: 'num' }, `${u.length.toFixed(0)}m`))))
+          : null,
+        crossingObjs.length
+          ? h('div', { class: 'kv', style: 'margin-top:4px' },
+            h('span', {}, '交差部の装置'),
+            h('b', {}, [
+              cnt('diamond') ? `ダイヤモンド ${cnt('diamond')}` : '',
+              cnt('slip_single') ? `シングルスリップ ${cnt('slip_single')}` : '',
+              cnt('slip_double') ? `ダブルスリップ ${cnt('slip_double')}` : '',
+            ].filter(Boolean).join('・')))
+          : null,
+        !units.length && !crossingObjs.length
+          ? h('p', { class: 'note' }, '渡り線・シーサスは2本の線路をつなぐ短い線路から自動で判定します。斜めの交差点はクリックしてダイヤモンド／スリップを設置できます。')
+          : h('p', { class: 'note' }, 'シーサスは1点ではなく2線にまたがる装置として扱います（転てつ器4・ダイヤモンド1）。2つの渡り線は同時に使えないため、進路は競合します。'),
+      ));
+    }
 
     // レイアウト検証（接続＋物理チェック）
     const issues = [...validateLayout(doc, g), ...layoutChecks(doc, g, store.rev)];

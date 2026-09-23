@@ -4,7 +4,7 @@ import { store, snapshot, commit, uid, select, setMessage, trackCapacity, trackL
 import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, TURNOUT_TYPE_BY_VARIANT, vehicleDef } from './catalog.js';
 import { distToPolyline, pointAt } from './geom.js';
 import { routeFromLeg, findConflicts, routeAligned } from './interlocking.js';
-import { getGraph } from './topology.js';
+import { getGraph, crossoverUnits } from './topology.js';
 import { lineStations } from './timetable.js';
 import { planMeets } from './meets.js';
 import { buildRosters } from './duty.js';
@@ -73,21 +73,24 @@ export function placeTurnoutFromSpec(spec) {
 }
 
 /** 接続のない交差点にダイヤモンドクロッシングを設置する */
-export function placeCrossingFrom(cross) {
-  const def = objectDef('diamond');
+export function placeCrossingFrom(cross, type = null) {
+  // パレットで交差部の装置（ダイヤモンド／スリップ）を選んでいればそれを置く
+  const chosen = type || (objectDef(store.ui.placeType || '').crossing ? store.ui.placeType : 'diamond');
+  const def = objectDef(chosen);
   let d = normAng(cross.angB - cross.angA);
   if (d > Math.PI / 2) d -= Math.PI;
   if (d < -Math.PI / 2) d += Math.PI;
   snapshot();
   const o = {
-    id: uid('b'), type: 'diamond', x: cross.x, y: cross.y,
+    id: uid('b'), type: chosen, x: cross.x, y: cross.y,
     w: def.w, h: def.h, rot: cross.angA, xang: Math.abs(d),
     mirror: d < 0, label: '', note: '', trackId: null,
   };
   store.doc.objects.push(o);
   store.ui.sel = { kind: 'object', id: o.id };
   commit('add-crossing');
-  setMessage(`ダイヤモンドクロッシングを設置しました（交差角 ${(Math.abs(d) * 180 / Math.PI).toFixed(0)}°）`);
+  setMessage(`${def.name}を設置しました（交差角 ${(Math.abs(d) * 180 / Math.PI).toFixed(0)}°）`
+    + (def.slip ? '。交差部で線路がつながります' : '。交差するだけで線路はつながりません'));
   return o;
 }
 
@@ -172,7 +175,8 @@ export function constructRoute(result, opts = {}) {
   });
   // 先頭の進路だけを構成（競合しなければ）
   const first = created[0];
-  const conflicts = findConflicts(doc, first);
+  const units = crossoverUnits(doc, getGraph(doc, store.rev), store.rev);
+  const conflicts = findConflicts(doc, first, units);
   if (!conflicts.length) {
     first.set = true;
     for (const t of first.turnouts) {
@@ -193,7 +197,7 @@ export function setRouteState(routeId, set) {
   const r = (doc.routes || []).find(x => x.id === routeId);
   if (!r) return { ok: false };
   if (set) {
-    const conflicts = findConflicts(doc, { ...r, set: true });
+    const conflicts = findConflicts(doc, { ...r, set: true }, crossoverUnits(doc, getGraph(doc, store.rev), store.rev));
     if (conflicts.length) {
       setMessage(`進路が競合しています: ${conflicts.map(c => c.route.name).join('・')}`);
       return { ok: false, conflicts };

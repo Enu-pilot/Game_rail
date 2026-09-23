@@ -4,8 +4,9 @@
 //  - 建築限界（線路上空間）を支障する構造物
 //  - 構造物どうしの重なり
 
-import { polylineLength, pointAt, distToPolyline, dist } from './geom.js';
+import { polylineLength, pointAt, distToPolyline, dist, segIntersect } from './geom.js';
 import { objectDef } from './catalog.js';
+import { crossoverUnits } from './topology.js';
 
 export const DEFAULT_MIN_SPACING = 4.0;   // 線路中心間隔の最小値[m]
 export const DEFAULT_CLEARANCE_HALF = 1.9; // 建築限界の片側幅[m]
@@ -60,15 +61,6 @@ function pointInRect(px, py, o, margin = 0) {
 }
 
 /** 線分どうしの交点 */
-function segIntersect(p1, p2, p3, p4) {
-  const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
-  if (Math.abs(d) < 1e-9) return null;
-  const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
-  const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
-  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-  return { x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t };
-}
-
 /** 線路をサンプリングした点列 */
 function samples(t) {
   const len = polylineLength(t.points);
@@ -117,6 +109,7 @@ export function layoutChecks(doc, g, rev) {
 }
 
 function runChecks(doc, g, rev) {
+  const units = g ? crossoverUnits(doc, g, rev) : [];
   const issues = [];
   const minSp = doc.settings.minTrackSpacingM ?? DEFAULT_MIN_SPACING;
   const half = doc.settings.clearanceHalfM ?? DEFAULT_CLEARANCE_HALF;
@@ -141,6 +134,14 @@ function runChecks(doc, g, rev) {
 
       // --- 交差（接続点なし） ---
       const crossed = crossings.find(c => (c.a === A.id && c.b === B.id) || (c.a === B.id && c.b === A.id));
+      // シーサスの渡り線どうしの交差は装置の中のダイヤモンドクロッシングなので支障ではない
+      const inScissors = units.some(u => u.kind === 'scissors'
+        && u.connectors.some(c => c.id === A.id) && u.connectors.some(c => c.id === B.id));
+      if (inScissors) continue;    // 装置の中は離隔・交差の判定から外す
+      // 交差部に装置（ダイヤモンドクロッシング／スリップ）が置かれていれば支障ではない
+      const hasDevice = crossed && doc.objects.some(o =>
+        objectDef(o.type).crossing && dist(o.x, o.y, crossed.x, crossed.y) <= 12);
+      if (crossed && hasDevice) continue;
       if (crossed) {
         issues.push({
           level: 'error', trackId: A.id, x: crossed.x, y: crossed.y,

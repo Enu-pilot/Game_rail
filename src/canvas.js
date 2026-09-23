@@ -198,6 +198,18 @@ export function initCanvas(canvas, stage) {
     }
 
     if (ui.tool === 'place' && ui.placeType) {
+      // 交差部に置く装置（ダイヤモンド／スリップ）は、線路の交点に合わせて設置する
+      if (objectDef(ui.placeType).crossing) {
+        const j2 = hitJunction(p);
+        if (j2 && j2.type === 'crossing') {
+          placeCrossingFrom(j2.cross, ui.placeType);
+          if (!e.shiftKey) { ui.tool = 'select'; ui.placeType = null; }
+          emit('tool'); invalidate(); setCursor(); updateHint();
+          return;
+        }
+        setMessage('斜めに交差している線路の交点をクリックしてください');
+        return;
+      }
       const sn = snapWorld(p, e);
       addObject(ui.placeType, sn.x, sn.y, ui.placeRot || 0);
       if (!e.shiftKey) { ui.tool = 'select'; ui.placeType = null; }
@@ -431,7 +443,7 @@ export function initCanvas(canvas, stage) {
     } else if (ui.tool === 'select' && ui.hoverJunction) {
       h = ui.hoverJunction.exists
         ? 'この交点には分岐器が設置済みです'
-        : 'クリックすると <b>分岐器（交差なら平面交差）</b> を自動で設置します';
+        : 'クリックすると <b>分岐器</b> を設置します（交差部はパレットでダイヤモンド／スリップを選べます）';
     }
     hintEl.innerHTML = h;
   }

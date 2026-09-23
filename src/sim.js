@@ -4,7 +4,7 @@
 // いずれも区間ごとに進路を構成し、分岐器の転換・信号現示・進路の競合が連動する
 
 import { store, emit, commit, snapshot, uid, setMessage, formationLength } from './store.js';
-import { getGraph, findRoute, trackGaps } from './topology.js';
+import { getGraph, findRoute, trackGaps, crossoverUnits } from './topology.js';
 import { routeFromLeg, findConflicts } from './interlocking.js';
 import { runTimeForPath, speedAt } from './runcurve.js';
 import { lineStations, computeSchedule, trainType, fmtHM, trainPlatform } from './timetable.js';
@@ -221,7 +221,7 @@ function lineRouteFor(mv) {
   if (!leg) return false;
   const route = routeFromLeg(doc, leg, { name: `${mv.name}: ${leg.fromName} → ${leg.toName}` });
   route.temp = true;
-  const conflicts = findConflicts(doc, route);
+  const conflicts = findConflicts(doc, route, crossoverUnits(doc, getGraph(doc, store.rev), store.rev));
   if (conflicts.length) {
     if (mv.phase !== 'waiting') logLine(`${mv.name}：進路待ち（${conflicts.map(c => c.route.name).join('・')}）`, 'warn');
     mv.phase = 'waiting';

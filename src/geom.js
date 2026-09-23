@@ -100,3 +100,24 @@ export function snapAngle(fromX, fromY, toX, toY) {
 }
 
 export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/** 線分どうしの交点（なければ null） */
+export function segIntersect(p1, p2, p3, p4) {
+  const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+  if (Math.abs(d) < 1e-9) return null;
+  const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+  const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t };
+}
+
+/** ポリラインどうしの交点（最初の1点） */
+export function polylineIntersect(a, b) {
+  for (let i = 1; i < a.length; i++) {
+    for (let j = 1; j < b.length; j++) {
+      const x = segIntersect(a[i - 1], a[i], b[j - 1], b[j]);
+      if (x) return x;
+    }
+  }
+  return null;
+}

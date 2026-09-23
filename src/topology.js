@@ -1,6 +1,6 @@
 // 線路の接続関係（トポロジー）の構築・入換経路探索・レイアウト検証
 
-import { polylineLength, pointAt, distToPolyline, dist } from './geom.js';
+import { polylineLength, pointAt, distToPolyline, dist, polylineIntersect } from './geom.js';
 import { trackKind, objectDef } from './catalog.js';
 import { trackCapacity, trackUsage, formationLength } from './store.js';
 
@@ -89,6 +89,31 @@ export function buildGraph(doc, tol = JOIN_TOL) {
     }
   }
 
+  // 2.5) スリップ分岐器（シングル／ダブル）は、交差する2線を実際に結ぶ
+  //      ダイヤモンドクロッシングは交差するだけで渡れないので結ばない
+  for (const o of (doc.objects || [])) {
+    const def = objectDef(o.type);
+    if (!def.slip) continue;
+    const near = [];
+    for (const t of tracks) {
+      const r = distToPolyline(o.x, o.y, t.points);
+      if (r.d <= tol * 2.5) near.push({ t, at: r.at, d: r.d });
+    }
+    near.sort((a, b) => a.d - b.d);
+    const pick = [];
+    for (const c of near) { if (!pick.some(p => p.t.id === c.t.id)) pick.push(c); if (pick.length === 2) break; }
+    if (pick.length < 2) continue;
+    const n = addNode(o.x, o.y);
+    for (const c of pick) {
+      const list = attach.get(c.t.id);
+      if (!list) continue;
+      if (!list.some(a => Math.abs(a.at - c.at) <= tol && a.node === n.id)) list.push({ at: c.at, node: n.id });
+    }
+    n.slip = o.id;
+    n.slipKind = def.slip;     // 1=シングル, 2=ダブル
+    n.slipMirror = !!o.mirror; // シングルはどちら側にトングを置くか
+  }
+
   // 3) 区間（エッジ）を生成
   const edges = [];
   for (const t of tracks) {
@@ -121,7 +146,8 @@ export function buildGraph(doc, tol = JOIN_TOL) {
     }
     if (best) {
       best.n.turnout = o.id;
-      best.n.turnoutFixed = def.variant === 'diamond';   // 平面交差は転換しない
+      best.n.turnoutFixed = def.variant === 'diamond';   // 平面交差は転換しない（渡れない）
+      best.n.crossingDef = def.crossing ? def : null;
     }
   }
 
@@ -155,8 +181,10 @@ let _cache = { rev: -1, doc: null, graph: null };
 /** 版数つきのグラフ取得（変更がなければ再利用） */
 export function getGraph(doc, rev) {
   if (_cache.graph && _cache.rev === rev && _cache.doc === doc) return _cache.graph;
-  _cache = { rev, doc, graph: buildGraph(doc) };
-  return _cache.graph;
+  const graph = buildGraph(doc);
+  graph.rev = rev;                 // 装置の検出などでキャッシュ判定に使う
+  _cache = { rev, doc, graph };
+  return graph;
 }
 
 /**
@@ -220,6 +248,9 @@ export function findRoute(doc, g, opts) {
       const out = g.headingOut(e, cur.nodeId);
       const viaTable = !!node.turntable;                          // 転車台はどの向きへも転回できる
       if (!viaTable && angleDiff(arrive, out) > maxTurn) continue;// 急すぎる転向は折返しが必要
+      // 交差部の装置（ダイヤモンド／スリップ）が許す組合せだけ通れる
+      if (node.crossingDef && !nodeRoutes(g, cur.nodeId, maxTurnDeg)
+        .some(r => (r.a === cur.edgeId && r.b === eid) || (r.a === eid && r.b === cur.edgeId))) continue;
       if (respectPositions && !passable(doc, g, cur.nodeId, cur.edgeId, eid)) continue;
       const nid = g.other(e, cur.nodeId);
       const turns = cur.turns + (viaTable && angleDiff(arrive, out) > 1e-3 ? 1 : 0);
@@ -481,7 +512,23 @@ export function nodeRoutes(g, nodeId, maxTurnDeg) {
     }
   }
   list.sort((x, y) => x.turn - y.turn);
-  return list.map((r, i) => ({ ...r, index: i, name: i === 0 ? '定位' : (list.length === 2 ? '反位' : `反位${i}`) }));
+
+  // 交差部に置く装置は、種類によって渡れる組合せが決まる
+  //   ダイヤモンドクロッシング … 直進のみ（渡れない）
+  //   シングルスリップ        … 直進＋片側の渡り
+  //   ダブルスリップ          … 直進＋両側の渡り
+  const cd = node.crossingDef;
+  let picked = list;
+  if (cd) {
+    const sameTrack = r => g.edgeById.get(r.a).trackId === g.edgeById.get(r.b).trackId;
+    const straight = list.filter(sameTrack);
+    const cross = list.filter(r => !sameTrack(r));
+    if (cd.variant === 'diamond') picked = straight;
+    else if (cd.slip === 1) picked = [...straight, ...cross.slice(node.slipMirror ? 1 : 0, node.slipMirror ? 2 : 1)];
+    else picked = [...straight, ...cross];
+  }
+  const label = (i, n) => (i === 0 ? '定位' : (n === 2 ? '反位' : `反位${i}`));
+  return picked.map((r, i) => ({ ...r, index: i, name: label(i, picked.length) }));
 }
 
 /** その接続点でいま開通している進路（分岐器がなければ null） */
@@ -502,7 +549,10 @@ export function passable(doc, g, nodeId, edgeIdA, edgeIdB) {
   if (!node) return false;
   if (node.turntable) return true;
   if (!node.turnout) return true;                 // 分岐器が置かれていなければ角度判定のみ
-  if (node.turnoutFixed) return true;             // 平面交差は常時開通
+  if (node.turnoutFixed) {                        // 平面交差は転換しないが、渡ることもできない
+    const routes = nodeRoutes(g, nodeId, doc.settings.maxTurnDeg);
+    return routes.some(r => (r.a === edgeIdA && r.b === edgeIdB) || (r.a === edgeIdB && r.b === edgeIdA));
+  }
   const cur = currentNodeRoute(doc, g, nodeId);
   if (!cur || !cur.route) return true;
   const { a, b } = cur.route;
@@ -544,11 +594,137 @@ export function turnoutSpecAt(doc, g, nodeId) {
   if (Math.cos(div.ang - cand[1].ang) > Math.cos(div.ang - cand[0].ang)) base = cand[1];
 
   const delta = norm(div.ang - base.ang);
-  const variant = list.length >= 4 ? 'scissors' : (branches.length >= 2 ? 'three' : 'single');
+
+  // 種類の判定
+  //  ・ほぼ直線の組が2組ある4枝 → 平面交差（ダイヤモンドクロッシング）
+  //  ・分岐が2方向以上 → 三枝（複分岐）
+  //  ・基準線から左右へ同じだけ開く → 両開き、片側だけ → 片開き
+  //  シーサスクロッシングは1点では表せないので、ここでは判定しない（crossoverUnits で装置として扱う）
+  let variant;
+  const straightPairs = [];
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      if (Math.abs(Math.PI - angleDiff(list[i].ang, list[j].ang)) < 0.25) straightPairs.push([i, j]);
+    }
+  }
+  const disjoint = straightPairs.some(([a1, b1]) =>
+    straightPairs.some(([a2, b2]) => ![a1, b1].includes(a2) && ![a1, b1].includes(b2)));
+  if (list.length >= 4 && disjoint && branches.length >= 2) variant = 'diamond';
+  else if (branches.length >= 2) variant = 'three';
+  else {
+    // 基準線そのものが直線でなく、分岐と左右対称なら両開き
+    const straight = Math.abs(Math.PI - angleDiff(cand[0].ang, cand[1].ang));
+    const other = base === cand[0] ? cand[1] : cand[0];
+    const otherDelta = norm(other.ang - base.ang);
+    variant = (straight > 0.12 && Math.abs(Math.abs(otherDelta) - Math.abs(delta)) < 0.12) ? 'double' : 'single';
+  }
   return {
     variant, rot: base.ang, mirror: delta > 0,
     x: node.x, y: node.y, branches: branches.length, nodeId,
   };
+}
+
+/* ---------------- 渡り線・シーサスクロッシング（2線にまたがる装置） ---------------- */
+
+/**
+ * 渡り線は「2本の線路を結ぶ短い連結線」で、両端の2つの転てつ器が1組の装置になる。
+ * シーサスクロッシングは、同じ2線の間で互いに交差する渡り線2本＝転てつ器4・ダイヤモンド1。
+ * どちらも1点では表せないので、線路のつながりから装置として組み立てる。
+ */
+function detectCrossovers(doc, g, opts = {}) {
+  const maxLen = opts.maxLengthM ?? 140;        // これより長いものは連絡線とみなす
+  const parallelTol = opts.parallelTol ?? 0.5;  // 取り付く2線の平行とみなす角度差[rad]
+  const byId = new Map(doc.tracks.map(t => [t.id, t]));
+  const nodeAt = (x, y) => g.nodes.find(n => dist(n.x, n.y, x, y) <= g.tol + 0.5);
+  const conns = [];
+
+  for (const c of doc.tracks) {
+    if (!c.points || c.points.length < 2) continue;
+    const len = polylineLength(c.points);
+    if (len > maxLen) continue;
+    const n0 = nodeAt(c.points[0].x, c.points[0].y);
+    const n1 = nodeAt(c.points[c.points.length - 1].x, c.points[c.points.length - 1].y);
+    if (!n0 || !n1 || n0.id === n1.id) continue;
+    const others = n => [...new Set(n.edges.map(eid => g.edgeById.get(eid).trackId))].filter(id => id !== c.id);
+    const A = others(n0), B = others(n1);
+    if (!A.length || !B.length) continue;
+    // 両端がそれぞれ別の線路に取り付いていること
+    const pair = [];
+    for (const a of A) for (const b of B) if (a !== b) pair.push([a, b]);
+    if (!pair.length) continue;
+    const [aId, bId] = pair[0];
+    const ta = byId.get(aId), tb = byId.get(bId);
+    if (!ta || !tb) continue;
+    // 取り付く2線がほぼ平行（＝隣り合う線路）であること
+    const angA = pointAt(ta.points, distToPolyline(n0.x, n0.y, ta.points).at).angle;
+    const angB = pointAt(tb.points, distToPolyline(n1.x, n1.y, tb.points).at).angle;
+    const d = angleDiff(angA, angB);
+    if (Math.min(d, Math.PI - d) > parallelTol) continue;
+    conns.push({
+      track: c, length: len, nodes: [n0, n1], trackIds: [aId, bId],
+      key: [aId, bId].slice().sort().join('|'),
+      mid: pointAt(c.points, len / 2),
+    });
+  }
+
+  // 同じ2線を結ぶ渡り線どうしが交差していればシーサス
+  const units = [];
+  const used = new Set();
+  for (let i = 0; i < conns.length; i++) {
+    if (used.has(conns[i].track.id)) continue;
+    let mate = null, cross = null;
+    for (let j = i + 1; j < conns.length; j++) {
+      if (used.has(conns[j].track.id) || conns[i].key !== conns[j].key) continue;
+      const x = polylineIntersect(conns[i].track.points, conns[j].track.points);
+      if (x) { mate = conns[j]; cross = x; break; }
+    }
+    if (mate) {
+      used.add(conns[i].track.id); used.add(mate.track.id);
+      const nodes = [...conns[i].nodes, ...mate.nodes];
+      units.push({
+        kind: 'scissors', name: 'シーサスクロッシング',
+        trackIds: conns[i].trackIds, connectors: [conns[i].track, mate.track],
+        nodes, nodeIds: nodes.map(n => n.id),
+        crossing: cross,
+        turnouts: 4, diamonds: 1,
+        center: { x: nodes.reduce((a, n) => a + n.x, 0) / nodes.length, y: nodes.reduce((a, n) => a + n.y, 0) / nodes.length },
+        length: Math.max(conns[i].length, mate.length),
+      });
+    } else {
+      used.add(conns[i].track.id);
+      const nodes = conns[i].nodes;
+      units.push({
+        kind: 'crossover', name: '片渡り線',
+        trackIds: conns[i].trackIds, connectors: [conns[i].track],
+        nodes, nodeIds: nodes.map(n => n.id),
+        crossing: null,
+        turnouts: 2, diamonds: 0,
+        center: { x: (nodes[0].x + nodes[1].x) / 2, y: (nodes[0].y + nodes[1].y) / 2 },
+        length: conns[i].length,
+      });
+    }
+  }
+  return units;
+}
+
+let _coCache = { rev: -1, doc: null, list: null };
+
+/** 渡り線・シーサスの一覧（版数が同じなら再利用） */
+export function crossoverUnits(doc, g, rev = 0) {
+  if (_coCache.list && _coCache.rev === rev && _coCache.doc === doc) return _coCache.list;
+  const list = detectCrossovers(doc, g);
+  _coCache = { rev, doc, list };
+  return list;
+}
+
+/** その線路が渡り線・シーサスの一部なら、その装置を返す */
+export function crossoverOfTrack(doc, g, rev, trackId) {
+  return crossoverUnits(doc, g, rev).find(u => u.connectors.some(c => c.id === trackId)) || null;
+}
+
+/** その接続点が属する装置 */
+export function crossoverOfNode(doc, g, rev, nodeId) {
+  return crossoverUnits(doc, g, rev).find(u => u.nodeIds.includes(nodeId)) || null;
 }
 
 /** 接続点（2線以上が集まる点）の一覧 */
