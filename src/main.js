@@ -5,7 +5,7 @@ import { initCanvas } from './canvas.js';
 import { initDiagram } from './diagram.js';
 import { initUI } from './ui.js';
 import { exportJSON, importJSON, exportPNG } from './io.js';
-import { deleteSelected, duplicateSelected } from './actions.js';
+import { deleteSelected, duplicateSelected, autoDispatch } from './actions.js';
 import { sampleDoc } from './sample.js';
 
 const canvas = document.getElementById('board');
@@ -43,12 +43,13 @@ store.ui.mode = 'layout';
 /* ---- 初期ドキュメント ---- */
 // 起動時は本線を除いた範囲（＝車両基地まわり）に合わせる
 const initialFit = () => api.fitAll({ excludeKinds: ['main', 'platform'] });
-if (!restoreLocal()) {
+/** サンプルは待避・行き違いを入れた状態で読み込む */
+function loadSample() {
   loadDoc(sampleDoc());
-  setTimeout(initialFit, 0);
-} else {
-  setTimeout(initialFit, 0);
+  for (const l of store.doc.lines) autoDispatch(l.id, { silent: true });
 }
+if (!restoreLocal()) loadSample();
+setTimeout(initialFit, 0);
 emit('init');
 
 /* ---- ツールバー ---- */
@@ -66,7 +67,7 @@ on('btn-zoom-out', () => api.zoomBy(1 / 1.25));
 on('btn-zoom-fit', () => (store.ui.mode === 'diagram' ? diagram.fit() : api.fitAll()));
 on('btn-sample', () => {
   if (!confirm('現在のレイアウトを破棄してサンプル（みどりが丘車両センター）を読み込みますか？')) return;
-  loadDoc(sampleDoc()); api.fitAll(); setMessage('サンプルレイアウトを読み込みました');
+  loadSample(); api.fitAll(); setMessage('サンプルレイアウトを読み込みました');
 });
 on('btn-new', () => {
   if (!confirm('現在のレイアウトを破棄して新規作成しますか？')) return;

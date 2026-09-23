@@ -3,8 +3,9 @@
 import { store, emit, snapshot, commit, setMessage } from './store.js';
 import { getGraph } from './topology.js';
 import {
-  lineStations, computeSchedule, trainPolyline, trainType, fmtHM, timetableConflicts,
+  lineStations, computeSchedule, trainPolyline, trainType, fmtHM,
 } from './timetable.js';
+import { detectConflicts, sectionSingle, canPass } from './meets.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
 const PAD = { left: 132, top: 30, right: 24, bottom: 26 };
@@ -95,6 +96,21 @@ export function initDiagram(canvas, stage) {
       }
     }
 
+    // 単線区間の帯
+    for (let i = 0; i < stations.length - 1; i++) {
+      if (!sectionSingle(line, i)) continue;
+      const y1 = yOf(stations[i].km), y2 = yOf(stations[i + 1].km);
+      const top = Math.min(y1, y2), bot = Math.max(y1, y2);
+      if (bot < PAD.top || top > H - PAD.bottom) continue;
+      ctx.fillStyle = 'rgba(255,176,32,.07)';
+      ctx.fillRect(PAD.left, Math.max(PAD.top, top), W - PAD.left - PAD.right,
+        Math.min(H - PAD.bottom, bot) - Math.max(PAD.top, top));
+      ctx.fillStyle = 'rgba(255,176,32,.55)';
+      ctx.font = `10px ${FONT}`;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('単線', PAD.left + 6, (Math.max(PAD.top, top) + Math.min(H - PAD.bottom, bot)) / 2);
+    }
+
     // 駅（横線）
     ctx.textAlign = 'right';
     for (const st of stations) {
@@ -109,6 +125,10 @@ export function initDiagram(canvas, stage) {
       ctx.fillStyle = '#6c7788';
       ctx.font = `10px ${FONT}`;
       ctx.fillText(`${(st.km / 1000).toFixed(2)} km`, PAD.left - 10, y + 12);
+      if (canPass(doc, st)) {   // 行き違い・待避ができる駅
+        ctx.fillStyle = '#8fe06a';
+        ctx.beginPath(); ctx.arc(PAD.left - 4, y, 2.6, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     // スジ
@@ -129,6 +149,22 @@ export function initDiagram(canvas, stage) {
         ctx.fillStyle = tr.color || tt.color;
         for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); }
       }
+      // 待避・行き違いの待ち（停車が長い駅）に印をつける
+      for (const st2 of stops) {
+        if (!st2.hold || st2.arr == null || st2.dep == null) continue;
+        const x1 = xOf(st2.arr), x2 = xOf(st2.dep), yy = yOf(st2.km);
+        if (x2 < PAD.left || x1 > W - PAD.right) continue;
+        ctx.strokeStyle = '#e6eaf3';
+        ctx.lineWidth = sel ? 5 : 3.4;
+        ctx.globalAlpha = .8;
+        if (st2.oper) ctx.setLineDash([4, 3]);     // 運転停車（客扱いなし）は破線
+        ctx.beginPath(); ctx.moveTo(Math.max(PAD.left, x1), yy); ctx.lineTo(Math.min(W - PAD.right, x2), yy); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = sel ? 1 : .92;
+        ctx.lineWidth = sel ? 3.2 : 1.8;
+        ctx.strokeStyle = tr.color || tt.color;
+      }
+
       // 列車番号
       const label = `${tr.number || tr.name || ''}`;
       if (label) {
@@ -147,12 +183,16 @@ export function initDiagram(canvas, stage) {
     }
 
     // 競合の表示
-    const issues = timetableConflicts(doc, line, stations, trains);
+    const issues = detectConflicts(doc, line, stations, trains);
+    ctx.font = `12px ${FONT}`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     if (issues.length) {
       ctx.fillStyle = 'rgba(255,95,86,.9)';
-      ctx.font = `12px ${FONT}`;
-      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-      ctx.fillText(`⚠ ダイヤの競合 ${issues.length} 件（右の一覧を確認）`, PAD.left + 8, H - PAD.bottom + 6);
+      ctx.fillText(`⚠ ダイヤの支障 ${issues.length} 件（右の「行き違い・待避」で自動調整できます）`, PAD.left + 8, H - PAD.bottom + 6);
+    } else {
+      const held = trains.reduce((n, t) => n + (Object.values(t.holds || {}).some(v => +v > 0) ? 1 : 0), 0);
+      ctx.fillStyle = 'rgba(143,224,106,.85)';
+      ctx.fillText(held ? `✓ 支障なし（待避・行き違い ${held} 本）` : '✓ 支障なし', PAD.left + 8, H - PAD.bottom + 6);
     }
 
     // 枠

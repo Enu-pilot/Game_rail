@@ -23,15 +23,19 @@ import {
 } from './company.js';
 import {
   TRAIN_TYPES, trainType, isStation, stationObjects, lineStations, computeSchedule,
-  timetableConflicts, platformConflicts, platformDemand, stationTracks, trainPlatform,
+  platformConflicts, platformDemand, stationTracks, trainPlatform,
   nearbyTracks, fmtHM, parseHM,
 } from './timetable.js';
+import {
+  planMeets, detectConflicts, connections, sectionSingle, canPass, stationTrackCount, holdsSummary,
+} from './meets.js';
 import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
   constructRoute, setRouteState, deleteRoute,
   addLine, updateLine, deleteLine, lineAddStation, lineRemoveStation, lineMoveStation,
   addTrain, updateTrain, deleteTrain, duplicateTrain,
+  autoDispatch, clearHolds,
 } from './actions.js';
 
 /* ---------------- DOM ヘルパ ---------------- */
@@ -1198,9 +1202,9 @@ export function initUI(api) {
       ),
       line ? h('div', { style: 'margin-top:8px' },
         field('路線名', textInput(`line.${line.id}.name`, line.name, v => updateLine(line.id, { name: v }))),
-        field('線路条件', selectInput(`line.${line.id}.dbl`, line.double ? 'double' : 'single',
-          [{ value: 'double', label: '複線（行き違い自由）' }, { value: 'single', label: '単線（行き違い不可）' }],
-          v => updateLine(line.id, { double: v === 'double' }))),
+        field('既定の線路条件', selectInput(`line.${line.id}.dbl`, line.double ? 'double' : 'single',
+          [{ value: 'double', label: '複線（行き違い自由）' }, { value: 'single', label: '単線（1列車のみ）' }],
+          v => updateLine(line.id, { double: v === 'double', secSingle: {} }))),
       ) : null,
     ));
 
@@ -1360,9 +1364,102 @@ export function initUI(api) {
       ));
     }
 
+    // 駅間の線路条件（単線・複線）と交換可能駅
+    if (sts.length > 1) {
+      const secs = [];
+      for (let i = 0; i < sts.length - 1; i++) {
+        const single = sectionSingle(line, i);
+        secs.push(h('div', { class: 'listrow' },
+          h('span', { class: 'dot', style: `background:${single ? '#ffb020' : '#4f8cff'}` }),
+          h('span', { class: 'nm' }, `${sts[i].name}〜${sts[i + 1].name}`,
+            h('small', { class: 'desc' }, `${((sts[i + 1].km - sts[i].km) / 1000).toFixed(2)} km`)),
+          selectInput(`line.${line.id}.sec.${i}`, single ? 'single' : 'double',
+            [{ value: 'double', label: '複線' }, { value: 'single', label: '単線' }],
+            v => {
+              const map = { ...(line.secSingle || {}) };
+              if ((v === 'single') === !line.double) delete map[i]; else map[i] = (v === 'single');
+              updateLine(line.id, { secSingle: map });
+              emit('diagram');
+            }),
+        ));
+      }
+      const passable = sts.filter(s2 => canPass(doc, s2));
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '駅間の線路条件'),
+        ...secs,
+        h('hr', { class: 'sepline' }),
+        h('div', { class: 'kv' }, h('span', {}, '行き違い・待避ができる駅'),
+          h('b', {}, `${passable.length} / ${sts.length} 駅`)),
+        h('p', { class: 'note' }, passable.length
+          ? `${passable.map(s2 => `${s2.name}（${stationTrackCount(doc, s2)}線）`).join('・')}　― 番線が2本以上ある駅で、対向列車との交換や優等列車の待避ができます。`
+          : '番線が2本以上ある駅がありません。配線図で駅に発着線を追加すると、行き違い・待避ができるようになります。'),
+      ));
+    }
+
+    // 運転整理（行き違い・待避）
+    if (trains.length) {
+      const plan = planMeets(doc, line, sts, trains);
+      const cur = holdsSummary(trains);
+      const issues2 = detectConflicts(doc, line, sts, trains);
+      const planned = Math.round(plan.events.reduce((a, e) => a + e.wait, 0) / 60);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '行き違い・待避', h('span', { class: 'tag' }, `いま ${cur.trains} 本が待避中`)),
+        h('div', { class: 'tiles' },
+          h('div', { class: 'tile' }, h('label', {}, 'いまのダイヤの支障'),
+            h('b', { style: `color:${issues2.length ? '#e0344a' : '#2bd4a4'}` }, `${issues2.length} 件`)),
+          h('div', { class: 'tile' }, h('label', {}, '自動調整すると'),
+            h('b', {}, `待ち ${planned} 分 / ${plan.conflicts.length ? `未解決 ${plan.conflicts.length}` : '支障なし'}`)),
+        ),
+        h('div', { class: 'btn-row', style: 'margin-top:6px' },
+          h('button', {
+            class: 'btn sm primary', onclick: () => { autoDispatch(line.id); emit('diagram'); },
+          }, '▶ 行き違い・待避を自動調整'),
+          h('button', {
+            class: 'btn sm', onclick: () => { clearHolds(line.id); emit('diagram'); },
+          }, '待ちを解除'),
+        ),
+        h('p', { class: 'note' }, '単線区間では対向列車が抜けるまで手前の交換可能駅で待ち、複線では優等列車に追いつかれる列車を待避線に入れます。待避する列車の番線も自動で振り替えます。'),
+        plan.events.length
+          ? h('div', { style: 'margin-top:6px' },
+            h('div', { class: 'kv' }, h('span', {}, '計画される待避・行き違い'), h('b', {}, `${plan.events.length} 件`)),
+            ...plan.events.slice(0, 14).map(e => h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${e.kind === 'meet' ? '#ffb020' : e.kind === 'overtake' ? '#8fe06a' : '#9aa4bb'}` }),
+              h('span', { class: 'nm', style: 'cursor:pointer', onclick: () => { dg.selected = e.trainId; emit('diagram'); } },
+                `${e.station}　${e.train.number || '列車'}`,
+                h('small', { class: 'desc' },
+                  `${e.kind === 'meet' ? `${e.other.number} と行き違い` : e.kind === 'overtake' ? `${e.other.number} を待避` : `${e.other.number} の続行待ち`}${e.oper ? '（運転停車）' : ''}`)),
+              h('span', { class: 'num' }, `${(e.wait / 60).toFixed(1)}分`))),
+            plan.events.length > 14 ? h('p', { class: 'note' }, `ほか ${plan.events.length - 14} 件`) : null)
+          : null,
+        plan.conflicts.length
+          ? h('div', { class: 'warnbox', style: 'margin-top:6px' },
+            `⚠ 待避・交換できる駅が足りず、${plan.conflicts.length} 件は解消できません`,
+            h('div', { style: 'margin-top:4px' }, ...plan.conflicts.slice(0, 4).map(c =>
+              h('div', { class: 'note', style: 'white-space:normal' }, '・' + c.message))))
+          : null,
+      ));
+
+      // 緩急接続
+      const conn = connections(doc, sts, trains);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '緩急接続', h('span', { class: 'tag' }, `${conn.length} 組`)),
+        conn.length
+          ? h('div', {},
+            ...conn.slice(0, 12).map(c => h('div', { class: 'listrow' },
+              h('span', { class: 'dot', style: `background:${trainType(c.to.type).color}` }),
+              h('span', { class: 'nm' }, `${c.station}　${c.from.number} → ${c.to.number}`,
+                h('small', { class: 'desc' },
+                  `${fmtHM(c.time)} 発・乗換 ${Math.round(c.wait / 60)}分${c.held ? '（待避中に接続）' : ''}`)),
+              h('span', { class: 'num' }, `−${Math.round(c.saved / 60)}分`))),
+            conn.length > 12 ? h('p', { class: 'note' }, `ほか ${conn.length - 12} 組`) : null,
+            h('p', { class: 'note' }, '普通から優等列車に乗り換えると終着まで何分早いかを出しています。待避のときに接続が取れていると、待避は「待たされる」だけでなく「速く着く」手段になります。'))
+          : h('p', { class: 'note' }, '優等列車（快速・急行・特急）を普通列車の少しあとに設定し、待避のある駅で追い越させると接続が生まれます。'),
+      ));
+    }
+
     // 配線との整合（番線数・留置本数）
-    const demand = platformDemand(doc, sts, trains);
-    const pfIssues = platformConflicts(doc, sts, trains);
+    const demand = platformDemand(doc, line, sts, trains);
+    const pfIssues = platformConflicts(doc, line, sts, trains);
     const stabling = doc.tracks.filter(t => trackKind(t.kind).stabling);
     const inbound = trains.filter(t => t.toDepot);
     const inboundCars = inbound.reduce((s2, t) => s2 + (t.cars || 10), 0);
@@ -1394,7 +1491,7 @@ export function initUI(api) {
         : h('p', { class: 'note' }, '✓ 同じ番線の二重使用はありません'),
     ));
 
-    const issues = timetableConflicts(doc, line, sts, trains);
+    const issues = detectConflicts(doc, line, sts, trains);
     out.push(h('div', { class: 'card' },
       h('h4', {}, 'ダイヤの競合', h('span', { class: 'tag' }, `${issues.length} 件`)),
       issues.length

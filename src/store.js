@@ -36,7 +36,7 @@ export function defaultSettings() {
     fareBase: 140,          // 初乗り運賃[円]
     farePerKm: 14,          // 距離加算[円/km]
     fareCap: 1200,          // 運賃の上限[円]
-    costPerCarKm: 500,      // 運行費（電力・乗務員・検査）[円/車両km]
+    costPerCarKm: 450,      // 運行費（電力・乗務員・検査）[円/車両km]
     costPerCarDay: 20000,   // 車両費（償却・保有）[円/両・日]
     costPerRouteKmDay: 200000,  // 線路・電路の保守[円/km・日]
     costPerStationDay: 250000,  // 駅運営[円/駅・日]
@@ -54,11 +54,12 @@ export function defaultSettings() {
     capexPerDepotTrackOku: 2.5, // 基地・側線[億円/線]
     capexPerBuildingOku: 1.2,   // 建物[億円/棟]
     baseGrowthPct: 0.4,     // 沿線人口の基礎成長率[%/年]
-    targetCashOku: 200,     // 目標の純資産[億円]
+    targetCashOku: 400,     // 目標の純資産[億円]
     targetYears: 10,        // 目標年数
     decelMs2: 0.9,          // 減速度[m/s^2]
     reversalMinutes: 2,     // 折返し1回あたりの所要時間[分]
     liningSeconds: 20,      // 進路構成（転てつ・鎖錠）の所要時間[秒]
+    minHeadwaySec: 90,      // 同一方向の最小運転時隔[秒]
     minTrackSpacingM: 4.0,  // 線路中心間隔の最小値[m]
     clearanceHalfM: 1.9,    // 建築限界の片側幅[m]
   };
@@ -211,7 +212,8 @@ export function migrate(doc) {
     id: l.id || uid('l'),
     name: l.name || '路線',
     color: l.color || '#7fd1ff',
-    double: l.double !== false,          // 複線かどうか
+    double: l.double !== false,          // 既定の線路条件（複線かどうか）
+    secSingle: (l.secSingle && typeof l.secSingle === 'object') ? { ...l.secSingle } : {},  // 駅間ごとの単線指定
     stations: (l.stations || []).map(s2 => (typeof s2 === 'string' ? s2 : s2.objectId)).filter(Boolean),
   }));
   d.trains = (doc.trains || []).map(t => ({
@@ -229,6 +231,7 @@ export function migrate(doc) {
     skip: Array.isArray(t.skip) ? t.skip.slice() : [],
     cars: Number.isFinite(t.cars) ? t.cars : 10,
     platforms: (t.platforms && typeof t.platforms === 'object') ? { ...t.platforms } : {},
+    holds: (t.holds && typeof t.holds === 'object') ? { ...t.holds } : {},   // 駅での運転停車・待避の延長[秒]
     toDepot: !!t.toDepot,
     depotTrackId: t.depotTrackId || null,
     color: t.color || null,

@@ -5,6 +5,8 @@ import { objectDef, trackKind, TRACK_KINDS, FORMATION_COLORS, TURNOUT_TYPE_BY_VA
 import { distToPolyline, pointAt } from './geom.js';
 import { routeFromLeg, findConflicts, routeAligned } from './interlocking.js';
 import { getGraph } from './topology.js';
+import { lineStations } from './timetable.js';
+import { planMeets } from './meets.js';
 
 /** 同一種別の連番から線路名を作る */
 export function suggestTrackName(kindId) {
@@ -433,3 +435,45 @@ export function reverseTrack(id) {
 
 export const TRACK_KIND_OPTIONS = TRACK_KINDS;
 export { select };
+
+/* ---------------- 運転整理（行き違い・待避） ---------------- */
+
+/**
+ * 路線のダイヤに行き違い・待避の待ち時間を入れる。
+ * @returns 計画の結果（待避の一覧・未解決の支障）
+ */
+export function autoDispatch(lineId, { silent = false, reset = true } = {}) {
+  const doc = store.doc;
+  const line = doc.lines.find(l => l.id === lineId);
+  if (!line) return null;
+  const g = getGraph(doc, store.rev);
+  const sts = lineStations(doc, g, line);
+  const trains = doc.trains.filter(t => t.lineId === line.id);
+  if (!trains.length) return null;
+  const plan = planMeets(doc, line, sts, trains, { reset });
+  if (!silent) snapshot();
+  for (const t of trains) {
+    t.holds = plan.holds[t.id] || {};
+    if (plan.platforms[t.id]) t.platforms = plan.platforms[t.id];
+  }
+  commit('dispatch');
+  if (!silent) {
+    const mins = Math.round(Object.values(plan.holds).reduce((s, h) =>
+      s + Object.values(h).reduce((a, v) => a + (+v || 0), 0), 0) / 60);
+    setMessage(plan.conflicts.length
+      ? `待避・行き違い ${plan.events.length} 件（計 ${mins} 分）を挿入。解消できない支障が ${plan.conflicts.length} 件あります`
+      : `待避・行き違い ${plan.events.length} 件（計 ${mins} 分）を挿入しました`);
+  }
+  return plan;
+}
+
+/** 挿入した待ち時間をすべて消す */
+export function clearHolds(lineId) {
+  const doc = store.doc;
+  const trains = doc.trains.filter(t => t.lineId === lineId);
+  if (!trains.length) return;
+  snapshot();
+  for (const t of trains) t.holds = {};
+  commit('dispatch');
+  setMessage('待避・行き違いの待ち時間を解除しました');
+}

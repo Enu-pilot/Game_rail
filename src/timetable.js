@@ -97,7 +97,8 @@ const _schedCache = new Map();
  */
 export function computeSchedule(doc, stations, train) {
   const key = train.id;
-  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}`;
+  const holds = train.holds || {};
+  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
   const hit = _schedCache.get(key);
   if (hit && hit.sig === sig) return hit.stops;
 
@@ -115,6 +116,8 @@ export function computeSchedule(doc, stations, train) {
     return stops;
   }
 
+  const holdAt = i => Math.max(0, +holds[i] || 0);
+  t += holdAt(from);
   stops.push({ idx: from, arr: null, dep: t, skip: false, km: stations[from].km, runKmh: null });
   let segPath = [];
   let segTurnouts = [];
@@ -123,7 +126,9 @@ export function computeSchedule(doc, stations, train) {
     const hop = hopPath(stations, i - step, i);
     if (hop.path) { segPath = segPath.concat(hop.path); segTurnouts = segTurnouts.concat(hop.turnouts); }
     const isEnd = i === to;
-    const skipped = !isEnd && train.skip.includes(i);
+    const hold = holdAt(i);
+    // 待避・行き違いの待ち時間があれば、通過駅でも運転停車になる
+    const skipped = !isEnd && train.skip.includes(i) && hold <= 0;
     if (skipped) { pendingSkips.push(i); continue; }
 
     const run = runTimeForPath(doc, segPath, { trainMax, turnouts: segTurnouts, startKmh: 0, endKmh: 0 });
@@ -139,8 +144,9 @@ export function computeSchedule(doc, stations, train) {
     pendingSkips = [];
     const arr = t;
     if (isEnd) { stops.push({ idx: i, arr, dep: null, skip: false, km: stations[i].km, runKmh: run.vmax }); break; }
-    t += dwell;
-    stops.push({ idx: i, arr, dep: t, skip: false, km: stations[i].km, runKmh: run.vmax });
+    const oper = train.skip.includes(i);          // 客扱いのない運転停車
+    t += (oper ? 0 : dwell) + hold;
+    stops.push({ idx: i, arr, dep: t, skip: false, oper, hold, km: stations[i].km, runKmh: run.vmax });
     segPath = []; segTurnouts = [];
   }
   _schedCache.set(key, { sig, stops });
@@ -155,50 +161,6 @@ export function trainPolyline(stops) {
     if (s.dep != null) pts.push({ t: s.dep, km: s.km });
   }
   return pts;
-}
-
-/** 駅間で列車が占有する時間帯 */
-function sectionRuns(stops) {
-  const runs = [];
-  for (let i = 1; i < stops.length; i++) {
-    const a = stops[i - 1], b = stops[i];
-    const lo = Math.min(a.idx, b.idx), hi = Math.max(a.idx, b.idx);
-    runs.push({ sec: lo, from: a.idx, to: b.idx, start: a.dep ?? a.arr, end: b.arr ?? b.dep, up: b.idx < a.idx });
-  }
-  return runs;
-}
-
-/** ダイヤの競合（単線での行き違い不可・同方向の追い越し）を検出 */
-export function timetableConflicts(doc, line, stations, trains) {
-  const issues = [];
-  const scheds = trains.map(t => ({ train: t, runs: sectionRuns(computeSchedule(doc, stations, t)) }));
-  for (let i = 0; i < scheds.length; i++) {
-    for (let j = i + 1; j < scheds.length; j++) {
-      const A = scheds[i], B = scheds[j];
-      for (const ra of A.runs) {
-        for (const rb of B.runs) {
-          if (ra.sec !== rb.sec) continue;
-          const overlap = Math.min(ra.end, rb.end) - Math.max(ra.start, rb.start);
-          if (overlap <= 0) continue;
-          const opposing = ra.up !== rb.up;
-          if (opposing && !line.double) {
-            issues.push({
-              level: 'error', trains: [A.train, B.train], sec: ra.sec,
-              message: `単線区間「${stations[ra.sec].name}〜${stations[ra.sec + 1] ? stations[ra.sec + 1].name : ''}」で ${A.train.number || A.train.name} と ${B.train.number || B.train.name} が行き違いできません`,
-            });
-          } else if (!opposing) {
-            issues.push({
-              level: 'warn', trains: [A.train, B.train], sec: ra.sec,
-              message: `「${stations[ra.sec].name}〜${stations[ra.sec + 1] ? stations[ra.sec + 1].name : ''}」で ${A.train.number || A.train.name} と ${B.train.number || B.train.name} が同一方向で接近しています（追い越し・続行）`,
-            });
-          }
-        }
-      }
-    }
-  }
-  // 同じ内容の重複をまとめる
-  const seen = new Set();
-  return issues.filter(i => (seen.has(i.message) ? false : (seen.add(i.message), true)));
 }
 
 /** 駅マーカーの近くを通る線路（番線の候補） */
@@ -230,53 +192,95 @@ export function trainPlatform(doc, train, stations, idx) {
 }
 
 /**
- * 番線（発着線）の競合を検出する。
- * 同じ番線を、停車時間（＋続行時隔）が重なる複数の列車が使っていれば支障。
+ * 番線（発着線）の占有を列挙する。
+ *
+ * 複線区間の途中駅で番線が1本しか割り当てられていない場合は、
+ * その1本が上り線・下り線を代表しているとみなし、方向ごとに別の番線として扱う。
+ * 折返し（始発・終着）の列車は方向で分けられないため、同じ番線を奪い合う。
  */
-export function platformConflicts(doc, stations, trains, headwaySec = 60) {
+function platformUses(doc, line, stations, trains, headwaySec) {
+  const dbl = i => !(line && sectionSingleLocal(line, i));
   const uses = [];
   for (const tr of trains) {
     const stops = computeSchedule(doc, stations, tr);
+    const ends = [tr.fromIdx, tr.toIdx];
     for (const st of stops) {
       const trackId = trainPlatform(doc, tr, stations, st.idx);
       if (!trackId) continue;
+      const nTracks = stations[st.idx] && stations[st.idx].object
+        ? stationTracks(doc, stations[st.idx].object).length : 1;
+      const through = !ends.includes(st.idx);
+      // 前後の駅間がどちらも複線なら、上下で別の線路とみなせる
+      const sepDir = through && nTracks <= 1 && dbl(st.idx - 1) && dbl(st.idx);
+      const up = tr.toIdx < tr.fromIdx;
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;
-      uses.push({ train: tr, idx: st.idx, trackId, from: a, to: b, skip: st.skip });
+      uses.push({
+        train: tr, idx: st.idx, trackId, from: a, to: b, skip: st.skip, up,
+        // 同じ線路でも駅が違えば番線の競合ではない（駅間の支障は運転整理で見る）
+        key: `${st.idx}|${trackId}|${sepDir ? (up ? 'up' : 'down') : ''}`,
+      });
     }
   }
+  return uses;
+}
+
+// timetable.js からは meets.js を読み込まない（循環参照を避ける）ため、同じ判定をここにも置く
+function sectionSingleLocal(line, i) {
+  const ov = line.secSingle ? line.secSingle[i] : undefined;
+  if (ov === true || ov === false) return ov;
+  return !line.double;
+}
+
+/**
+ * 番線の競合を検出する。
+ * 同じ番線を、停車時間（＋続行時隔）が重なる複数の列車が使っていれば支障。
+ */
+export function platformConflicts(doc, line, stations, trains, headwaySec = 60) {
+  const uses = platformUses(doc, line, stations, trains, headwaySec);
+  const byKey = new Map();
+  for (const u of uses) {
+    if (!byKey.has(u.key)) byKey.set(u.key, []);
+    byKey.get(u.key).push(u);
+  }
   const issues = [];
-  for (let i = 0; i < uses.length; i++) {
-    for (let j = i + 1; j < uses.length; j++) {
-      const A = uses[i], B = uses[j];
-      if (A.trackId !== B.trackId || A.train.id === B.train.id) continue;
-      if (Math.min(A.to, B.to) - Math.max(A.from, B.from) <= 0) continue;
-      const tr = doc.tracks.find(t => t.id === A.trackId);
-      issues.push({
-        level: 'error',
-        message: `${stations[A.idx] ? stations[A.idx].name : ''}「${tr ? tr.name : '番線'}」を ${A.train.number} と ${B.train.number} が同時に使用します（${fmtHM(Math.max(A.from, B.from))}頃）`,
-        trackId: A.trackId, trains: [A.train, B.train],
-      });
+  for (const list of byKey.values()) {
+    list.sort((a, b) => a.from - b.from);
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const A = list[i], B = list[j];
+        if (B.from >= A.to) break;
+        if (A.train.id === B.train.id) continue;
+        const tr = doc.tracks.find(t => t.id === A.trackId);
+        issues.push({
+          level: 'error',
+          message: `${stations[A.idx] ? stations[A.idx].name : ''}「${tr ? tr.name : '番線'}」を ${A.train.number} と ${B.train.number} が同時に使用します（${fmtHM(Math.max(A.from, B.from))}頃）`,
+          trackId: A.trackId, idx: A.idx, trains: [A.train, B.train],
+        });
+      }
     }
   }
   const seen = new Set();
   return issues.filter(i => (seen.has(i.message) ? false : (seen.add(i.message), true)));
 }
 
-/** 各駅で同時に必要になる番線数のピーク */
-export function platformDemand(doc, stations, trains, headwaySec = 60) {
+/** 各駅で同時に必要になる番線数のピーク（方向ごとに数え、多い方をとる） */
+export function platformDemand(doc, line, stations, trains, headwaySec = 60) {
+  const uses = platformUses(doc, line, stations, trains, headwaySec);
   return stations.map((st, idx) => {
-    const spans = [];
-    for (const tr of trains) {
-      const stops = computeSchedule(doc, stations, tr);
-      const s2 = stops.find(x => x.idx === idx);
-      if (!s2) continue;
-      spans.push([(s2.arr ?? s2.dep) - headwaySec / 2, (s2.dep ?? s2.arr) + headwaySec / 2]);
+    const here = uses.filter(u => u.idx === idx);
+    const groups = new Map();
+    for (const u of here) {
+      const dir = u.key.endsWith('|up') ? 'up' : u.key.endsWith('|down') ? 'down' : '*';
+      if (!groups.has(dir)) groups.set(dir, []);
+      groups.get(dir).push(u);
     }
     let peak = 0, peakAt = null;
-    for (const [a] of spans) {
-      const n = spans.filter(([x, y]) => a >= x && a < y).length;
-      if (n > peak) { peak = n; peakAt = a; }
+    for (const list of groups.values()) {
+      for (const u of list) {
+        const n = list.filter(v => u.from >= v.from && u.from < v.to).length;
+        if (n > peak) { peak = n; peakAt = u.from; }
+      }
     }
     const available = st.object ? stationTracks(doc, st.object).length : 0;
     return { idx, station: st, peak, peakAt, available, short: peak > available && available > 0 };

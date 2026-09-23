@@ -139,33 +139,43 @@ export function sampleDoc() {
     });
     return o[o.length - 1];
   };
-  // 東川は交換設備のある中間駅
+  // 東川は交換設備のある中間駅。西山・海岸は折返し用の副本線を持つ
   t.push(T('東川1番線', 'platform', [{ x: 1500, y: 40 }, { x: 1560, y: 75 }, { x: 1780, y: 75 }, { x: 1840, y: 40 }]));
+  t.push(T('西山2番線', 'platform', [{ x: -1090, y: 40 }, { x: -1040, y: 75 }, { x: -860, y: 75 }, { x: -810, y: 40 }]));
+  t.push(T('海岸2番線', 'platform', [{ x: 2340, y: 40 }, { x: 2390, y: 75 }, { x: 2610, y: 75 }, { x: 2660, y: 40 }]));
   o.push(O('platform_side', 1670, 90, { w: 160, h: 8, label: '東川ホーム' }));
   o.push(O('station_bldg', 1670, 130, { w: 50, h: 24, label: '東川駅' }));
   o.push(O('platform_side', 2500, 66, { w: 140, h: 8, label: '海岸ホーム' }));
   o.push(O('station_bldg', 2500, 100, { w: 50, h: 24, label: '海岸駅' }));
   o.push(O('platform_side', -950, 66, { w: 140, h: 8, label: '西山ホーム' }));
   o.push(O('station_bldg', -950, 100, { w: 50, h: 24, label: '西山駅' }));
-  const stW = station('西山', -950, { population: 42000, jobs: 5000, kindId: 'residential' });
-  const stM = station('みどりが丘', 360, { population: 68000, jobs: 12000, kindId: 'mixed' });
-  const stH = station('東川', 1670, { population: 25000, jobs: 9000, kindId: 'school' });
-  const stK = station('海岸', 2500, { population: 18000, jobs: 46000, kindId: 'urban' });
+  o.push(O('platform_side', -350, 66, { w: 120, h: 8, label: '桜台ホーム' }));
+  o.push(O('platform_side', 1150, 66, { w: 120, h: 8, label: '中原ホーム' }));
+  const stW = station('西山', -950, { population: 52000, jobs: 6000, kindId: 'residential' });
+  const stS = station('桜台', -350, { population: 39000, jobs: 4400, kindId: 'residential' });
+  const stM = station('みどりが丘', 360, { population: 85000, jobs: 15000, kindId: 'mixed' });
+  const stN = station('中原', 1150, { population: 17500, jobs: 32000, kindId: 'business' });
+  const stH = station('東川', 1670, { population: 31000, jobs: 11000, kindId: 'school' });
+  const stK = station('海岸', 2500, { population: 22500, jobs: 57000, kindId: 'urban' });
   // 駅間は配線図では省略し、キロ程だけ実距離にする
   const gap = (x, km) => o.push({
     id: uid('b'), type: 'gap_break', x, y: 40, w: 12, h: 16, rot: 0,
     mirror: false, position: 0, dir: 'ab', tracks: [], extraM: km * 1000,
     label: '', note: '', trackId: mainLine.id,
   });
-  gap(-400, 1.4);
-  gap(1100, 1.2);
-  gap(2150, 2.0);
+  gap(-660, 3.2);   // 西山〜桜台
+  gap(-120, 2.8);   // 桜台〜みどりが丘
+  gap(760, 4.2);    // みどりが丘〜中原
+  gap(1380, 3.2);   // 中原〜東川
+  gap(2120, 4.6);   // 東川〜海岸
   // 駅の番線（配線と連携）
   const trackId = nm => (t.find(x => x.name === nm) || {}).id;
-  stW.tracks = [mainLine.id];
+  stW.tracks = [mainLine.id, trackId('西山2番線')].filter(Boolean);
+  stS.tracks = [mainLine.id];
   stM.tracks = [trackId('駅1番線'), trackId('駅2番線')].filter(Boolean);
+  stN.tracks = [mainLine.id];
   stH.tracks = [mainLine.id, trackId('東川1番線')].filter(Boolean);
-  stK.tracks = [mainLine.id];
+  stK.tracks = [mainLine.id, trackId('海岸2番線')].filter(Boolean);
 
   /* ---- 信号機を線路に紐づける ---- */
   const attachSignal = (type, trackName, atFromEnd, dir, label) => {
@@ -265,6 +275,8 @@ export function sampleDoc() {
   setSpeed('駅1番線', 85);
   setSpeed('駅2番線', 85);
   setSpeed('東川1番線', 60);
+  setSpeed('西山2番線', 60);
+  setSpeed('海岸2番線', 60);
   setSpeed('入出区線', 45);
   setSpeed('出区線', 45);
   setSpeed('入区線', 45);
@@ -286,7 +298,7 @@ export function sampleDoc() {
   /* ---- 路線とダイヤ ---- */
   const line = {
     id: uid('l'), name: 'みどり本線', color: '#7fd1ff', double: true,
-    stations: [stW.id, stM.id, stH.id, stK.id],
+    stations: [stW.id, stS.id, stM.id, stN.id, stH.id, stK.id],
   };
   const trains = [];
   const last = line.stations.length - 1;
@@ -298,37 +310,43 @@ export function sampleDoc() {
       toIdx: extra.toIdx ?? (down ? last : 0),
       departSec, speedKmh, dwellSec: extra.dwellSec ?? 30, skip: extra.skip || [],
       cars: extra.cars ?? 10,
-      // 東川は交換駅：下りは本線、上りは1番線に入る
+      // 終端は発着で番線を分け、東川（交換駅）は下り本線・上り1番線に入る
       platforms: extra.platforms ?? {
-        1: down ? trackId('駅1番線') : trackId('駅2番線'),
-        2: down ? mainLine.id : trackId('東川1番線'),
+        0: down ? trackId('西山2番線') : mainLine.id,
+        2: down ? trackId('駅1番線') : trackId('駅2番線'),
+        4: down ? mainLine.id : trackId('東川1番線'),
+        5: down ? mainLine.id : trackId('海岸2番線'),
       },
       toDepot: !!extra.toDepot, depotTrackId: extra.depotTrackId || null,
       color: null, formationId: extra.formationId || null, note: '',
     });
   };
 
-  // 平日ダイヤ：日中20分ごと、ラッシュ時は10分ごと。ラッシュは10両、その他は6両
+  // 平日ダイヤ：ラッシュは普通10両を10分ごと、日中は20分ごとの普通＋その5分後に快速
+  // （快速は桜台・中原を通過し、東川で普通を追い越す → 待避と緩急接続が発生する）
   const isRush = sec => {
     const h = sec / 3600;
     return (h >= 7 && h < 9.5) || (h >= 17 && h < 19.5);
   };
-  let noDown = 100, noUp = 101;
+  const RAPID_SKIP = [1, 3];
+  let noDown = 100, noUp = 101, noR = 3001;
   for (let t2 = 5.5 * 3600; t2 <= 22.5 * 3600; t2 += 60) {
     const rush = isRush(t2);
     const headway = rush ? 600 : 1200;
     if ((t2 - 5.5 * 3600) % headway !== 0) continue;
     const cars = rush ? 10 : 6;
-    const rapid = !rush && ((t2 / 1200) % 3 === 0);
-    addTrain(`${noDown}M`, rapid ? 'rapid' : 'local', 'down', t2, rapid ? 80 : 60,
-      { cars, skip: rapid ? [2] : [] });
-    addTrain(`${noUp}M`, rapid ? 'rapid' : 'local', 'up', t2 + 300, rapid ? 80 : 60,
-      { cars, skip: rapid ? [2] : [] });
+    addTrain(`${noDown}M`, 'local', 'down', t2, 60, { cars });
+    addTrain(`${noUp}M`, 'local', 'up', t2 + 300, 60, { cars });
     noDown += 2; noUp += 2;
+    if (!rush && t2 < 22 * 3600) {
+      addTrain(`${noR}M`, 'rapid', 'down', t2 + 300, 85, { cars, skip: RAPID_SKIP.slice() });
+      addTrain(`${noR + 1}M`, 'rapid', 'up', t2 + 600, 85, { cars, skip: RAPID_SKIP.slice() });
+      noR += 2;
+    }
   }
   // 入庫する回送
   addTrain('回1', 'deadhead', 'down', 23 * 3600, 45, {
-    fromIdx: 0, toIdx: 1, cars: 10, toDepot: true, depotTrackId: trackId('8番線'),
+    fromIdx: 0, toIdx: 2, cars: 10, toDepot: true, depotTrackId: trackId('8番線'),
   });
 
   doc.tracks = t; doc.objects = o; doc.formations = f;
