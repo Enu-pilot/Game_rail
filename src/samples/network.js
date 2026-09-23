@@ -187,8 +187,16 @@ export function buildNetwork(spec) {
         tracks.push(t); stTracks.push(t.id);
         return t;
       };
-      if (S.type === 'p' || S.type === 'pd') loops.down = mkLoop(-1, '下り副本線');
-      if (S.type === 'p' || S.type === 'pu') loops.up = mkLoop(+1, '上り副本線');
+      // 折れ曲がった駅（スイッチバック）は、曲がりの内側に副本線を置けない
+      let inner = 0;
+      if (kinked) {
+        let d = path.at(pos[i] + 50).angle - path.at(pos[i] - 50).angle;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        inner = d > 0 ? 1 : -1;
+      }
+      if ((S.type === 'p' || S.type === 'pd') && inner !== -1) loops.down = mkLoop(-1, '下り副本線');
+      if ((S.type === 'p' || S.type === 'pu') && inner !== 1) loops.up = mkLoop(+1, '上り副本線');
       if (S.type === 't') {
         // 頭端式：本線の先で行き止まり。stubs 本の着発線を並べる
         const k = Math.max(1, (S.extra.stubs || 2) - 1);
@@ -658,7 +666,7 @@ export function buildNetwork(spec) {
     const own = trains.filter(t => t.lineId === E.line.id && t.operatorId === opIds[spec.self]);
     for (const r of buildRosters(doc, E.line, sts, own)) {
       const last = r.trains[r.trains.length - 1];
-      if (last.throughId || last.toDepot || last.couple) continue;
+      if (last.throughId || last.toDepot) continue;
       last.toDepot = true; last.depotTrackId = trackId;
     }
   }
