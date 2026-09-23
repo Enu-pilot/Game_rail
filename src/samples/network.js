@@ -586,7 +586,8 @@ export function buildNetwork(spec) {
     // 本線の車両は share の割合で、線区専用の車両は depot に名前を指定された基地に置く
     const extra = fleetDefs.filter(fd => !fd.main && fd.depot === dp.name).reduce((a, fd) => a + est.get(fd), 0);
     const setsHere = (dp.own && !dp.reserved ? (dp.share != null ? Math.ceil(estMain * dp.share) : estMain) : 0) + extra;
-    const lenM = Math.max(220, (dp.cars || 10) * 21 + 30) * 2;   // 1線に2編成
+    const carLen = ((spec.fleet && spec.fleet.carLengthM) || 20) + 1;
+    const lenM = Math.max(220, (dp.cars || 10) * carLen + 40) * 2;   // 1線に2編成
     const nStable = Math.max(dp.min || 4, Math.ceil(setsHere / 2) + 1);
     const yard = buildDepot(E, S, dp, nStable, lenM);
     tracks.push(...yard.tracks);
@@ -717,7 +718,7 @@ function buildDepot(E, S, dp, nStable, lenM) {
     const du = 120 + pitch * (j + 0.5), dv = 90 + pitch * (j + 0.5);
     const kind = j < kinds.length ? kinds[j] : 'stabling';
     const name = kind === 'daily' ? '仕業検査線' : kind === 'periodic' ? '交番検査線' : kind === 'washing' ? '洗浄線' : `${j - kinds.length + 1}番線`;
-    const len = kind === 'stabling' ? lenM : lenM / 2;
+    const len = kind === 'stabling' ? lenM : lenM / 2 + 20;
     const t = T(`${dp.name} ${name}`, kind, [P(du, dv), P(du + len, dv)], { b: 'buffer' }, { maxSpeedKmh: 15 });
     tracks.push(t);
     if (kind === 'stabling') stabling.push(t);

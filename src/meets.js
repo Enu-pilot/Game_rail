@@ -98,7 +98,7 @@ function holdStation(doc, stations, train, stops, enterIdx) {
  */
 export function planMeets(doc, line, stations, trains, opts = {}) {
   const headway = Math.max(30, opts.headwaySec ?? doc.settings.minHeadwaySec ?? 90);
-  const maxHold = Math.max(60, opts.maxHoldSec ?? 20 * 60);
+  const maxHold = Math.max(60, opts.maxHoldSec ?? (doc.settings.maxHoldMinutes ?? 20) * 60);
   const reset = opts.reset !== false;
   // 併結している付属編成は相手の列車と一体で走るので、計画の対象から外す
   const list = trains.filter(t => !isCompanion(doc, t)).sort((a, b) => a.departSec - b.departSec);

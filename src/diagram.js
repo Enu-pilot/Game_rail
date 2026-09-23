@@ -114,18 +114,25 @@ export function initDiagram(canvas, stage) {
 
     // 駅（横線）
     ctx.textAlign = 'right';
+    let lastLabelY = -Infinity;
     for (const st of stations) {
       const y = yOf(st.km);
       if (y < PAD.top - 2 || y > H - PAD.bottom + 2) continue;
       ctx.strokeStyle = '#333c4e';
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(PAD.left, Math.round(y) + .5); ctx.lineTo(W - PAD.right, Math.round(y) + .5); ctx.stroke();
+      // 駅が詰まっているときは、重なる駅名を省く（キロ程も省く）
+      const gap = Math.abs(y - lastLabelY);
+      if (gap < 13) continue;
+      lastLabelY = y;
       ctx.fillStyle = '#dfe6f5';
       ctx.font = `12px ${FONT}`;
       ctx.fillText(st.name, PAD.left - 10, y);
-      ctx.fillStyle = '#6c7788';
-      ctx.font = `10px ${FONT}`;
-      ctx.fillText(`${(st.km / 1000).toFixed(2)} km`, PAD.left - 10, y + 12);
+      if (gap >= 26) {
+        ctx.fillStyle = '#6c7788';
+        ctx.font = `10px ${FONT}`;
+        ctx.fillText(`${(st.km / 1000).toFixed(2)} km`, PAD.left - 10, y + 12);
+      }
       if (canPass(doc, st)) {   // 行き違い・待避ができる駅
         ctx.fillStyle = '#8fe06a';
         ctx.beginPath(); ctx.arc(PAD.left - 4, y, 2.6, 0, Math.PI * 2); ctx.fill();
@@ -328,7 +335,7 @@ export function initDiagram(canvas, stage) {
     const f = Math.exp(e.deltaY * 0.0012);
     if (e.shiftKey) {                       // 縦（キロ程）の拡大縮小
       const kmAt = kmOf(p.y);
-      d().mScale = Math.max(0.004, Math.min(2, d().mScale / f));
+      d().mScale = Math.max(0.0002, Math.min(2, d().mScale / f));
       d().km0 = kmAt - (p.y - PAD.top) / d().mScale;
     } else {                                // 横（時間）の拡大縮小
       const tAt = tOf(p.x);
@@ -346,7 +353,7 @@ export function initDiagram(canvas, stage) {
     const trains = trainsOf(line);
     const maxKm = stations.length ? stations[stations.length - 1].km : 1000;
     d().km0 = -maxKm * 0.04;
-    d().mScale = Math.max(0.004, (H - PAD.top - PAD.bottom) / Math.max(1, maxKm * 1.08));
+    d().mScale = Math.max(0.0002, (H - PAD.top - PAD.bottom) / Math.max(1, maxKm * 1.08));
     let t0 = 6 * 3600, t1 = 10 * 3600;
     if (trains.length) {
       const all = trains.flatMap(tr => computeSchedule(store.doc, stations, tr).flatMap(s => [s.arr, s.dep].filter(x => x != null)));
