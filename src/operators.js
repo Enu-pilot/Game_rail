@@ -17,6 +17,7 @@ export const SAFETY_DEVICES = [
   { id: 'ats_seibu', name: '西武形ATS', short: 'SB', note: '西武鉄道の車上速度照査式ATS' },
   { id: 'ats_kintetsu', name: '近鉄形ATS', short: 'KT', note: '近畿日本鉄道の連続照査式ATS' },
   { id: 'ats_hanshin', name: '阪神形ATS', short: 'HS', note: '阪神電気鉄道の車上速度照査式ATS' },
+  { id: 'c_ats',  name: 'C-ATS',    short: 'CA',  note: '京成・都営浅草線・京急・北総などの1号線型ATS' },
   { id: 'atc_ns', name: 'ATC-NS',   short: 'NS',  note: '東海道・山陽新幹線のデジタルATC' },
   { id: 'ds_atc', name: 'DS-ATC',   short: 'DS',  note: '東北・上越・北陸・北海道・九州新幹線のデジタルATC' },
   { id: 'tasc',   name: 'TASC',     short: 'T',   note: '定位置停止装置。ホームドア対応に必要' },

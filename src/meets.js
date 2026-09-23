@@ -141,7 +141,7 @@ export function planMeets(doc, line, stations, trains, opts = {}) {
   const gaveUp = new Set();
   let iterations = 0;
 
-  const maxSteps = Math.min(3000, Math.max(200, list.length * 12));
+  const maxSteps = Math.min(12000, Math.max(200, list.length * 16));
   // 全列車の占有を駅間ごとに並べておき、待ち時間を変えた列車の分だけ差し替える
   const bySec = new Map();
   const runsOf = new Map();
