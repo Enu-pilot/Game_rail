@@ -7,6 +7,8 @@ import { routeFromLeg, findConflicts, routeAligned } from './interlocking.js';
 import { getGraph } from './topology.js';
 import { lineStations } from './timetable.js';
 import { planMeets } from './meets.js';
+import { buildRosters } from './duty.js';
+import { throughChain } from './operators.js';
 
 /** 同一種別の連番から線路名を作る */
 export function suggestTrackName(kindId) {
@@ -476,4 +478,84 @@ export function clearHolds(lineId) {
   for (const t of trains) t.holds = {};
   commit('dispatch');
   setMessage('待避・行き違いの待ち時間を解除しました');
+}
+
+/* ---------------- 相互直通の運転整理 ---------------- */
+
+/** 直通の中止・再開 */
+export function setThroughSuspended(throughId, suspended) {
+  const th = (store.doc.throughLines || []).find(t => t.id === throughId);
+  if (!th) return;
+  snapshot();
+  th.suspended = !!suspended;
+  commit('through');
+  setMessage(suspended
+    ? `${th.name}への直通運転を中止しました（該当列車は境界駅で折返し）`
+    : `${th.name}への直通運転を再開しました`);
+}
+
+/** 直通先の遅れ[分]を設定する */
+export function setThroughDelay(throughId, min) {
+  const th = (store.doc.throughLines || []).find(t => t.id === throughId);
+  if (!th) return;
+  snapshot();
+  th.delayMin = Math.max(0, Math.round(min || 0));
+  commit('through');
+}
+
+/**
+ * 直通先の遅れをダイヤに反映する。
+ * 直通から戻ってくる編成が遅れるので、その運用の次の列車が遅れて出る（波及）。
+ */
+export function applyThroughDelays(lineId) {
+  const doc = store.doc;
+  const line = doc.lines.find(l => l.id === lineId);
+  if (!line) return null;
+  const sts = lineStations(doc, getGraph(doc, store.rev), line);
+  const trains = doc.trains.filter(t => t.lineId === line.id);
+  const rosters = buildRosters(doc, line, sts, trains);
+  const selfId = (doc.operators.find(o => o.self) || {}).id || null;
+  const delayOf = {};
+  const bump = (t, sec) => { delayOf[t.id] = Math.max(delayOf[t.id] || 0, sec); };
+
+  // 他社の車両で走る列車は、その会社の線の遅れをそのまま持ち込む
+  for (const t of trains) {
+    if ((t.operatorId || selfId) === selfId) continue;
+    const th = (doc.throughLines || []).find(x => x.operatorId === t.operatorId && !x.suspended);
+    if (th && th.delayMin > 0) bump(t, th.delayMin * 60);
+  }
+  // 直通から戻る編成の遅れは、その運用の次の列車へ波及する
+  for (const r of rosters) {
+    let carry = 0;
+    for (const t of r.trains) {
+      if (carry > 0) bump(t, carry);
+      const chain = throughChain(doc, t.throughId);
+      const d = chain.reduce((a, x) => a + (x.delayMin || 0), 0);
+      if (d > 0) carry = Math.max(carry, d * 60);
+    }
+  }
+  snapshot();
+  let n = 0;
+  for (const t of trains) {
+    const v = delayOf[t.id] || 0;
+    if ((t.delaySec || 0) !== v) n++;
+    t.delaySec = v;
+  }
+  commit('delay');
+  const mins = Math.round(Object.values(delayOf).reduce((a, b) => a + b, 0) / 60);
+  setMessage(n
+    ? `直通先の遅れを ${n} 本に反映しました（延べ ${mins} 分）。「行き違い・待避を自動調整」で波及を整理できます`
+    : '反映する遅れがありません');
+  return { trains: n, minutes: mins };
+}
+
+/** 遅れをすべて消す（平常運転に戻す）。待避ももとの計画に引き直す */
+export function clearDelays(lineId) {
+  const doc = store.doc;
+  snapshot();
+  for (const t of doc.trains) if (t.lineId === lineId) t.delaySec = 0;
+  for (const th of doc.throughLines || []) th.delayMin = 0;
+  commit('delay');
+  autoDispatch(lineId, { silent: true });
+  setMessage('遅れを解消し、平常ダイヤに戻しました（待避も引き直しました）');
 }

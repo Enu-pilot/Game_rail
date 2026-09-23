@@ -38,6 +38,7 @@ export function defaultSettings() {
     fareCap: 1200,          // 運賃の上限[円]
     costPerCarKm: 450,      // 運行費（電力・乗務員・検査）[円/車両km]
     costPerCarDay: 15000,   // 車両費（償却・保有）[円/両・日]
+    settlementPerCarKm: 60,     // 直通の車両使用料[円/車両km]
     inspectCostPerCarKm: 8,      // 検査費（走行に比例）[円/車両km]
     inspectCostPerCarDay: 4500,  // 検査費（時間で来る分）[円/両日]
     costPerRouteKmDay: 200000,  // 線路・電路の保守[円/km・日]
@@ -76,6 +77,8 @@ export function newDoc(name = '無題の車両基地') {
     objects: [],
     formations: [],
     routes: [],        // 構成済みの進路（連動）
+    operators: [],     // 事業者（相互直通の相手を含む）
+    throughLines: [],  // 直通先（他社線）
     lines: [],         // 路線（駅の並び）
     trains: [],        // ダイヤの列車（スジ）
     company: null,     // 長期経営（資金・決算履歴）
@@ -196,6 +199,10 @@ export function migrate(doc) {
       ? { type: f.loco.type, count: Math.max(1, Math.min(3, +f.loco.count || 1)) }
       : null,
     color: f.color || '#4f8cff', trackId: f.trackId || null, note: f.note || '',
+    operatorId: f.operatorId || null,                             // 所属事業者
+    safety: Array.isArray(f.safety) ? f.safety.slice() : [],      // 搭載する保安装置
+    odoKm: Number.isFinite(f.odoKm) ? f.odoKm : 0,                // 累計走行キロ
+    inspection: (f.inspection && typeof f.inspection === 'object') ? f.inspection : null,
   }));
   d.routes = (doc.routes || []).map(r => ({
     id: r.id || uid('r'),
@@ -210,12 +217,38 @@ export function migrate(doc) {
     distance: +r.distance || 0,
     set: r.set !== false,
   }));
+  d.operators = (doc.operators || []).map(o => ({
+    id: o.id || uid('op'),
+    name: o.name || '事業者',
+    short: o.short || (o.name || '社').slice(0, 1),
+    color: o.color || '#7fd1ff',
+    self: !!o.self,
+  }));
+  d.throughLines = (doc.throughLines || []).map(t => ({
+    id: t.id || uid('th'),
+    name: t.name || '直通先',
+    operatorId: t.operatorId || null,
+    lineId: t.lineId || null,            // 自社のどの路線から出ていくか
+    stationIdx: Number.isFinite(t.stationIdx) ? t.stationIdx : 0,  // 境界駅（路線内の駅番号）
+    safety: Array.isArray(t.safety) ? t.safety.slice() : [],
+    maxCars: Number.isFinite(t.maxCars) ? t.maxCars : 10,
+    km: Number.isFinite(t.km) ? t.km : 10,
+    runMin: Number.isFinite(t.runMin) ? t.runMin : 20,
+    dailyPassengers: Number.isFinite(t.dailyPassengers) ? t.dailyPassengers : 0,
+    viaIds: Array.isArray(t.viaIds) ? t.viaIds.slice() : [],     // ここへ行くまでに経由する他社線
+    suspended: !!t.suspended,            // 直通中止
+    delayMin: Number.isFinite(t.delayMin) ? t.delayMin : 0,       // 直通先の遅れ
+    note: t.note || '',
+  }));
   d.lines = (doc.lines || []).map(l => ({
     id: l.id || uid('l'),
     name: l.name || '路線',
     color: l.color || '#7fd1ff',
     double: l.double !== false,          // 既定の線路条件（複線かどうか）
     secSingle: (l.secSingle && typeof l.secSingle === 'object') ? { ...l.secSingle } : {},  // 駅間ごとの単線指定
+    operatorId: l.operatorId || null,
+    safety: Array.isArray(l.safety) ? l.safety.slice() : [],     // 走るのに必要な保安装置
+    maxCars: Number.isFinite(l.maxCars) ? l.maxCars : 10,        // ホーム有効長（両数）
     stations: (l.stations || []).map(s2 => (typeof s2 === 'string' ? s2 : s2.objectId)).filter(Boolean),
   }));
   d.trains = (doc.trains || []).map(t => ({
@@ -236,6 +269,9 @@ export function migrate(doc) {
     holds: (t.holds && typeof t.holds === 'object') ? { ...t.holds } : {},   // 駅での運転停車・待避の延長[秒]
     toDepot: !!t.toDepot,
     depotTrackId: t.depotTrackId || null,
+    throughId: t.throughId || null,        // 直通先（終端から他社線へ乗り入れる）
+    delaySec: Number.isFinite(t.delaySec) ? t.delaySec : 0,   // 遅延（運転整理）
+    operatorId: t.operatorId || null,      // 担当する事業者（他社車両の列車）
     color: t.color || null,
     formationId: t.formationId || null,
     note: t.note || '',

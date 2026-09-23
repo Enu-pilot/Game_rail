@@ -6,6 +6,7 @@ import {
   lineStations, computeSchedule, trainPolyline, trainType, fmtHM,
 } from './timetable.js';
 import { detectConflicts, sectionSingle, canPass } from './meets.js';
+import { operatorOf, selfOperator } from './operators.js';
 
 const FONT = '"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,system-ui,sans-serif';
 const PAD = { left: 132, top: 30, right: 24, bottom: 26 };
@@ -138,7 +139,10 @@ export function initDiagram(canvas, stage) {
       if (pts.length < 2) continue;
       const tt = trainType(tr.type);
       const sel = d().selected === tr.id;
-      ctx.strokeStyle = tr.color || tt.color;
+      const selfId = (selfOperator(doc) || {}).id || null;
+      const foreign = (tr.operatorId || selfId) !== selfId;
+      const stroke = tr.color || (foreign ? operatorOf(doc, tr.operatorId).color : tt.color);
+      ctx.strokeStyle = stroke;
       ctx.lineWidth = sel ? 3.2 : 1.8;
       ctx.globalAlpha = sel ? 1 : .92;
       ctx.beginPath();
@@ -146,7 +150,7 @@ export function initDiagram(canvas, stage) {
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
       if (sel) {
-        ctx.fillStyle = tr.color || tt.color;
+        ctx.fillStyle = stroke;
         for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); }
       }
       // 待避・行き違いの待ち（停車が長い駅）に印をつける
@@ -162,7 +166,21 @@ export function initDiagram(canvas, stage) {
         ctx.setLineDash([]);
         ctx.globalAlpha = sel ? 1 : .92;
         ctx.lineWidth = sel ? 3.2 : 1.8;
-        ctx.strokeStyle = tr.color || tt.color;
+        ctx.strokeStyle = stroke;
+      }
+
+      // 直通する列車は終端の先に向かう矢印を出す
+      if (tr.throughId) {
+        const p1 = pts[pts.length - 1];
+        ctx.fillStyle = stroke;
+        ctx.globalAlpha = .9;
+        const up = pts.length > 1 && pts[pts.length - 1].y < pts[pts.length - 2].y ? -1 : 1;
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y + up * 2);
+        ctx.lineTo(p1.x - 4, p1.y + up * 9);
+        ctx.lineTo(p1.x + 4, p1.y + up * 9);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = sel ? 1 : .92;
       }
 
       // 列車番号
@@ -175,7 +193,7 @@ export function initDiagram(canvas, stage) {
         ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
         ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,11,16,.85)';
         ctx.strokeText(label, 4, -3);
-        ctx.fillStyle = tr.color || tt.color;
+        ctx.fillStyle = stroke;
         ctx.fillText(label, 4, -3);
         ctx.restore();
       }

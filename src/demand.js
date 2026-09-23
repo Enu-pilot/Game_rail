@@ -1,6 +1,7 @@
 // 需要（駅の人口・時間帯別の流動）・乗車シミュレーション（混雑率・積み残し）・収支
 
 import { computeSchedule, trainType } from './timetable.js';
+import { throughChain, selfOperator } from './operators.js';
 
 export const STATION_KINDS = [
   { id: 'residential', name: '住宅地', out: 'morning', attract: 0.25 },
@@ -39,17 +40,24 @@ const stationDemand = (o) => ({
  * 時間帯別のOD表（人/時）を作る
  * @returns {Array<Array<Array<number>>>} od[hour][i][j]
  */
-export function odMatrix(doc, stations) {
+export function odMatrix(doc, stations, line = null) {
   const n = stations.length;
   const rate = doc.settings.dailyTripRate ?? 0.55;
   const decayKm = doc.settings.demandDecayKm ?? 12;
   const info = stations.map(s => (s.object ? stationDemand(s.object) : { population: 0, jobs: 0, kind: 'residential' }));
+  // 相互直通による境界駅の流出入（直通中止なら消える）
+  const ext = new Array(n).fill(0);
+  for (const th of (doc.throughLines || [])) {
+    if (!line || th.lineId !== line.id || th.suspended) continue;
+    const i = Math.max(0, Math.min(n - 1, th.stationIdx || 0));
+    ext[i] += th.dailyPassengers || 0;
+  }
   const od = [];
   for (let h = 0; h < 24; h++) {
     const w = commuteWeight(h);
     const m = Array.from({ length: n }, () => new Float64Array(n));
     for (let i = 0; i < n; i++) {
-      const oi = info[i].population * rate * outShape(info[i].kind)[h];
+      const oi = (info[i].population * rate + ext[i]) * outShape(info[i].kind)[h];
       if (oi <= 0) continue;
       // 目的地の魅力度（朝は職場、夜は住宅）
       const attract = [];
@@ -57,8 +65,8 @@ export function odMatrix(doc, stations) {
       for (let j = 0; j < n; j++) {
         if (j === i) { attract.push(0); continue; }
         const km = Math.abs(stations[j].km - stations[i].km) / 1000;
-        const a = (info[j].jobs * w + info[j].population * (1 - w) * 0.35) * stationKind(info[j].kind).attract
-          / (1 + km / decayKm);
+        const a = (info[j].jobs * w + info[j].population * (1 - w) * 0.35 + ext[j] * 0.7)
+          * stationKind(info[j].kind).attract / (1 + km / decayKm);
         attract.push(a); sum += a;
       }
       if (sum <= 0) continue;
@@ -85,7 +93,7 @@ export function fareFor(doc, km) {
 export function simulateDemand(doc, line, stations, trains) {
   const n = stations.length;
   if (!n || !trains.length) return null;
-  const od = odMatrix(doc, stations);
+  const od = odMatrix(doc, stations, line);
   const capPerCar = doc.settings.capacityPerCar ?? 140;
   const maxLoad = doc.settings.maxLoadFactor ?? 2.0;        // 乗車率の上限（これ以上は積み残し）
 
@@ -99,7 +107,10 @@ export function simulateDemand(doc, line, stations, trains) {
     })),
     totalPassengers: 0, passengerKm: 0, revenue: 0, left: 0,
     trainKm: 0, carKm: 0, trainCount: trains.length,
+    foreignCarKm: 0,     // 自社線を走る他社車両
+    throughCarKm: 0,     // 他社線を走る自社車両
   };
+  const selfId = selfOperator(doc) ? selfOperator(doc).id : null;
 
   // 列車の停車イベントを時刻順に並べる
   const events = [];
@@ -115,6 +126,13 @@ export function simulateDemand(doc, line, stations, trains) {
     const dist = Math.abs(stations[order[order.length - 1]].km - stations[order[0]].km) / 1000;
     stats.trainKm += dist;
     stats.carKm += dist * cars;
+    const foreign = (tr.operatorId || selfId) !== selfId;
+    if (foreign) stats.foreignCarKm += dist * cars;
+    else {
+      const chain = throughChain(doc, tr.throughId);
+      const thKm = chain.reduce((a, x) => a + (x.km || 0), 0) * 2;   // 往復
+      stats.throughCarKm += thKm * cars;
+    }
   }
   events.sort((a, b) => a.t - b.t);
   if (!events.length) return null;
@@ -210,7 +228,9 @@ export function simulateDemand(doc, line, stations, trains) {
 /** 収支（1日あたり） */
 export function finance(doc, stats, stations) {
   const s = doc.settings;
-  const carKmCost = (s.costPerCarKm ?? 250) * (stats ? stats.carKm : 0);
+  // 他社車両が自社線を走るぶんは相手の費用。自社車両が他社線を走るぶんは自社の費用
+  const ownCarKm = stats ? Math.max(0, stats.carKm - (stats.foreignCarKm || 0)) + (stats.throughCarKm || 0) : 0;
+  const carKmCost = (s.costPerCarKm ?? 250) * ownCarKm;
   const cars = doc.formations.reduce((a, f) => a + (f.cars || 0) + (f.loco ? f.loco.count : 0), 0);
   const rollingStock = cars * (s.costPerCarDay ?? 12000);
   const routeKm = stations && stations.length ? (stations[stations.length - 1].km / 1000) : 0;
@@ -220,8 +240,11 @@ export function finance(doc, stats, stations) {
   const depotCost = depotTracks * (s.costPerDepotTrackDay ?? 9000);
   // 検査費：仕業・全般は日数で、交番・重要部は走行キロで効いてくる
   const inspectCost = cars * (s.inspectCostPerCarDay ?? 4500)
-    + (stats ? stats.carKm : 0) * (s.inspectCostPerCarKm ?? 8);
-  const cost = carKmCost + rollingStock + inspectCost + trackCost + stationCost + depotCost;
+    + ownCarKm * (s.inspectCostPerCarKm ?? 8);
+  // 直通のキロ精算：他社車両が自社線を走った分を受け取り、自社車両が他社線を走った分を払う
+  const settleRate = s.settlementPerCarKm ?? 60;
+  const settlement = settleRate * ((stats ? stats.throughCarKm || 0 : 0) - (stats ? stats.foreignCarKm || 0 : 0));
+  const cost = carKmCost + rollingStock + inspectCost + trackCost + stationCost + depotCost + settlement;
   const revenue = stats ? stats.revenue : 0;
   return {
     revenue,
@@ -232,11 +255,12 @@ export function finance(doc, stats, stations) {
       { name: '運行費（車両キロ）', value: carKmCost },
       { name: '車両費', value: rollingStock },
       { name: '検査費', value: inspectCost },
+      { name: '直通の車両使用料', value: settlement },
       { name: '線路保守', value: trackCost },
       { name: '駅運営', value: stationCost },
       { name: '車両基地', value: depotCost },
     ],
-    cars, routeKm, depotTracks, inspectCost,
+    cars, routeKm, depotTracks, inspectCost, settlement, ownCarKm,
   };
 }
 

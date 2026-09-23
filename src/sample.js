@@ -142,6 +142,8 @@ export function sampleDoc() {
   // 東川は交換設備のある中間駅。西山・海岸は折返し用の副本線を持つ
   t.push(T('東川1番線', 'platform', [{ x: 1500, y: 40 }, { x: 1560, y: 75 }, { x: 1780, y: 75 }, { x: 1840, y: 40 }]));
   t.push(T('西山2番線', 'platform', [{ x: -1090, y: 40 }, { x: -1040, y: 75 }, { x: -860, y: 75 }, { x: -810, y: 40 }]));
+  // 終端駅の電留線（夜間滞泊用）
+  t.push(T('西山電留線', 'stabling', [{ x: -1020, y: 75 }, { x: -975, y: 132 }, { x: -790, y: 132 }], { b: 'buffer' }));
   t.push(T('海岸2番線', 'platform', [{ x: 2340, y: 40 }, { x: 2390, y: 75 }, { x: 2610, y: 75 }, { x: 2660, y: 40 }]));
   o.push(O('platform_side', 1670, 90, { w: 160, h: 8, label: '東川ホーム' }));
   o.push(O('station_bldg', 1670, 130, { w: 50, h: 24, label: '東川駅' }));
@@ -225,14 +227,22 @@ export function sampleDoc() {
   const stabling = t.filter(x => x.kind === 'stabling');
   // 9運用を回せる陣容（10両編成 × 8本を留置線に、1本を洗浄線に、1本は交番検査中）
   const plan = [
-    ['H01編成', 'E233系', 10], ['H02編成', 'E233系', 10], ['H03編成', 'E233系', 10],
-    ['H04編成', 'E233系', 10], ['H05編成', 'E233系', 10], ['H06編成', 'E233系', 10],
-    ['H07編成', 'E233系', 10], ['H08編成', 'E233系', 10],
+    ['H01編成', 'E233系', 8], ['H02編成', 'E233系', 8], ['H03編成', 'E233系', 8],
+    ['H04編成', 'E233系', 8], ['H05編成', 'E233系', 8], ['H06編成', 'E233系', 8],
+    ['H07編成', 'E233系', 8], ['H08編成', 'E233系', 8],
   ];
   plan.forEach(([name, series, cars], i) => {
     f.push({
       id: uid('f'), name, series, vehicle: 'emu', cars, carLengthM: null, loco: null,
       color: FORMATION_COLORS[i % FORMATION_COLORS.length],
+      trackId: stabling[i] ? stabling[i].id : null, note: '',
+    });
+  });
+  // 1〜3番線は2編成ずつ留置（予備車）
+  [['H11編成', 0], ['H12編成', 1], ['H13編成', 2], ['H14編成', 3]].forEach(([name, i], k) => {
+    f.push({
+      id: uid('f'), name, series: 'E233系', vehicle: 'emu', cars: 8, carLengthM: null, loco: null,
+      color: FORMATION_COLORS[(8 + k) % FORMATION_COLORS.length],
       trackId: stabling[i] ? stabling[i].id : null, note: '',
     });
   });
@@ -262,11 +272,11 @@ export function sampleDoc() {
     trackId: track('扇形庫2番線'), note: '',
   });
   f.push({
-    id: uid('f'), name: 'H09編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
+    id: uid('f'), name: 'H09編成', series: 'E233系', vehicle: 'emu', cars: 8, carLengthM: null, loco: null,
     color: FORMATION_COLORS[8 % FORMATION_COLORS.length], trackId: track('洗浄線'), note: '洗浄待ち',
   });
   f.push({
-    id: uid('f'), name: 'H10編成', series: 'E233系', vehicle: 'emu', cars: 10, carLengthM: null, loco: null,
+    id: uid('f'), name: 'H10編成', series: 'E233系', vehicle: 'emu', cars: 8, carLengthM: null, loco: null,
     color: FORMATION_COLORS[7], trackId: t.find(x => x.name === '検修1番線').id, note: '交番検査中',
   });
   f.push({
@@ -281,6 +291,19 @@ export function sampleDoc() {
     id: uid('f'), name: 'W01', series: 'モーターカー', vehicle: 'mowcar', cars: 2, carLengthM: null, loco: null,
     color: '#c8a24a', trackId: t.find(x => x.kind === 'mow').id, note: '',
   });
+
+  /* ---- 車上設備（保安装置）: どの会社の線に入れるかが決まる ---- */
+  const FULL = ['atc', 'tasc', 'cs_atc', 'ats_p', 'radio_d'];   // 全社直通対応
+  const SUBWAY = ['atc', 'tasc', 'cs_atc', 'radio_d'];          // 地下鉄まで
+  const OWN = ['atc', 'tasc'];                                  // 自社線のみ
+  const setSafety = (name, list) => { const f2 = f.find(x => x.name === name); if (f2) f2.safety = list.slice(); };
+  ['H01編成', 'H02編成', 'H03編成', 'H04編成', 'H05編成', 'H06編成', 'H07編成', 'H08編成'].forEach(n => setSafety(n, FULL));
+  ['H14編成'].forEach(n => setSafety(n, FULL));
+  ['H09編成', 'H11編成', 'H12編成', 'H13編成'].forEach(n => setSafety(n, SUBWAY));
+  ['H10編成'].forEach(n => setSafety(n, OWN));
+  ['K11編成', 'K12編成'].forEach(n => setSafety(n, ['atc', 'tasc', 'ats_p']));
+  setSafety('キハ48-1500', ['ats_sn']);
+  setSafety('12系客車', ['ats_sn']);
 
   /* ---- 速度条件 ---- */
   const setSpeed = (name, kmh) => { const tr = t.find(x => x.name === name); if (tr) tr.maxSpeedKmh = kmh; };
@@ -309,10 +332,37 @@ export function sampleDoc() {
   speedSign(1670, 75, 45, 240, '東川1番線'); // 交換設備の副本線
 
   /* ---- 路線とダイヤ ---- */
+  /* ---- 事業者と相互直通（6社直通） ---- */
+  const OP = {
+    midori:   { id: uid('op'), name: 'みどり電鉄',     short: 'み', color: '#7fd1ff', self: true },
+    sakura:   { id: uid('op'), name: 'さくら地下鉄',   short: 'さ', color: '#c99cff', self: false },
+    kaede:    { id: uid('op'), name: 'かえで鉄道',     short: 'か', color: '#ffb020', self: false },
+    shirakaba:{ id: uid('op'), name: 'しらかば電鉄',   short: 'し', color: '#6fd6e8', self: false },
+    minato:   { id: uid('op'), name: 'みなと高速鉄道', short: 'な', color: '#2bd4a4', self: false },
+    aoba:     { id: uid('op'), name: 'あおば急行',     short: 'あ', color: '#ff7a9c', self: false },
+  };
+  const operators = Object.values(OP);
+
   const line = {
     id: uid('l'), name: 'みどり本線', color: '#7fd1ff', double: true,
+    operatorId: OP.midori.id,
+    safety: ['atc', 'tasc'],       // 自社線はATC＋ホームドア対応のTASCが必要
+    maxCars: 10,
     stations: [stW.id, stS.id, stM.id, stN.id, stH.id, stK.id],
   };
+
+  // 直通先（西山＝地下鉄方面、海岸＝みなと方面）
+  const TH = {
+    kaede:     { id: uid('th'), name: 'かえで本線',   operatorId: OP.kaede.id,     lineId: line.id, stationIdx: 0, safety: ['ats_p'], maxCars: 10, km: 18.4, runMin: 30, dailyPassengers: 0, viaIds: [], suspended: false, delayMin: 0, note: 'さくら線の先（森口方面）' },
+    shirakaba: { id: uid('th'), name: 'しらかば線',   operatorId: OP.shirakaba.id, lineId: line.id, stationIdx: 0, safety: ['ats_p'], maxCars: 8,  km: 15.2, runMin: 26, dailyPassengers: 0, viaIds: [], suspended: false, delayMin: 0, note: 'さくら線の先（白樺台方面）' },
+    sakura:    { id: uid('th'), name: 'さくら線',     operatorId: OP.sakura.id,    lineId: line.id, stationIdx: 0, safety: ['cs_atc'], maxCars: 10, km: 12.5, runMin: 23, dailyPassengers: 9000, viaIds: [], suspended: false, delayMin: 0, note: '西山から都心を貫く地下鉄' },
+    minato:    { id: uid('th'), name: 'みなと線',     operatorId: OP.minato.id,    lineId: line.id, stationIdx: 5, safety: ['atc'],    maxCars: 8,  km: 4.1,  runMin: 8,  dailyPassengers: 5200, viaIds: [], suspended: false, delayMin: 0, note: '海岸から臨海部へ' },
+    aoba:      { id: uid('th'), name: 'あおば線',     operatorId: OP.aoba.id,      lineId: line.id, stationIdx: 5, safety: ['ats_p', 'atc'], maxCars: 6, km: 9.8, runMin: 17, dailyPassengers: 2600, viaIds: [], suspended: false, delayMin: 0, note: '海岸から内陸の急行線' },
+  };
+  // かえで線・しらかば線へはさくら線を経由する（東横→副都心→東上/西武 の関係）
+  TH.kaede.viaIds = [TH.sakura.id];
+  TH.shirakaba.viaIds = [TH.sakura.id];
+  const throughLines = [TH.sakura, TH.kaede, TH.shirakaba, TH.minato, TH.aoba];
   const trains = [];
   const last = line.stations.length - 1;
   const addTrain = (number, type, dir, departSec, speedKmh, extra = {}) => {
@@ -331,7 +381,9 @@ export function sampleDoc() {
         5: down ? mainLine.id : trackId('海岸2番線'),
       },
       toDepot: !!extra.toDepot, depotTrackId: extra.depotTrackId || null,
-      color: null, formationId: extra.formationId || null, note: '',
+      throughId: extra.throughId || null,
+      operatorId: extra.operatorId || OP.midori.id,
+      color: null, formationId: extra.formationId || null, note: extra.note || '',
     });
   };
 
@@ -347,22 +399,55 @@ export function sampleDoc() {
     const rush = isRush(t2);
     const headway = rush ? 600 : 1200;
     if ((t2 - 5.5 * 3600) % headway !== 0) continue;
-    const cars = rush ? 10 : 6;
-    addTrain(`${noDown}M`, 'local', 'down', t2, 60, { cars });
-    addTrain(`${noUp}M`, 'local', 'up', t2 + 300, 60, { cars });
+    const cars = 8;
+    const slot = Math.round((t2 - 5.5 * 3600) / headway);
+    // 日中の普通は3本に1本がさくら地下鉄の車両（相互直通の乗り入れ分）
+    const foreign = !rush && slot % 3 === 1;
+    addTrain(`${noDown}M`, 'local', 'down', t2, 60, {
+      cars, operatorId: foreign ? OP.sakura.id : undefined, note: foreign ? 'さくら地下鉄の車両' : '',
+    });
+    addTrain(`${noUp}M`, 'local', 'up', t2 + 300, 60, {
+      cars,
+      // 上りの普通は一部がさくら線へ直通（ラッシュ時は毎時1本がかえで本線まで）
+      throughId: foreign ? null
+        : (rush && slot % 6 === 0 ? TH.kaede.id
+          : rush && slot % 6 === 3 ? TH.shirakaba.id
+            : (!rush && slot % 3 === 0 ? TH.sakura.id : null)),
+      operatorId: foreign ? OP.sakura.id : undefined,
+    });
     noDown += 2; noUp += 2;
     if (!rush && t2 < 22 * 3600) {
-      addTrain(`${noR}M`, 'rapid', 'down', t2 + 300, 85, { cars, skip: RAPID_SKIP.slice() });
+      // 日中の快速：下りは海岸からみなと線へ、上りはさくら線へ直通
+      addTrain(`${noR}M`, 'rapid', 'down', t2 + 300, 85, {
+        cars, skip: RAPID_SKIP.slice(),
+        throughId: slot % 2 === 0 ? TH.minato.id : null,
+      });
       addTrain(`${noR + 1}M`, 'rapid', 'up', t2 + 600, 85, { cars, skip: RAPID_SKIP.slice() });
       noR += 2;
     }
   }
-  // 入庫する回送
-  addTrain('回1', 'deadhead', 'down', 23 * 3600, 45, {
-    fromIdx: 0, toIdx: 2, cars: 10, toDepot: true, depotTrackId: trackId('8番線'),
+  // あおば線直通（6両しか入れない・ATS-P必要）
+  for (const [no, dep] of [['2201M', 6.5 * 3600 + 900], ['2203M', 20 * 3600 + 900]]) {
+    addTrain(no, 'express', 'down', dep, 85, { cars: 6, skip: [1, 3], throughId: TH.aoba.id });
+  }
+  // 終電後の入庫回送（終端に残った編成を車両基地へ戻す）
+  const depotTracks = ['1番線', '2番線', '3番線', '4番線', '5番線', '6番線', '7番線', '8番線'];
+  [
+    ['回1', 'down', 23 * 3600 + 300, 0], ['回3', 'down', 23 * 3600 + 1500, 0],
+    ['回5', 'down', 23 * 3600 + 2400, 0], ['回7', 'down', 24 * 3600 + 300, 0],
+    ['回2', 'up', 23 * 3600 + 600, last], ['回4', 'up', 23 * 3600 + 1800, last],
+    ['回6', 'up', 23 * 3600 + 3000, last], ['回9', 'down', 24 * 3600 + 1200, 0],
+  ].forEach(([no, dir, dep, fromIdx], i) => {
+    addTrain(no, 'deadhead', dir, dep, 60, {
+      fromIdx, toIdx: 2, cars: 8, toDepot: true,
+      depotTrackId: trackId(depotTracks[i % depotTracks.length]),
+    });
   });
 
   doc.tracks = t; doc.objects = o; doc.formations = f;
+  for (const f2 of f) if (!f2.operatorId) f2.operatorId = OP.midori.id;
+  doc.operators = operators;
+  doc.throughLines = throughLines;
   doc.lines = [line];
   doc.trains = trains;
   initCompany(doc);     // 開業1年目として長期経営を初期化

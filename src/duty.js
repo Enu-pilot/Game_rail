@@ -7,6 +7,10 @@
 import { computeSchedule, stationName, nearbyTracks } from './timetable.js';
 import { trackKind } from './catalog.js';
 import { formationCars } from './store.js';
+import {
+  trainRequirement, mergeRequirements, canRun, throughCost, throughChain, selfOperator, operatorOf,
+  SAFETY_DEVICES, throughOf,
+} from './operators.js';
 
 /** 検査の種類（JRの一般的な周期に準拠） */
 export const INSPECTIONS = [
@@ -37,21 +41,35 @@ export function trainDistance(doc, stations, train) {
  * 運用（行路）を組む。終着駅で折り返して次の列車になれるものをつなぐ。
  * @returns {{rosters:Array, unassigned:Array}}
  */
-export function buildRosters(doc, stations, trains, opts = {}) {
+export function buildRosters(doc, line, stations, trains, opts = {}) {
   const minTurn = opts.minTurnSec ?? (doc.settings.reversalMinutes ?? 2) * 60 + 180;
   const maxIdle = opts.maxIdleSec ?? 4 * 3600;
+  const self = selfOperator(doc);
+  const selfId = self ? self.id : null;
   const list = trains.slice().sort((a, b) => a.departSec - b.departSec);
   const rosters = [];
+  /** 直通に出ている間、編成は戻ってこない（往復＋折返し） */
+  const awaySec = t => {
+    if (!t.throughId) return 0;
+    const c = throughCost(doc, t.throughId);
+    return c.chain.length ? c.min * 60 * 2 + minTurn : 0;
+  };
+  const awayKm = t => (t.throughId ? throughCost(doc, t.throughId).km * 2 : 0);
   for (const t of list) {
     const stops = computeSchedule(doc, stations, t);
     const arr = stops[stops.length - 1];
     const dist = trainDistance(doc, stations, t);
+    const op = t.operatorId || selfId;
     let best = null;
+    const treq = trainRequirement(doc, line, t);
     for (const r of rosters) {
       if (r.lastIdx !== t.fromIdx) continue;
       if (r.toDepot) continue;                       // 入庫した運用にはつながない
+      if ((r.operatorId || selfId) !== op) continue; // 他社の車両とはつながない
+      // 1運用は1編成が通しで担当するので、両数と乗入れ制限が両立しない列車はつなげない
+      if (Math.max(r.cars, t.cars || 1) > Math.min(r.reqMaxCars, treq.maxCars)) continue;
       const gap = t.departSec - r.lastArr;
-      if (gap < minTurn || gap > maxIdle) continue;
+      if (gap < r.needGap || gap > maxIdle + r.needGap) continue;
       // 先着順（いちばん長く待っている運用から使う）＝必要編成数が最小になる
       if (!best || r.lastArr < best.lastArr) best = r;
     }
@@ -59,12 +77,15 @@ export function buildRosters(doc, stations, trains, opts = {}) {
       best.trains.push(t);
       best.lastIdx = t.toIdx;
       best.lastArr = arr.arr ?? arr.dep ?? t.departSec;
-      best.distance += dist;
+      best.distance += dist + awayKm(t) * 1000;
       best.toDepot = !!t.toDepot;
-      best.end = best.lastArr;
+      best.end = best.lastArr + awaySec(t);
+      best.needGap = minTurn + awaySec(t);
       const c = t.cars || 1;
       if (c !== best.cars) best.coupling = true;     // 途中で両数が変わる＝増解結が必要
       best.cars = Math.max(best.cars, c);
+      if (t.throughId) best.throughIds.add(t.throughId);
+      best.reqMaxCars = Math.min(best.reqMaxCars, treq.maxCars);
     } else {
       rosters.push({
         id: `duty${rosters.length + 1}`,
@@ -72,10 +93,14 @@ export function buildRosters(doc, stations, trains, opts = {}) {
         trains: [t], cars: t.cars || 1,
         lastIdx: t.toIdx,
         lastArr: arr.arr ?? arr.dep ?? t.departSec,
-        start: t.departSec, end: arr.arr ?? t.departSec,
+        start: t.departSec, end: (arr.arr ?? t.departSec) + awaySec(t),
         startIdx: t.fromIdx,
-        distance: dist,
+        distance: dist + awayKm(t) * 1000,
         toDepot: !!t.toDepot,
+        operatorId: op,
+        needGap: minTurn + awaySec(t),
+        throughIds: new Set(t.throughId ? [t.throughId] : []),
+        reqMaxCars: treq.maxCars,
       });
     }
   }
@@ -86,6 +111,10 @@ export function buildRosters(doc, stations, trains, opts = {}) {
     r.km = r.distance / 1000;
     r.startName = stations[r.startIdx] ? stations[r.startIdx].name : '?';
     r.endName = stations[r.lastIdx] ? stations[r.lastIdx].name : '?';
+    r.req = mergeRequirements(r.trains.map(t => trainRequirement(doc, line, t)));
+    r.through = r.req.through;
+    r.foreign = (r.operatorId || selfId) !== selfId;
+    r.operator = operatorOf(doc, r.operatorId);
   }
   return rosters;
 }
@@ -108,23 +137,53 @@ export function shopFormations(doc) {
 }
 
 /**
- * 運用に編成を割り当てる。両数が合うものを、走行キロの少ない編成から順に充てる。
- * @returns {{assign:Object, short:number, used:Array}}
+ * 運用に編成を割り当てる。
+ * 保安装置・最大両数・所属事業者の条件を満たす編成のうち、
+ * 「その運用にしか入れない編成」から先に埋める（条件の厳しい運用を取りこぼさない）。
+ * @returns {{assign:Object, short:number, used:Array, unmet:Array}}
  */
 export function assignFormations(doc, rosters) {
+  const selfId = selfOperator(doc) ? selfOperator(doc).id : null;
   const pool = availableFormations(doc).map(f => ({
-    f, cars: formationCars(f), km: f.odoKm || 0,
+    f, cars: formationCars(f), km: f.odoKm || 0, op: f.operatorId || selfId,
   })).sort((a, b) => a.km - b.km);
   const assign = {};
   const used = new Set();
-  let short = 0;
-  for (const r of rosters.slice().sort((a, b) => b.distance - a.distance)) {
-    const cand = pool.find(p => !used.has(p.f.id) && p.cars >= r.cars);
-    if (cand) { assign[r.id] = cand.f.id; used.add(cand.f.id); }
-    else short++;
+  const unmet = [];
+  // 運用ごとに入れる編成を数え、候補の少ない運用から割り当てる
+  const targets = rosters.filter(r => !r.foreign);
+  const fits = new Map();
+  for (const r of targets) {
+    fits.set(r.id, pool.filter(p => {
+      if ((p.op || selfId) !== selfId) return false;          // 自社の運用は自社の車両で
+      if (p.cars < r.cars) return false;                      // 両数が足りない
+      return canRun(doc, p.f, r.req).ok;
+    }));
   }
-  return { assign, short, used: [...used] };
+  for (const r of targets.slice().sort((a, b) =>
+    (fits.get(a.id).length - fits.get(b.id).length) || (b.distance - a.distance))) {
+    const cand = fits.get(r.id).find(p => !used.has(p.f.id));
+    if (cand) { assign[r.id] = cand.f.id; used.add(cand.f.id); }
+    else {
+      // なぜ入れないのかを集める
+      const reasons = new Set();
+      for (const p of pool) {
+        if (used.has(p.f.id)) continue;
+        if (p.cars < r.cars) { reasons.add(`${r.cars}両に足りる編成がない`); continue; }
+        const c = canRun(doc, p.f, r.req);
+        if (c.overCars) reasons.add(`乗入れ先の最大 ${r.req.maxCars} 両を超える`);
+        for (const m of c.missing) reasons.add(`${safetyNameOf(m)} 未搭載`);
+      }
+      unmet.push({ roster: r, reasons: [...reasons].slice(0, 3) });
+    }
+  }
+  return { assign, short: unmet.length, used: [...used], unmet };
 }
+
+const safetyNameOf = id => {
+  const d = SAFETY_DEVICES.find(x => x.id === id);
+  return d ? d.name : id;
+};
 
 /** 検査の状態（残り日数・残りキロ・期限切れ） */
 export function inspectionStatus(f, dailyKm = 0) {
@@ -200,9 +259,9 @@ export function inspectionLoad(doc, formations, dailyKmOf) {
 }
 
 /** 運用のまとめ */
-export function dutySummary(doc, stations, trains) {
-  const rosters = buildRosters(doc, stations, trains);
-  const { assign, short } = assignFormations(doc, rosters);
+export function dutySummary(doc, line, stations, trains) {
+  const rosters = buildRosters(doc, line, stations, trains);
+  const { assign, short, unmet } = assignFormations(doc, rosters);
   const kmByFormation = {};
   for (const r of rosters) {
     const fid = assign[r.id];
@@ -213,13 +272,22 @@ export function dutySummary(doc, stations, trains) {
   const stay = {};
   for (const r of rosters) {
     if (r.toDepot) { stay.depot = (stay.depot || 0) + 1; continue; }
+    // 最後の列車が直通なら、その編成は相手の基地で滞泊する
+    const lastT = r.trains[r.trains.length - 1];
+    const chain = throughChain(doc, lastT && lastT.throughId);
+    if (chain.length) {
+      const nm = `${chain[chain.length - 1].name}（他社）`;
+      stay[nm] = (stay[nm] || 0) + 1;
+      r.stayAway = true;
+      continue;
+    }
     const nm = stations[r.stayIdx] ? stations[r.stayIdx].name : '?';
     stay[nm] = (stay[nm] || 0) + 1;
   }
   // 夜間滞泊できるか（駅の番線＋近くの留置線と比べる）
   const stayIssues = [];
   for (const [nm, n] of Object.entries(stay)) {
-    if (nm === 'depot') continue;
+    if (nm === 'depot' || nm.endsWith('（他社）')) continue;
     const s2 = stations.find(x => x.name === nm);
     if (!s2 || !s2.object) continue;
     const tracks = (s2.object.tracks || []).length || 1;
@@ -227,11 +295,25 @@ export function dutySummary(doc, stations, trains) {
     const have = tracks + sidings;
     if (n > have) stayIssues.push({ name: nm, need: n, have, tracks, sidings });
   }
+  const own = rosters.filter(r => !r.foreign);
+  const foreign = rosters.filter(r => r.foreign);
+  // 直通先ごとの走行キロ（他社線を走った自社車両のキロ）
+  const throughKmByLine = {};
+  for (const r of own) {
+    for (const t of r.trains) {
+      for (const th of throughChain(doc, t.throughId)) {
+        throughKmByLine[th.id] = (throughKmByLine[th.id] || 0) + (th.km || 0) * 2;
+      }
+    }
+  }
   return {
-    rosters, assign, short, kmByFormation, totalKm, stay, stayIssues,
+    rosters, assign, short, unmet, kmByFormation, totalKm, stay, stayIssues,
     coupling: rosters.filter(r => r.coupling).length,
-    need: rosters.length,
-    have: availableFormations(doc).length,
+    need: own.length,
+    foreignNeed: foreign.length,
+    have: availableFormations(doc).filter(f => (f.operatorId || (selfOperator(doc) || {}).id) === ((selfOperator(doc) || {}).id ?? null)).length,
+    throughKmByLine,
+    throughLines: throughOf(doc, line.id),
   };
 }
 

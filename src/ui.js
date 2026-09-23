@@ -33,12 +33,16 @@ import {
   INSPECTIONS, dutySummary, inspectionStatus, inspectionLoad, depotCapacity, shopFormations,
 } from './duty.js';
 import {
+  SAFETY_DEVICES, safetyDef, safetyShorts, selfOperator, operatorOf, throughOf, throughCost, canRun,
+} from './operators.js';
+import {
   addFormation, deleteSelected, duplicateSelected, assignFormation,
   updateEntity, reverseTrack, setTurnoutPosition, alignTurnouts,
   constructRoute, setRouteState, deleteRoute,
   addLine, updateLine, deleteLine, lineAddStation, lineRemoveStation, lineMoveStation,
   addTrain, updateTrain, deleteTrain, duplicateTrain,
   autoDispatch, clearHolds,
+  setThroughSuspended, setThroughDelay, applyThroughDelays, clearDelays,
 } from './actions.js';
 
 /* ---------------- DOM ヘルパ ---------------- */
@@ -732,6 +736,38 @@ export function initUI(api) {
               [{ value: '', label: '— 未留置 —' }, ...doc.tracks.map(tt => ({ value: tt.id, label: tt.name }))],
               v => updateEntity('formation', f.id, { trackId: v || null }, { history: false }))),
         ),
+        doc.operators && doc.operators.length > 1
+          ? h('div', { class: 'field', style: 'margin-top:6px' },
+            h('label', {}, '所属事業者'),
+            selectInput(`fl.${f.id}.op`, f.operatorId || (selfOperator(doc) || {}).id || '',
+              doc.operators.map(o => ({ value: o.id, label: o.name + (o.self ? '（自社）' : '') })),
+              v => updateEntity('formation', f.id, { operatorId: v || null }, { history: false })))
+          : null,
+        h('div', { class: 'field', style: 'margin-top:4px' },
+          h('label', {}, '搭載する保安装置'),
+          h('div', { class: 'chips' }, ...SAFETY_DEVICES.map(d => {
+            const on = (f.safety || []).includes(d.id);
+            return h('button', {
+              class: 'chip' + (on ? ' on' : ''), title: d.note,
+              onclick: () => {
+                const list = new Set(f.safety || []);
+                if (on) list.delete(d.id); else list.add(d.id);
+                updateEntity('formation', f.id, { safety: [...list] }, { history: true });
+              },
+            }, d.name);
+          }))),
+        (() => {
+          const ths = doc.lines.flatMap(l => throughOf(doc, l.id));
+          if (!ths.length) return null;
+          const line0 = doc.lines[0];
+          const okList = ths.filter(th => canRun(doc, f, {
+            safety: new Set([...(line0.safety || []), ...(th.safety || [])]),
+            maxCars: Math.min(line0.maxCars ?? 99, th.maxCars ?? 99),
+          }).ok);
+          return h('p', { class: 'note' }, okList.length
+            ? `乗入れ可：${okList.map(x => x.name).join('・')}`
+            : '乗入れ可：自社線のみ');
+        })(),
         over ? h('div', { class: 'warnbox' }, `⚠ ${t.name} は容量超過です`) : null,
       ));
     }
@@ -1214,6 +1250,85 @@ export function initUI(api) {
 
     if (!line) return out;
 
+    // 相互直通（事業者・保安装置・直通先）
+    {
+      const self = selfOperator(doc);
+      const ths = throughOf(doc, line.id);
+      const lineTrains = doc.trains.filter(t => t.lineId === line.id);
+      const thruTrains = lineTrains.filter(t => t.throughId);
+      const foreignTrains = lineTrains.filter(t => (t.operatorId || (self || {}).id) !== (self || {}).id);
+      const delayed = ths.filter(t => t.delayMin > 0);
+      out.push(h('div', { class: 'card' },
+        h('h4', {}, '相互直通運転', h('span', { class: 'tag' }, `${new Set([line.operatorId, ...ths.map(t => t.operatorId)].filter(Boolean)).size} 社`)),
+        h('div', { class: 'row' },
+          field('自社線の保安装置', h('div', { class: 'chips' }, ...SAFETY_DEVICES.map(d => {
+            const on = (line.safety || []).includes(d.id);
+            return h('button', {
+              class: 'chip' + (on ? ' on' : ''), title: d.note,
+              onclick: () => {
+                const set = new Set(line.safety || []);
+                if (on) set.delete(d.id); else set.add(d.id);
+                updateLine(line.id, { safety: [...set] }); emit('diagram');
+              },
+            }, d.short);
+          }))),
+          field('ホーム有効長（両）', numberInput(`line.${line.id}.mx`, line.maxCars ?? 10,
+            v => updateLine(line.id, { maxCars: Math.max(1, Math.round(v || 10)) }), { min: 1, max: 20 })),
+        ),
+        ths.length
+          ? h('div', {}, ...ths.map(th => {
+            const op = operatorOf(doc, th.operatorId);
+            const cost = throughCost(doc, th.id);
+            const n = thruTrains.filter(t => t.throughId === th.id).length;
+            const via = (th.viaIds || []).map(id => (doc.throughLines.find(x => x.id === id) || {}).name).filter(Boolean);
+            return h('div', { class: 'card sub', style: th.suspended ? 'opacity:.6' : '' },
+              h('div', { class: 'oprow' },
+                h('span', { class: 'optag', style: `background:${op.color}` }, op.short),
+                h('b', {}, th.name),
+                h('span', { class: 'note', style: 'margin:0' },
+                  `${op.name}／${safetyShorts(th.safety)}・${th.maxCars}両・${th.km}km・${th.runMin}分`)),
+              via.length ? h('p', { class: 'note', style: 'margin:2px 0' }, `経由：${via.join('→')}（通しで ${cost.km.toFixed(1)}km・${cost.min}分）`) : null,
+              h('div', { class: 'kv' },
+                h('span', {}, `直通する列車 ${n} 本／1日の直通客 ${(th.dailyPassengers || 0).toLocaleString('ja-JP')} 人`),
+                h('b', { style: `color:${th.suspended ? '#e0344a' : '#2bd4a4'}` }, th.suspended ? '直通中止' : '直通中')),
+              h('div', { class: 'row' },
+                field('遅れ（分）', numberInput(`th.${th.id}.d`, th.delayMin || 0,
+                  v => setThroughDelay(th.id, v), { min: 0, step: 1 })),
+                h('div', { class: 'field' }, h('label', {}, '運転整理'),
+                  h('div', { class: 'btn-row' },
+                    h('button', {
+                      class: 'btn sm' + (th.suspended ? ' primary' : ''),
+                      onclick: () => { setThroughSuspended(th.id, !th.suspended); emit('diagram'); },
+                    }, th.suspended ? '直通再開' : '直通中止'))),
+              ),
+            );
+          }))
+          : h('p', { class: 'note' }, '直通先がありません。'),
+        h('div', { class: 'kv', style: 'margin-top:6px' },
+          h('span', {}, '自社線を走る他社車両'), h('b', {}, `${foreignTrains.length} 本`)),
+        h('p', { class: 'note' }, 'ダイヤグラムでは、他社車両の列車は事業者の色、直通する列車は終端に▲が付きます。'),
+        h('div', { class: 'btn-row', style: 'margin-top:6px' },
+          h('button', {
+            class: 'btn sm primary', onclick: () => { applyThroughDelays(line.id); emit('diagram'); },
+          }, '▶ 直通先の遅れをダイヤに反映'),
+          h('button', {
+            class: 'btn sm', onclick: () => { clearDelays(line.id); emit('diagram'); },
+          }, '平常ダイヤに戻す'),
+        ),
+        delayed.length
+          ? h('div', { class: 'warnbox' },
+            `⚠ ${delayed.map(t => `${t.name} ${t.delayMin}分遅れ`).join('・')}`,
+            h('div', { class: 'note', style: 'margin-top:4px' }, '反映すると、直通から戻る編成の遅れが同じ運用の次の列車へ波及します。そのあと「行き違い・待避を自動調整」で支障を整理してください。'))
+          : null,
+        (() => {
+          const nd = lineTrains.filter(t => (t.delaySec || 0) > 0);
+          return nd.length
+            ? h('p', { class: 'note' }, `いま ${nd.length} 本が遅延中（最大 ${Math.round(Math.max(...nd.map(t => t.delaySec)) / 60)} 分）`)
+            : null;
+        })(),
+      ));
+    }
+
     // 駅
     const g = graph();
     const sts = lineStations(doc, g, line);
@@ -1320,6 +1435,33 @@ export function initUI(api) {
         field('使用編成', selectInput(`tr.${sel.id}.form`, sel.formationId || '',
           [{ value: '', label: '— 始発番線にいる編成を使う —' }, ...doc.formations.map(f => ({ value: f.id, label: `${f.name}（${f.cars}両）` }))],
           v => updateTrain(sel.id, { formationId: v || null }))),
+        (() => {
+          const ths = throughOf(doc, line.id);
+          if (!ths.length && doc.operators.length < 2) return null;
+          return h('div', { class: 'row' },
+            ths.length
+              ? field('直通先', selectInput(`tr.${sel.id}.thr`, sel.throughId || '',
+                [{ value: '', label: '— 直通しない —' },
+                  ...ths.map(t2 => ({ value: t2.id, label: `${t2.name}（${t2.maxCars}両まで）` }))],
+                v => { updateTrain(sel.id, { throughId: v || null }); emit('diagram'); }))
+              : null,
+            doc.operators.length > 1
+              ? field('担当事業者', selectInput(`tr.${sel.id}.op`, sel.operatorId || (selfOperator(doc) || {}).id || '',
+                doc.operators.map(o => ({ value: o.id, label: o.name + (o.self ? '（自社）' : '') })),
+                v => { updateTrain(sel.id, { operatorId: v || null }); emit('diagram'); }))
+              : null);
+        })(),
+        (() => {
+          if (!sel.throughId) return null;
+          const th = doc.throughLines.find(x => x.id === sel.throughId);
+          if (!th) return null;
+          const c = throughCost(doc, sel.throughId);
+          const over = (sel.cars || 0) > (th.maxCars ?? 99);
+          return h('p', { class: 'note', style: over ? 'color:#e0344a' : '' },
+            over
+              ? `⚠ ${th.name}は ${th.maxCars} 両までです（この列車は ${sel.cars} 両）`
+              : `${th.name}へ直通：片道 ${c.km.toFixed(1)}km・${c.min}分。編成は往復＋折返しのあいだ戻ってきません`);
+        })(),
         h('div', { class: 'checkline' },
           (() => {
             const i = h('input', { type: 'checkbox', checked: !!sel.toDepot });
@@ -1520,7 +1662,7 @@ export function initUI(api) {
     const sts = lineStations(doc, graph(), line);
     const trains = doc.trains.filter(t => t.lineId === line.id);
     if (!trains.length) return null;
-    const duty = dutySummary(doc, sts, trains);
+    const duty = dutySummary(doc, line, sts, trains);
     const data = { line, sts, trains, duty };
     dutyCache = { rev: store.rev, data };
     return data;
@@ -1572,11 +1714,14 @@ export function initUI(api) {
     out.push(h('div', { class: 'card' },
       h('h4', {}, '運用（行路）', h('span', { class: 'tag' }, `${duty.rosters.length} 本`)),
       h('table', { class: 'mini nowrap' },
-        h('tr', {}, h('th', {}, '運用'), h('th', {}, '時間'), h('th', {}, '列車'), h('th', {}, '走行'), h('th', { class: 'wrap' }, '充当編成')),
+        h('tr', {}, h('th', {}, '運用'), h('th', {}, '時間'), h('th', {}, '走行'),
+          h('th', {}, '条件'), h('th', { class: 'wrap' }, '直通先'), h('th', { class: 'wrap' }, '充当編成')),
         ...duty.rosters.map(r => {
           const f = doc.formations.find(x => x.id === duty.assign[r.id]);
+          const req = `${safetyShorts([...r.req.safety])}/${r.cars}両`;
           return h('tr', {
             style: 'cursor:pointer',
+            title: `${r.startName} ${fmtHM(r.start)} → ${r.endName} ${fmtHM(r.end)}／列車 ${r.trains.length} 本`,
             onclick: () => {
               store.ui.diagram.selected = r.trains[0].id;
               if (f) { store.ui.sel = { kind: 'formation', id: f.id }; }
@@ -1585,12 +1730,84 @@ export function initUI(api) {
           },
             h('td', {}, `${r.no}`),
             h('td', {}, `${fmtHM(r.start)}–${fmtHM(r.end)}`),
-            h('td', {}, `${r.trains.length}`),
             h('td', {}, `${Math.round(r.km)}km`),
-            h('td', { class: 'wrap', style: f ? `color:${f.color}` : 'color:#e0344a' }, f ? f.name : '（不足）'));
+            h('td', {}, req),
+            h('td', { class: 'wrap' }, r.through.map(x => x.name).join('+') || '—'),
+            h('td', {
+              class: 'wrap',
+              style: f ? `color:${f.color}` : (r.foreign ? `color:${r.operator.color}` : 'color:#e0344a'),
+            }, f ? f.name : (r.foreign ? r.operator.name : '（不足）')));
         })),
+      duty.unmet && duty.unmet.length
+        ? h('div', { class: 'warnbox' }, '⚠ 充当できない運用があります',
+          h('div', { style: 'margin-top:4px' }, ...duty.unmet.slice(0, 5).map(u =>
+            h('div', { class: 'note', style: 'white-space:normal' },
+              `・${u.roster.name}（${safetyShorts([...u.roster.req.safety])}／${u.roster.cars}両${u.roster.through.length ? '／' + u.roster.through.map(x => x.name).join('+') : ''}）：${u.reasons.join('、')}`))))
+        : null,
       h('p', { class: 'note' }, `${duty.rosters[0] ? `例：${duty.rosters[0].name} は ${duty.rosters[0].startName} 発 ${fmtHM(duty.rosters[0].start)} 〜 ${duty.rosters[0].endName} 着 ${fmtHM(duty.rosters[0].end)}。` : ''}行をクリックするとダイヤでその運用の初列車を選びます。折返しは ${(doc.settings.reversalMinutes ?? 2) + 3} 分以上あける想定です。`),
     ));
+
+    // 乗入れ可否（編成 × 直通先）
+    {
+      const ths = throughOf(doc, data.line.name ? data.line.id : data.line.id);
+      const pax = doc.formations.filter(f => ['emu', 'dmu', 'coach'].includes(f.vehicle));
+      if (ths.length && pax.length) {
+        const cell = (f, th) => {
+          const chain = [...(th.viaIds || []).map(id => doc.throughLines.find(x => x.id === id)).filter(Boolean), th];
+          const req = {
+            safety: new Set([...(data.line.safety || []), ...chain.flatMap(c => c.safety || [])]),
+            maxCars: Math.min(data.line.maxCars ?? 99, ...chain.map(c => c.maxCars ?? 99)),
+          };
+          const r = canRun(doc, f, req);
+          return { ok: r.ok, why: r.overCars ? `${req.maxCars}両まで` : r.missing.map(m => safetyDef(m).short).join('') };
+        };
+        out.push(h('div', { class: 'card' },
+          h('h4', {}, '乗入れ可否', h('span', { class: 'tag' }, `${ths.length} 社線`)),
+          h('div', { class: 'xscroll' }, h('table', { class: 'mini nowrap tight' },
+            h('tr', {}, h('th', {}, '編成'), h('th', {}, '両'), h('th', {}, '装置'),
+              ...ths.map(th => h('th', { title: `${th.name}（${safetyShorts(th.safety)}・${th.maxCars}両）` }, th.name.replace(/本?線$/, '').slice(0, 3)))),
+            ...pax.map(f => h('tr', {
+              style: 'cursor:pointer',
+              onclick: () => { store.ui.sel = { kind: 'formation', id: f.id }; emit('select'); showTab('right', 'formations'); },
+            },
+              h('td', { style: `color:${f.color}` }, f.name),
+              h('td', {}, `${f.cars}`),
+              h('td', { title: (f.safety || []).map(x => safetyDef(x).name).join('・') }, safetyShorts(f.safety) || '—'),
+              ...ths.map(th => {
+                const c = cell(f, th);
+                return h('td', {
+                  style: `color:${c.ok ? '#2bd4a4' : '#e0344a'}`,
+                  title: c.ok ? '乗入れ可' : `不可：${c.why}`,
+                }, c.ok ? '○' : '×');
+              }))))),
+          h('p', { class: 'note' }, '×の理由は列にカーソルを合わせると出ます。編成タブで保安装置を積み替えると、入れる運用が変わります。'),
+        ));
+      }
+      // 直通のキロ精算
+      const km = duty.throughKmByLine || {};
+      const rows = Object.entries(km).filter(([, v]) => v > 0);
+      if (rows.length) {
+        const rate = doc.settings.settlementPerCarKm ?? 60;
+        const self = selfOperator(doc);
+        const foreignKm = duty.rosters.filter(r => r.foreign).reduce((a, r) => a + r.km * r.cars, 0);
+        const ownKm = rows.reduce((a, [, v]) => a + v, 0) * 8;
+        out.push(h('div', { class: 'card' },
+          h('h4', {}, '直通の車両使用料'),
+          h('table', { class: 'mini nowrap' },
+            h('tr', {}, h('th', {}, '直通先'), h('th', {}, '自社車両の走行')),
+            ...rows.map(([id, v]) => {
+              const th = doc.throughLines.find(x => x.id === id);
+              return h('tr', {}, h('td', {}, th ? th.name : id), h('td', {}, `${v.toFixed(0)} km/日`));
+            })),
+          h('div', { class: 'kv' }, h('span', {}, `他社線を走る自社車両`), h('b', {}, `${Math.round(ownKm).toLocaleString('ja-JP')} 車両km/日`)),
+          h('div', { class: 'kv' }, h('span', {}, `自社線を走る他社車両`), h('b', {}, `${Math.round(foreignKm).toLocaleString('ja-JP')} 車両km/日`)),
+          h('div', { class: 'kv' }, h('span', {}, `精算（${rate} 円/車両km）`),
+            h('b', { style: `color:${ownKm <= foreignKm ? '#2bd4a4' : '#e0344a'}` },
+              `${ownKm <= foreignKm ? '受取' : '支払'} ${Math.round(Math.abs(ownKm - foreignKm) * rate / 10000)} 万円/日`)),
+          h('p', { class: 'note' }, '相互直通では、相手の線を走った車両キロの差を車両使用料として精算します。自社車両を多く送り出すほど支払いが増え、乗り入れてもらうほど受け取りが増えます。'),
+        ));
+      }
+    }
 
     // 検査の期限
     const forms = doc.formations.filter(f => ['emu', 'dmu', 'coach'].includes(f.vehicle));

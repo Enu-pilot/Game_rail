@@ -98,7 +98,7 @@ const _schedCache = new Map();
 export function computeSchedule(doc, stations, train) {
   const key = train.id;
   const holds = train.holds || {};
-  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
+  const sig = `${store.rev}|${stations.map(s => `${s.id}:${Math.round(s.km)}`).join(',')}|${train.fromIdx},${train.toIdx},${train.departSec},${train.delaySec || 0},${train.speedKmh},${train.dwellSec},${train.skip.join('-')}|${JSON.stringify(holds)}`;
   const hit = _schedCache.get(key);
   if (hit && hit.sig === sig) return hit.stops;
 
@@ -108,7 +108,7 @@ export function computeSchedule(doc, stations, train) {
   const dwell = Math.max(0, train.dwellSec ?? 30);
   const trainMax = Math.max(10, train.speedKmh || 60);
   const stops = [];
-  let t = train.departSec || 0;
+  let t = (train.departSec || 0) + (train.delaySec || 0);
 
   if (from === to) {
     stops.push({ idx: from, arr: null, dep: t, skip: false, km: stations[from] ? stations[from].km : 0 });
