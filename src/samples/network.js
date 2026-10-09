@@ -12,8 +12,8 @@
 
 import { newDoc, uid, store } from '../store.js';
 import { objectDef, TURNOUT_TYPE_BY_VARIANT, FORMATION_COLORS } from '../catalog.js';
-import { buildGraph, junctionNodes, turnoutSpecAt } from '../topology.js';
-import { polylineLength, pointAt, distToPolyline } from '../geom.js';
+import { buildGraph, junctionNodes, turnoutSpecAt, crossoverUnits } from '../topology.js';
+import { polylineLength, pointAt, distToPolyline, distToSegment } from '../geom.js';
 import { lineStations, computeSchedule } from '../timetable.js';
 import { buildRosters } from '../duty.js';
 import { planMeets } from '../meets.js';
@@ -44,6 +44,7 @@ const O = (type, x, y, extra = {}) => {
     extraM: extra.extraM ?? 0,
     population: extra.population, jobs: extra.jobs, kindId: extra.kindId,
     label: extra.label ?? '', note: extra.note ?? '', trackId: extra.trackId ?? null,
+    ...(extra._fit ? { _fit: true } : {}),
   };
 };
 
@@ -78,11 +79,11 @@ export function buildNetwork(spec) {
   const stationObjByName = {};
 
   /* ---- 1) 路線ごとに本線・駅・待避線を描く ---- */
-  const gaps = [];
+  const gaps = [], pendingDiamonds = [];
   for (const L of spec.lines) {
     const D = spec.diagram && spec.diagram[L.key];
     if (D) {
-      drawDiagramLine(L, D, { lines, tracks, objects, stationObjByName, SP, gaps, T, O });
+      drawDiagramLine(L, D, { lines, tracks, objects, stationObjByName, SP, gaps, T, O, pendingDiamonds });
       continue;
     }
     const st = L.stations.map(([name, km, type = 's', extra = {}]) => ({ name, km, type, extra }));
@@ -625,7 +626,7 @@ export function buildNetwork(spec) {
   const estMain = fleetDefs.filter(fd => fd.main).reduce((a, fd) => a + est.get(fd), 0);
 
   // 車両基地
-  const depotTracks = [];
+  const depotTracks = [], pendingYards = [];
   for (const dp of spec.depots || []) {
     const E = lines[dp.line];
     const S = E.stations.find(x => x.name === dp.at);
@@ -660,31 +661,42 @@ export function buildNetwork(spec) {
         }
       }
     }
-    if (!drawn || cap < setsHere) {
-      const need = drawn ? Math.max(2, Math.ceil((setsHere + 1 - cap) / 2) + 1) : nStable;
-      const yard = buildDepot(E, S, dp, need, lenM, !!drawn);
-      tracks.push(...yard.tracks);
-      objects.push(...yard.objects);
-      // 上下2本の本線で描いた路線では、入出庫線の根元を近い方の本線につなぐ
-      if (E.mains && E.mains.length) {
-        const io = yard.tracks[0], q = io.points[1];
-        let best = null;
-        for (const t of E.mains) {
-          const r = distToPolyline(q.x, q.y, t.points);
-          if (!best || r.d < best.d) best = { d: r.d, t, at: r.at };
-        }
-        const pp = pointAt(best.t.points, Math.max(15, Math.min(polylineLength(best.t.points) - 15, best.at - 40)));
-        io.points[0] = { x: Math.round(pp.x * 10) / 10, y: Math.round(pp.y * 10) / 10 };
-      }
-      if (dp.own || extra) {
-        depotTracks.push(...yard.stabling.map(t => ({ t, left: 2, depot: dp })));
-        if (yard.shop && !(drawn && drawn.shop)) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
-      }
+    if (process.env.DEBUG_DEPOT) console.log('DEPOT', dp.name, drawn ? `図${drawn.stabling.length}線` : '図なし', 'cap', cap, 'need', setsHere);
+    if (!drawn || cap < setsHere) pendingYards.push({ E, S, dp, drawn, cap, setsHere, extra, nStable, lenM });
+  }
+  // 足りない車両基地を描き足す。本線の車両はどの基地にも置けるので、会社全体で足りなければ
+  // いちばん足りない基地に、線区専用の車両はその基地に足す。
+  const ownCap = depotTracks.filter(d => !d.shop && d.depot.own && !d.depot.reserved).reduce((a, d) => a + d.left, 0);
+  let mainShort = estMain + 1 - ownCap;
+  pendingYards.sort((a, b) => (b.setsHere - b.cap) - (a.setsHere - a.cap));
+  for (const pd of pendingYards) {
+    const { E, S, dp, drawn, cap, setsHere, extra, nStable, lenM } = pd;
+    let need = nStable;
+    if (drawn) {
+      const short = extra ? setsHere + 1 - cap : (dp.own && !dp.reserved ? mainShort : 0);
+      if (short <= 0) continue;
+      need = Math.max(2, Math.ceil(short / 2) + 1);
+      if (!extra) mainShort = 0;
+    }
+    const yard = E.diagram ? placeYard(E, S, dp, need, lenM, !!drawn, tracks, objects) : buildDepot(E, S, dp, need, lenM, !!drawn);
+    tracks.push(...yard.tracks);
+    objects.push(...yard.objects);
+    if (dp.own || extra) {
+      depotTracks.push(...yard.stabling.map(t => ({ t, left: 2, depot: dp })));
+      if (yard.shop && !(drawn && drawn.shop)) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
     }
   }
+  fitObjects(objects, tracks);
   /* ---- 7) 分岐器を接続点から自動生成 ---- */
   const tmp = { ...doc, tracks, objects, formations: [] };
   const g = buildGraph(tmp);
+  if (pendingDiamonds.length) {
+    const units = crossoverUnits(tmp, g, -Math.random());
+    for (const pd of pendingDiamonds) {
+      const sc = units.some(u => u.kind === 'scissors' && u.connectors.some(c => c.id === pd.a) && u.connectors.some(c => c.id === pd.b));
+      if (!sc) objects.push(O('diamond', pd.x, pd.y, { rot: pd.rot, label: 'ダイヤモンドクロッシング' }));
+    }
+  }
   let no = 0;
   for (const nd of junctionNodes(g)) {
     const specT = turnoutSpecAt(tmp, g, nd.id);
@@ -792,14 +804,14 @@ function dummyTrain(line, fromIdx, toIdx, vmax) {
  * 車両基地：駅の先から入出庫線を出し、はしご状に留置線を並べる。
  * side = +1 / -1 で本線のどちら側に置くか。
  */
-function buildDepot(E, S, dp, nStable, lenM, annex = false) {
+function buildDepot(E, S, dp, nStable, lenM, annex = false, farM = null) {
   const side = dp.side || 1;
   const s0 = S.s + (dp.offset ?? 200);
   const u = E.path.at(s0), a = u.angle;
   const ux = { x: Math.cos(a), y: Math.sin(a) };
   const nv = { x: -Math.sin(a) * side, y: Math.cos(a) * side };
   // 配線略図で描いた路線では、駅の配線にかからないよう本線から離して置く
-  const far = E.diagram ? 150 : 0;
+  const far = farM ?? (E.diagram ? 150 : 0);
   const P = (du, dv) => { const w = dv ? dv + far : 0; return { x: u.x + ux.x * du + nv.x * w, y: u.y + ux.y * du + nv.y * w }; };
   const tracks = [], objects = [];
   const nm = annex ? `${dp.name}（増設）` : dp.name;
@@ -826,6 +838,138 @@ function buildDepot(E, S, dp, nStable, lenM, annex = false) {
   const lbl = P(120 + lenM / 2, 60);
   if (!annex) objects.push(O('admin_office', lbl.x, lbl.y, { label: dp.name, rot: a, w: 50, h: 22 }));
   return { tracks, objects, stabling, shop };
+}
+
+/**
+ * 配線図から置いたホーム・建物が線路の建築限界にかからないように縮める・ずらす
+ * （配線図ではホームが線路に接して描かれていたり、駅の両端の渡り線にかかっていたりする）
+ */
+function fitObjects(objects, tracks) {
+  const HALF = 1.9 + 0.15;
+  const pts = [];
+  for (const t of tracks) {
+    const L = polylineLength(t.points);
+    for (let d = 0; d <= L; d += 1.5) pts.push(pointAt(t.points, d));
+    pts.push(t.points[t.points.length - 1]);
+  }
+  // 点の索引
+  const cell = 50, grid = new Map();
+  for (const p of pts) { const k = Math.floor(p.x / cell) + ',' + Math.floor(p.y / cell); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(p); }
+  const near = (o, r) => {
+    const out = [];
+    for (let i = Math.floor((o.x - r) / cell); i <= Math.floor((o.x + r) / cell); i++)
+      for (let j = Math.floor((o.y - r) / cell); j <= Math.floor((o.y + r) / cell); j++) for (const p of grid.get(i + ',' + j) || []) out.push(p);
+    return out;
+  };
+  const local = (o, p) => {
+    const c = Math.cos(-(o.rot || 0)), sn = Math.sin(-(o.rot || 0)), dx = p.x - o.x, dy = p.y - o.y;
+    return { lx: dx * c - dy * sn, ly: dx * sn + dy * c };
+  };
+  const hits = o => near(o, Math.max(o.w, o.h) / 2 + 4).map(p => local(o, p)).filter(q => Math.abs(q.lx) <= o.w / 2 + HALF && Math.abs(q.ly) <= o.h / 2 + HALF);
+  const move = (o, du, dv) => {
+    const c = Math.cos(o.rot || 0), sn = Math.sin(o.rot || 0);
+    o.x += du * c - dv * sn; o.y += du * sn + dv * c;
+  };
+  const drop = new Set();
+  for (const o of objects) {
+    if (!o._fit) continue;
+    delete o._fit;
+    let hs = hits(o);
+    if (!hs.length) continue;
+    const isPlat = o.type.startsWith('platform');
+    // 長手方向：ホームの中ほどを横切る線（端の渡り線）があれば、そこまで縮める
+    const core = hs.filter(q => Math.abs(q.ly) < o.h / 2 - 0.3);
+    if (core.length && isPlat) {
+      let lo = -o.w / 2, hi = o.w / 2;
+      for (const q of core) { if (q.lx >= 0) hi = Math.min(hi, q.lx - HALF); else lo = Math.max(lo, q.lx + HALF); }
+      if (hi - lo >= 20) { const w = hi - lo; move(o, (lo + hi) / 2, 0); o.w = w; hs = hits(o); }
+    }
+    // 幅方向：両側の線から建築限界ぶん離れた帯に収める
+    if (hs.length) {
+      let lo = -o.h / 2, hi = o.h / 2;
+      for (const q of hs) { if (q.ly >= 0) hi = Math.min(hi, q.ly - HALF); else lo = Math.max(lo, q.ly + HALF); }
+      if (hi - lo >= (isPlat ? 2.5 : 6)) { const h = hi - lo; move(o, 0, (lo + hi) / 2); o.h = h; hs = hits(o); }
+    }
+    if (hs.length && !isPlat) {
+      // 建物はずらす
+      const w0 = { x: o.x, y: o.y };
+      let ok = false;
+      for (const dv of [12, -12, 24, -24, 40, -40, 60, -60, 90, -90]) {
+        o.x = w0.x; o.y = w0.y; move(o, 0, dv);
+        if (!hits(o).length) { ok = true; break; }
+      }
+      if (!ok) { o.x = w0.x; o.y = w0.y; drop.add(o); }
+    }
+  }
+  if (drop.size) for (let i = objects.length - 1; i >= 0; i--) if (drop.has(objects[i])) objects.splice(i, 1);
+}
+
+/** 線路の線分の索引（近くの線路をすばやく探す） */
+function segIndex(tracks, objects) {
+  const cell = 40, m = new Map();
+  const addSeg = (a, b) => {
+    const x0 = Math.floor(Math.min(a.x, b.x) / cell), x1 = Math.floor(Math.max(a.x, b.x) / cell);
+    const y0 = Math.floor(Math.min(a.y, b.y) / cell), y1 = Math.floor(Math.max(a.y, b.y) / cell);
+    for (let i = x0; i <= x1; i++) for (let j = y0; j <= y1; j++) {
+      const k = i + ',' + j;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push([a, b]);
+    }
+  };
+  for (const t of tracks) for (let k = 1; k < t.points.length; k++) addSeg(t.points[k - 1], t.points[k]);
+  // ホーム・建屋も避ける
+  for (const o of objects) {
+    if (!/platform|shed|shop|office/.test(o.type) || !o.w || !o.h) continue;
+    const c = Math.cos(o.rot || 0), sn = Math.sin(o.rot || 0);
+    const P = (u, v) => ({ x: o.x + c * u - sn * v, y: o.y + sn * u + c * v });
+    const q = [P(-o.w / 2, -o.h / 2), P(o.w / 2, -o.h / 2), P(o.w / 2, o.h / 2), P(-o.w / 2, o.h / 2)];
+    for (let k = 0; k < 4; k++) addSeg(q[k], q[(k + 1) % 4]);
+  }
+  return { cell, m };
+}
+function nearTrack(idx, p, r) {
+  const i = Math.floor(p.x / idx.cell), j = Math.floor(p.y / idx.cell);
+  for (let a = i - 1; a <= i + 1; a++) for (let b = j - 1; b <= j + 1; b++) {
+    for (const [s, e] of idx.m.get(a + ',' + b) || []) if (distToSegment(p.x, p.y, s.x, s.y, e.x, e.y) < r) return true;
+  }
+  return false;
+}
+/** 配線略図で描いた路線に車両基地を描き足す：駅の配線や他の線にかからない場所を探す */
+function placeYard(E, S, dp, need, lenM, annex, tracks, objects) {
+  const idx = segIndex(tracks, objects);
+  const base = dp.offset ?? 200;
+  const total = E.path.len;
+  let first = null;
+  const anchor = yard => {
+    // 入出庫線の根元を近い方の本線につなぐ
+    const io = yard.tracks[0], q = io.points[1];
+    let best = null;
+    for (const t of E.mains) {
+      const r = distToPolyline(q.x, q.y, t.points);
+      if (!best || r.d < best.d) best = { d: r.d, t, at: r.at };
+    }
+    const pp = pointAt(best.t.points, Math.max(15, Math.min(polylineLength(best.t.points) - 15, best.at - 40)));
+    io.points[0] = { x: Math.round(pp.x * 10) / 10, y: Math.round(pp.y * 10) / 10 };
+  };
+  const clash = yard => yard.tracks.some((t, k) => {
+    const L = polylineLength(t.points);
+    for (let d = k === 0 ? 14 : 0; d <= L; d += 6) if (nearTrack(idx, pointAt(t.points, d), 7)) return true;
+    return false;
+  });
+  for (let n = 0; n <= 16; n++) {
+    const dd = (n % 2 ? 1 : -1) * Math.ceil(n / 2) * 300;
+    const s0 = S.s + base + dd;
+    if (total && (s0 < 0 || s0 + lenM + 300 > total)) continue;
+    for (const sd of [dp.side || 1, -(dp.side || 1)]) {
+      for (const far of [150, 260, 400]) {
+        const yard = buildDepot(E, S, { ...dp, offset: base + dd, side: sd }, need, lenM, annex, far);
+        anchor(yard);
+        if (!first) first = yard;
+        if (!clash(yard)) return yard;
+      }
+    }
+  }
+  return first;
 }
 
 /* ---------------- 配線略図から描く路線 ---------------- */
@@ -857,6 +1001,8 @@ function drawDiagramLine(L, D, ctx) {
   let P0 = L.origin || { x: 0, y: 0 }, heading = (L.heading ?? 0) * DEG;
   let headingTurn = null;
   if (L.attach) {
+    // 起点側の切り口の数（本線＋切れている線）：接続先の出口をこの数だけ使う
+    L._cuts = D.mains.length + D.tracks.reduce((a, d) => a + d.ends.filter((e, w) => e === 'boundary' && Math.abs(d.pts[w === 0 ? 0 : d.pts.length - 1][0] - D.x0) <= 1.5).length, 0);
     const parent = lines[L.attach.line];
     const ps = parent && parent.stations.find(x => x.name === L.attach.at);
     if (!parent || !ps) throw new Error(`${L.name}: 接続先 ${L.attach.line}/${L.attach.at} がありません`);
@@ -878,7 +1024,23 @@ function drawDiagramLine(L, D, ctx) {
     turns.push({ u: map.U((sep[0] + sep[1]) / 2), h: tdeg * DEG });
   }
   if (headingTurn != null && map.seps.length) {
-    const u0 = map.U((map.seps[0][0] + map.seps[0][1]) / 2);
+    let u0 = map.U((map.seps[0][0] + map.seps[0][1]) / 2);
+    // 接続先の駅の配線（車両基地など）にかからない位置で曲がる
+    const idx = segIndex(tracks, []);
+    const clearAt = ut => {
+      const pts = arcPath(P0, heading, [{ u: ut, h: headingTurn }], ut + 1200);
+      const pth = makePath(pts);
+      for (let d = 100; d <= pth.len; d += 12) {
+        const q = pth.at(d), nv = pth.nrm(d);
+        if ([-12, 0, 12].some(v => nearTrack(idx, { x: q.x + nv.x * v, y: q.y + nv.y * v }, 6))) return false;
+      }
+      return true;
+    };
+    if (process.env.DEBUG_TURN) console.log("TURN", L.key, "u0", Math.round(u0), "total", Math.round(map.total), "clear0", clearAt(u0));
+    for (let ut = u0; ut < Math.min(map.total * 0.6, u0 + 3000); ut += 60) {
+      if (clearAt(ut)) { u0 = ut; break; }
+    }
+    if (process.env.DEBUG_TURN) console.log("TURN ->", Math.round(u0));
     if (!turns.some(t => Math.abs(t.u - u0) < 1)) turns.push({ u: u0, h: headingTurn });
   }
   turns.sort((a, b) => a.u - b.u);
@@ -923,13 +1085,6 @@ function drawDiagramLine(L, D, ctx) {
   });
   const entry = { spec: L, main: mains[0], mains, path, stations: [], key: L.key, diagram: { D, map, M } };
   lines[L.key] = entry;
-  if (L.ring) {
-    // 環状線の継目
-    for (const t of mains) {
-      const a = t.points[t.points.length - 1], b = t.points[0];
-      if (Math.hypot(a.x - b.x, a.y - b.y) > 1) tracks.push(T(`${t.name}（継目）`, 'main', [a, b], {}, { maxSpeedKmh: L.vmax ?? null }));
-    }
-  }
 
   // 駅の名前（いちばん近い駅）
   const nearStation = x => {
@@ -976,6 +1131,43 @@ function drawDiagramLine(L, D, ctx) {
     return t;
   });
   entry.diagram.trackOf = trackOf;
+  if (L.ring) {
+    // 環状線の継目：本線の終わりを、起点の駅の手前で切れている線（1周して戻ってくる線）につなぐ。
+    // 無ければ本線の始まりへ。
+    const h = path.at(map.total).angle;
+    const perp = p => -Math.sin(h) * p.x + Math.cos(h) * p.y;
+    const firstX = map.cx[0];
+    const exits = [];
+    D.tracks.forEach((d, k) => {
+      const t = trackOf[k];
+      if (!t) return;
+      d.ends.forEach((e, w) => {
+        const q = d.pts[w === 0 ? 0 : d.pts.length - 1];
+        if (e !== 'boundary' || q[0] > firstX || Math.abs(q[0] - D.x0) > 3) return;
+        exits.push({ t, which: w === 0 ? 'a' : 'b', p: w === 0 ? t.points[0] : t.points[t.points.length - 1] });
+      });
+    });
+    const ends = mains.map(t => ({ t, p: t.points[t.points.length - 1] }));
+    let pairs = null;
+    if (exits.length >= ends.length) {
+      // 幅のいちばん狭いひと続きを、左から順に組にする
+      const E2 = exits.slice().sort((a, b) => perp(a.p) - perp(b.p)), M2 = ends.slice().sort((a, b) => perp(a.p) - perp(b.p));
+      let best = 0, bw = Infinity;
+      for (let i = 0; i + M2.length <= E2.length; i++) {
+        const w = perp(E2[i + M2.length - 1].p) - perp(E2[i].p);
+        if (w < bw) { bw = w; best = i; }
+      }
+      pairs = M2.map((m, k) => [m, E2[best + k]]);
+    }
+    for (const t of mains) {
+      const pr = pairs && pairs.find(x => x[0].t === t);
+      const a = t.points[t.points.length - 1];
+      const b = pr ? pr[1].p : t.points[0];
+      if (pr) { pr[1].t.ends[pr[1].which] = 'open'; pr[1].t.kind = 'main'; pr[1].t.name = `${t.name}（${st[0].name}方）`; }
+      t.ends.b = 'open';
+      if (Math.hypot(a.x - b.x, a.y - b.y) > 1) tracks.push(T(`${t.name}（継目）`, 'main', [a, b], {}, { maxSpeedKmh: L.vmax ?? null }));
+    }
+  }
 
   // 交差：平面交差はダイヤモンドクロッシング、立体交差は上を通る線を level=1 に
   const isConnector = k => {
@@ -997,10 +1189,14 @@ function drawDiagramLine(L, D, ctx) {
       continue;
     }
     // シーサスクロッシング（渡り線どうしの交差）は渡り線の組として扱うので、記号は置かない
-    if (c.a[0] === 't' && c.b[0] === 't' && isConnector(c.a[1]) && isConnector(c.b[1])) continue;
     const p = M(c.x, c.y);
     const r = distToPolyline(p.x, p.y, ta.points);
     const ang = pointAt(ta.points, r.at).angle;
+    // （同じ2線を結ぶ渡り線どうしでなければ、ふつうのダイヤモンドクロッシング：配線が揃ってから決める）
+    if (c.a[0] === 't' && c.b[0] === 't' && isConnector(c.a[1]) && isConnector(c.b[1])) {
+      ctx.pendingDiamonds.push({ x: p.x, y: p.y, rot: ang, a: ta.id, b: tb.id });
+      continue;
+    }
     objects.push(O('diamond', p.x, p.y, { rot: ang, label: 'ダイヤモンドクロッシング' }));
   }
 
@@ -1020,11 +1216,25 @@ function drawDiagramLine(L, D, ctx) {
       }
       return false;
     }));
-    objects.push(O(through ? 'inspection_shed' : 'parts_shop', c.x, c.y, { w, h, rot: ang, label: through ? '検修庫' : '' }));
+    objects.push(O(through ? 'inspection_shed' : 'parts_shop', c.x, c.y, { w, h, rot: ang, label: through ? '検修庫' : '', _fit: !through }));
   }
   for (const t of D.tts || []) {
     const c = M(t.x, t.y);
     objects.push(O('turntable', c.x, c.y, { label: `${nearStation(t.x)}転車台` }));
+    // 台の縁で切ってある線の端を、台（直径 25m）の縁に寄せる
+    const reach = t.r * Math.max(map.kx, KY) + 3, rim = 12;
+    for (const tr of trackOf) {
+      if (!tr) continue;
+      for (const k of [0, tr.points.length - 1]) {
+        const q = tr.points[k], d = Math.hypot(q.x - c.x, q.y - c.y);
+        if (d > reach || d < 1e-6) continue;
+        const nb = tr.points[k === 0 ? 1 : tr.points.length - 2];
+        // 台へ入る向き（隣の点から端へ）のまま、縁まで延ばす／縮める
+        const a = Math.atan2(c.y - nb.y, c.x - nb.x), dn = Math.hypot(c.x - nb.x, c.y - nb.y);
+        if (dn <= rim + 1) continue;
+        tr.points[k] = { x: c.x - Math.cos(a) * rim, y: c.y - Math.sin(a) * rim };
+      }
+    }
   }
 
   // 駅
@@ -1057,12 +1267,15 @@ function drawDiagramLine(L, D, ctx) {
     });
     if (upHere) obj.upTrackId = upHere.id;
     if (noStop.length) obj.noStop = noStop;
+    // 他線のホーム（この駅で分かれる路線が使う番線）
+    const alt = D.tracks.map((d, k) => (d.stations || []).includes(S.name) && d.foreign && trackOf[k] ? trackOf[k].id : null).filter(Boolean);
+    if (alt.length) obj.altTracks = alt;
     objects.push(obj);
     for (const b of ds.plats || []) {
       const c = M((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
       // ホームは図より少し短く細く（図では端の渡り線に接して描かれていることがある）
       const w = (b[2] - b[0]) * map.kx * 0.86, h = Math.max(4, (b[3] - b[1]) * KY * 0.7);
-      objects.push(O('platform_island', c.x, c.y, { w, h, rot: path.at(map.U((b[0] + b[2]) / 2)).angle }));
+      objects.push(O('platform_island', c.x, c.y, { w, h, rot: path.at(map.U((b[0] + b[2]) / 2)).angle, _fit: true }));
     }
     // 列車の向きごとに止まれる番線（ホームに面した線）
     const stop = { down: [], up: [] };
@@ -1137,7 +1350,8 @@ function junctionTargets(L, parent, ps) {
     d.ends.forEach((e, w) => {
       if (e !== 'boundary') return;
       const q = d.pts[w === 0 ? 0 : d.pts.length - 1];
-      if (Math.abs(q[0] - X) > 160) return;
+      const ext = (PD.D.stations[parent.stations.indexOf(ps)] || {}).ext || [X - 60, X + 60];
+      if (q[0] < ext[0] - 100 || q[0] > ext[1] + 100) return;
       const pts = t.points, i = w === 0 ? 0 : pts.length - 1, j = w === 0 ? 1 : pts.length - 2;
       cands.push({ key: `${k}|${w}`, p: pts[i], dir: Math.atan2(pts[i].y - pts[j].y, pts[i].x - pts[j].x),
         track: t, which: w === 0 ? 'a' : 'b', lbl: labelNear(PD.D, q[0], q[1], 60) });
@@ -1156,10 +1370,16 @@ function junctionTargets(L, parent, ps) {
     free.sort((a, b) => Math.hypot(a.p.x - ps.p.x, a.p.y - ps.p.y) - Math.hypot(b.p.x - ps.p.x, b.p.y - ps.p.y));
     out = free.slice(0, Math.max(want, free.filter(c => Math.hypot(c.p.x - free[0].p.x, c.p.y - free[0].p.y) < 80).length));
   }
+  // 行先表示の合う出口が切り口より少なければ、そのすぐそばの表示のない出口も使う
+  if (out.length && L._cuts && out.length < L._cuts) {
+    const extra = cands.filter(c => !out.includes(c) && !used.has(c.key) && out.some(o => Math.hypot(o.p.x - c.p.x, o.p.y - c.p.y) < (c.lbl ? 120 : 80)))
+      .sort((a, b) => Math.min(...out.map(o => Math.hypot(o.p.x - a.p.x, o.p.y - a.p.y))) - Math.min(...out.map(o => Math.hypot(o.p.x - b.p.x, o.p.y - b.p.y))));
+    out = out.concat(extra.slice(0, L._cuts - out.length));
+  }
   for (const c of out) used.add(c.key);
   parent._junction.set(L.key, out);
   if (typeof process !== 'undefined' && process.env && process.env.DEBUG_JUNCTION) {
-    console.log(`[接続] ${L.name} ← ${parent.spec.name}/${L.attach.at}: 候補${cands.length} 採用${out.length}`, cands.map(c => `${c.lbl || '(無表示)'}${out.includes(c) ? '◎' : ''}`).join(' / '));
+    console.log(`[接続] ${L.name} ← ${parent.spec.name}/${L.attach.at}: 候補${cands.length} 採用${out.length}`, cands.map(c => `${c.lbl || "(無表示)"}${out.includes(c) ? "◎" : ""}@${Math.round(c.p.x)},${Math.round(c.p.y)}`).join(" / "));
   }
   return out;
 }
@@ -1262,18 +1482,43 @@ function linkAttach(L, child, parent, tracks) {
 /** 配線略図に描かれた車両基地（基地名の文字の近くの留置線）を使う */
 function diagramDepot(E, dp, objects) {
   const { D, trackOf, M, map } = E.diagram;
-  const lbl = (D.depots || []).find(t => t.s.includes(dp.name) || dp.name.includes(t.s.replace(/^.*(鉄道|電鉄|地下鉄|交通局|JR東海|JR西日本|JR東日本|JR九州|JR北海道)/, '')));
-  if (!lbl) return null;
-  const x0 = lbl.x - 220, x1 = lbl.x1 + 260, y0 = lbl.y - 140, y1 = lbl.y + 140;
+  // 車両基地の名前で探す（「住ノ江検車区羽倉崎検車支区」のような所属つきの名前もある）
+  const bare = t => t.replace(/^.*?(鉄道|電鉄|地下鉄|交通局|JR東海|JR西日本|JR東日本|JR九州|JR北海道)/, '');
+  const stem = dp.name.replace(/(総合車両所|総合車両センター|新幹線車両センター|車両センター|車両基地|車両管区|検車区|検修区|車庫|支所|機関区|工場|車両所)$/, '');
+  const score = t => {
+    const b = bare(t.s);
+    if (b === dp.name) return 4;
+    if (b.endsWith(dp.name)) return 3;
+    if (b.includes(dp.name)) return 2;
+    if (stem && stem.length >= 2 && b.includes(stem)) return 1 + (/検車|車庫|車両/.test(b.slice(b.indexOf(stem))) ? 0.2 : 0);
+    return 0;
+  };
+  let lbl = null, box = null;
+  for (const t of D.depots || []) { const v = score(t); if (v > 0 && (!lbl || v > lbl.v)) lbl = { ...t, v }; }
+  if (lbl) box = [lbl.x - 220, lbl.y - 140, lbl.x1 + 260, lbl.y + 140];
+  else {
+    // 名前がなければ、基地のある駅の近くの、線路が中を通る建屋（車庫）のまわり
+    const i = E.stations.findIndex(x => x.name === dp.at);
+    const ds = D.stations[i];
+    if (!ds || ds.x == null) return null;
+    const [e0, e1] = ds.ext || [ds.x - 30, ds.x + 30];
+    const sheds = (D.bldgs || []).filter(b => b[2] - b[0] > 8 && b[2] >= e0 - 200 && b[0] <= e1 + 200 &&
+      D.tracks.some(d => d.pts.some(p => p[0] > b[0] && p[0] < b[2] + 2 && p[1] > b[1] - 2 && p[1] < b[3] + 2)));
+    if (!sheds.length) return null;
+    box = [Math.min(...sheds.map(b => b[0])) - 160, Math.min(...sheds.map(b => b[1])) - 60, Math.max(...sheds.map(b => b[2])) + 160, Math.max(...sheds.map(b => b[3])) + 60];
+    lbl = { x: (box[0] + box[2]) / 2 - 20, x1: (box[0] + box[2]) / 2 + 20, y: (box[1] + box[3]) / 2 };
+  }
+  const [x0, y0, x1, y1] = box;
   const inBox = d => d.pts.some(p => p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1);
   const stabling = [];
   let shop = null, k = 0;
   D.tracks.forEach((d, i) => {
     const t = trackOf[i];
     if (!t || t.kind === 'platform' || t.kind === 'siding' || !inBox(d)) return;
-    if (!d.ends.includes('buffer')) return;
+    if (d.ends.includes('boundary')) return;
     const lenU = d.pts.reduce((a, p, j) => j ? a + Math.hypot(p[0] - d.pts[j - 1][0], p[1] - d.pts[j - 1][1]) : 0, 0);
-    if (lenU < 35) return;
+    // 車止めで終わる線か、両側がつながった長い線（通り抜けの留置線）
+    if (lenU < 35 || (!d.ends.includes('buffer') && lenU < 60)) return;
     // 建屋の中を通る線は検修線
     const inside = (D.bldgs || []).some(b => (b[2] - b[0]) > 8 && d.pts.some((p, j) => {
       // 線分が建屋の中を通るか（端点だけでなく途中も見る）
@@ -1291,6 +1536,6 @@ function diagramDepot(E, dp, objects) {
   });
   if (!stabling.length) return null;
   const c = M((lbl.x + lbl.x1) / 2, lbl.y);
-  objects.push(O('admin_office', c.x, c.y, { label: dp.name, rot: E.path.at(map.U(lbl.x)).angle, w: 50, h: 22 }));
+  objects.push(O('admin_office', c.x, c.y, { label: dp.name, rot: E.path.at(map.U(lbl.x)).angle, w: 50, h: 22, _fit: true }));
   return { stabling, shop };
 }

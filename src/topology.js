@@ -718,10 +718,14 @@ function detectCrossovers(doc, g, opts = {}) {
     const ta = byId.get(aId), tb = byId.get(bId);
     if (!ta || !tb) continue;
     // 取り付く2線がほぼ平行（＝隣り合う線路）であること
-    const angA = pointAt(ta.points, distToPolyline(n0.x, n0.y, ta.points).at).angle;
-    const angB = pointAt(tb.points, distToPolyline(n1.x, n1.y, tb.points).at).angle;
-    const d = angleDiff(angA, angB);
-    if (Math.min(d, Math.PI - d) > parallelTol) continue;
+    // 取り付く点が線路の折れ目にあることもあるので、前後の向きのうち近い方で比べる
+    const angs = (t, n) => {
+      const at = distToPolyline(n.x, n.y, t.points).at, L = polylineLength(t.points);
+      return [pointAt(t.points, Math.max(0, at - 2)).angle, pointAt(t.points, Math.min(L, at + 2)).angle];
+    };
+    let d = Infinity;
+    for (const a of angs(ta, n0)) for (const b of angs(tb, n1)) { const x = angleDiff(a, b); d = Math.min(d, x, Math.PI - x); }
+    if (d > parallelTol) continue;
     conns.push({
       track: c, length: len, nodes: [n0, n1], trackIds: [aId, bId],
       key: [aId, bId].slice().sort().join('|'),

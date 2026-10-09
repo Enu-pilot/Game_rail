@@ -66,8 +66,9 @@ export function lineStations(doc, g, line) {
         } else {
           // 上下線を別の線路で描いた駅どうしは、上下どちらの本線から出て・どちらに着くのがよいか（折返しが少なく短い方）
           let best = null;
-          for (const fa of [prev.trackId, prev.upTrackId].filter(id => id && hasTrack(doc, id))) {
-            for (const fb of [o.trackId, o.upTrackId].filter(id => id && hasTrack(doc, id))) {
+          const tryHop = (fas, fbs) => {
+          for (const fa of fas) {
+            for (const fb of fbs) {
               const A = fa === prev.trackId ? prev : { ...prev, trackId: fa };
               const Bo = fb === o.trackId ? o : { ...o, trackId: fb };
               let cand = null;
@@ -85,6 +86,18 @@ export function lineStations(doc, g, line) {
               }
               if (cand && (!best || cand.turns < best.turns || (cand.turns === best.turns && cand.d < best.d - 1))) best = { ...cand, from: fa };
             }
+          }
+          };
+          const mainsOf = x => [x.trackId, x.upTrackId].filter(id => id && hasTrack(doc, id));
+          tryHop(mainsOf(prev), mainsOf(o));
+          // 本線どうしでは遠回り（環状線を1周するなど）になるときは、駅のほかの番線（他線のホームも）から出入りする道を探す
+          const direct = Math.hypot(o.x - prev.x, o.y - prev.y);
+          if (!best || best.turns > 0 || best.d > direct * 3 + 500) {
+            const allOf = x => [...new Set([...mainsOf(x), ...(x.tracks || []), ...(x.altTracks || [])])].filter(id => id && hasTrack(doc, id));
+            const before = best;
+            best = null;
+            tryHop(allOf(prev), allOf(o));
+            if (!best || (before && (best.turns > before.turns || best.d > before.d))) best = before;
           }
           if (best) { path = best.path; d = best.d; turnouts = best.turnouts; fromTrack = best.from; }
         }

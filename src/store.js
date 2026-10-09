@@ -206,6 +206,8 @@ export function migrate(doc) {
       ...(o.fastTrackId ? { fastTrackId: o.fastTrackId } : {}),
       ...(o.fastUpTrackId ? { fastUpTrackId: o.fastUpTrackId } : {}),
       ...(Array.isArray(o.noStop) && o.noStop.length ? { noStop: o.noStop.slice() } : {}),
+      // 他線のホーム（この駅で分かれる路線が使う番線）
+      ...(Array.isArray(o.altTracks) && o.altTracks.length ? { altTracks: o.altTracks.slice() } : {}),
     };
   });
   d.formations = (doc.formations || []).map(f => ({

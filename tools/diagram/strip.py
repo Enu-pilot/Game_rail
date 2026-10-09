@@ -183,15 +183,19 @@ def edge_stubs(img):
 
 GAP = 12.0
 
-def assemble(keys, rot=False):
+def assemble(keys, rot=False, flip=()):
     """画像を左から順に並べ、境界で切れている線路どうしをつなぐ。rot=True なら全体を180度回す"""
     order = list(reversed(keys)) if rot else list(keys)
     imgs, links = [], []
     offx = 0.0
     prev = None
+    insets = []
     for key in order:
-        raw = Img(key, rot=rot)
+        raw = Img(key, rot=rot != (key in flip))
         if not raw.tracks:
+            continue
+        if is_inset(raw):
+            insets.append(raw)
             continue
         bx0, by0, bx1, by1 = raw.bounds()
         if prev is None:
@@ -203,11 +207,19 @@ def assemble(keys, rot=False):
             if L and R and len(L) == len(R):
                 dy = sum(r['p'][1] for r in R) / len(R) - sum(l['p'][1] for l in L) / len(L)
             elif L and R:
-                dy = (R[0]['p'][1] + R[-1]['p'][1]) / 2 - (L[0]['p'][1] + L[-1]['p'][1]) / 2
+                # 数が違うとき：中心どうしをそろえる。ほかに、より多くの線の高さがそろう ずらし量があればそちら
+                dc = (R[0]['p'][1] + R[-1]['p'][1]) / 2 - (L[0]['p'][1] + L[-1]['p'][1]) / 2
+                hits = lambda d0: sum(1 for r2 in R if any(abs(r2['p'][1] - (l2['p'][1] + d0)) < 1.5 for l2 in L))
+                dy, bh = dc, hits(dc)
+                for r in R:
+                    for l in L:
+                        d0 = r['p'][1] - l['p'][1]
+                        h = hits(d0)
+                        if h > bh or (h == bh and h > 0 and abs(d0 - dc) < abs(dy - dc)): dy, bh = d0, h
             else:
                 dy = (prev.bounds()[1] + prev.bounds()[3]) / 2 - (by0 + by1) / 2
             dx = prev.bounds()[2] + GAP - bx0
-        im = Img(key, dx=dx, dy=dy, rot=rot)
+        im = Img(key, dx=dx, dy=dy, rot=rot != (key in flip))
         if prev is not None:
             L, _ = edge_stubs(im)
             _, R = edge_stubs(prev)
@@ -242,7 +254,51 @@ def assemble(keys, rot=False):
         if not relocate_block(im, ea, eb, links):
             for a_, b_ in pair_ends(ea, eb):
                 links.append([a_['p'], b_['p']])
+    # 補足の図（記号でつながる続きだけを描いた画像）：記号ごとのまとまりを、相手の記号の脇へ移す
+    for ins in insets:
+        place_inset(ins, imgs, links)
     return imgs, links
+
+def is_inset(im):
+    """駅名がかっこ書き（「（新下関）」）か記号だけの、補足の図"""
+    labels = [t['s'].strip() for t in im.texts if t['size'] >= 13 and not t['s'].strip().endswith('方')]
+    labels = [x for x in labels if re.search(r'[぀-ヿ一-鿿A-Z]', x)]
+    if not labels or not im.letters: return False
+    depot = re.compile(r'(検車区|車両基地|車両センター|電車区|車両所|工場|検修区|車庫|運転所|車両区|基地|支所|凡例)')
+    return all(re.fullmatch(r'[A-Z]', x) or x[0] in '（(' or depot.search(x) for x in labels) and any(re.fullmatch(r'[A-Z]', x) for x in labels)
+
+def place_inset(ins, imgs, links):
+    comps = components(ins.tracks)
+    dg = dangling(ins)
+    for lt in ins.letters:
+        ch = lt['s'].strip()
+        eb = letter_ends(ins, lt, dg)
+        if not eb: continue
+        partner = None
+        for im in imgs:
+            for lt2 in im.letters:
+                if lt2['s'].strip() != ch: continue
+                ea = letter_ends(im, lt2)
+                if len(ea) == len(eb): partner = (im, ea)
+        if not partner: continue
+        im, ea = partner
+        cb = next((c for c in comps if eb[0]['i'] in c), None)
+        if not cb: continue
+        # まとまりの線路・建屋・文字を相手の画像へ移してから、相手の画像の中で記号の先へ寄せる
+        xs = [p[0] for i in cb for p in ins.tracks[i]['pts']]; ys = [p[1] for i in cb for p in ins.tracks[i]['pts']]
+        bx0, bx1, by0, by1 = min(xs) - 3, max(xs) + 3, min(ys) - 3, max(ys) + 3
+        inb = lambda b: b[0] >= bx0 and b[2] <= bx1 and b[1] >= by0 and b[3] <= by1
+        base = len(im.tracks)
+        idx = {}
+        for i in sorted(cb):
+            idx[i] = len(im.tracks); im.tracks.append(ins.tracks[i])
+        im.bldgs += [b for b in ins.bldgs if inb(b)]
+        im.plats += [b for b in ins.plats if inb(b)]
+        im.tts += [t for t in ins.tts if bx0 <= t['x'] <= bx1 and by0 <= t['y'] <= by1]
+        im.thin += [t for t in ins.thin if all(bx0 <= p[0] <= bx1 and by0 <= p[1] <= by1 for p in t)]
+        im.texts += [t for t in ins.texts if bx0 <= t['x'] <= bx1 and by0 <= t['y'] <= by1 and not re.fullmatch(r'[A-Z]', t['s'].strip()) and t['s'].strip()[:1] not in '（('] 
+        eb2 = [dict(e, i=idx[e['i']]) for e in eb if e['i'] in idx]
+        relocate_block(im, ea, eb2, links, force=True)
 
 def pair_ends(ea, eb):
     """2組の端を、外向きの向きに直交する並びの順に組にする"""
@@ -280,18 +336,18 @@ def components(tracks):
     for i in range(n): groups[find(i)].add(i)
     return list(groups.values())
 
-def relocate_block(im, ea, eb, links):
+def relocate_block(im, ea, eb, links, force=False):
     """同じ画像の中で記号でつながる2か所のうち、本線のない方のまとまりを、もう一方の記号の先へ回して置く"""
     comps = components(im.tracks)
     ca = next((c for c in comps if ea[0]['i'] in c), set())
     cb = next((c for c in comps if eb[0]['i'] in c), set())
     if ca == cb: return False
-    # 小さい方（車庫など）を動かす
-    if len(ca) < len(cb):
+    # 小さい方（車庫など）を動かす（補足の図から移すときは、補足の図の側を動かす）
+    if len(ca) < len(cb) and not force:
         ea, eb, ca, cb = eb, ea, cb, ca
     # 動かすのは駅（ホーム）を含まない行き止まりのまとまり（車両基地など）だけ。駅を含むなら線でつなぐ
     xs0 = [p[0] for i in cb for p in im.tracks[i]['pts']]; ys0 = [p[1] for i in cb for p in im.tracks[i]['pts']]
-    if any(min(xs0) - 2 <= (b[0] + b[2]) / 2 <= max(xs0) + 2 and min(ys0) - 12 <= (b[1] + b[3]) / 2 <= max(ys0) + 12 for b in im.plats):
+    if not force and any(min(xs0) - 2 <= (b[0] + b[2]) / 2 <= max(xs0) + 2 and min(ys0) - 12 <= (b[1] + b[3]) / 2 <= max(ys0) + 12 for b in im.plats):
         return False
     # eb 側のまとまり cb を ea の先へ置く（回すのは 0° か 180° だけ：図の水平・垂直を保つ）
     ha = math.atan2(sum(math.sin(e['dir']) for e in ea), sum(math.cos(e['dir']) for e in ea))
@@ -312,7 +368,12 @@ def relocate_block(im, ea, eb, links):
     elif math.sin(ha) < -0.3:       # 上向き：ほかの線路より上へ
         ty = min(p[1] for p in others) - 25 - max(r[1] for r in rel)
     else:
-        ty = ca_y + math.sin(ha) * 30
+        # 横向き：その先は路線が続くので、ほかの線路の上か下の近い方へ寄せる
+        ys_o = [p[1] for p in others] or [ca_y]
+        if ca_y - min(ys_o) <= max(ys_o) - ca_y:
+            ty = min(ys_o) - 25 - max(r[1] for r in rel)
+        else:
+            ty = max(ys_o) + 25 - min(r[1] for r in rel)
     c, s_ = math.cos(rot), math.sin(rot)
     def tf(p):
         x, y = p[0] - cb_x, p[1] - cb_y
@@ -354,7 +415,43 @@ class Strip:
         self.bldgs = [b for im in imgs for b in im.bldgs]
         self.tts = [t for im in imgs for t in im.tts]
         self.texts = [t for im in imgs for t in im.texts]
+        self.bridge_gaps()
         self.build_graph()
+
+    def bridge_gaps(self):
+        """一直線に並んだ線路の端どうしが、描画上わずかに離れているところをつなぐ"""
+        ends = []
+        for i, t in enumerate(self.tracks):
+            pts = t['pts']
+            if len(pts) < 2: continue
+            for w in (0, -1):
+                p = pts[w]; q = pts[1] if w == 0 else pts[-2]
+                if seglen(p, q) < 1e-6: continue
+                ends.append((i, p, math.atan2(p[1] - q[1], p[0] - q[0])))
+        def free(i, p):
+            for j, o in enumerate(self.tracks):
+                if j == i: continue
+                op = o['pts']
+                for k in range(1, len(op)):
+                    if dist_seg(p, op[k - 1], op[k])[0] <= TOL: return False
+            return True
+        add = []
+        for a in range(len(ends)):
+            i, p, ha = ends[a]
+            for b in range(a + 1, len(ends)):
+                j, q, hb = ends[b]
+                if i == j: continue
+                d = seglen(p, q)
+                if not (TOL < d <= 2.0): continue
+                # 向き合っていて、すき間もその向き
+                if math.cos(ha - hb) > -0.97: continue
+                g = math.atan2(q[1] - p[1], q[0] - p[0])
+                if math.cos(g - ha) < 0.97: continue
+                if has_buffer(p, ha, self.thin) or has_buffer(q, hb, self.thin): continue
+                if not free(i, p) or not free(j, q): continue
+                add.append([p, q])
+        for p, q in add:
+            self.tracks.append({'pts': [p, q], 'dashed': False, 'color': '#000', 'img': 'gap'})
 
     def build_graph(self):
         """節点（端点・T字の接点）で線路を区切った辺のグラフ"""
@@ -401,7 +498,7 @@ class Strip:
                 if na == nb: continue
                 pts = sub_poly(t['pts'], a, b)
                 pts[0] = nodes[na]; pts[-1] = nodes[nb]
-                e = dict(id=len(self.edges), a=na, b=nb, pts=pts, track=i, dashed=t['dashed'], color=t['color'], len=b - a)
+                e = dict(id=len(self.edges), a=na, b=nb, pts=pts, track=i, dashed=t['dashed'], color=t['color'], len=b - a, link=t.get('img') == 'link')
                 self.edges.append(e)
                 self.adj[na].append(e['id']); self.adj[nb].append(e['id'])
 
@@ -530,11 +627,13 @@ def forward_cands(S, eid, n):
     """節点 n で、辺 eid から折り返さずに進める辺と、その曲がり具合"""
     hin = S.heading_out(eid, n) + math.pi
     out = []
-    for x in S.adj[n]:
-        if x == eid: continue
+    others = [x for x in S.adj[n] if x != eid]
+    for x in others:
         h = S.heading_out(x, n)
         d = abs(math.atan2(math.sin(h - hin), math.cos(h - hin)))
-        if d < math.radians(80): out.append((d, x, math.sin(h)))
+        # 記号（A など）どうしを結んだ線のつなぎ目は、1本しか続かなければ大きく曲がっていてもよい
+        lim = 150 if len(others) == 1 and (S.edges[eid].get('link') or S.edges[x].get('link')) else 80
+        if d < math.radians(lim): out.append((d, x, math.sin(h)))
     return sorted(out)
 
 def greedy_reach(S, eid, n, sign, steps=300):

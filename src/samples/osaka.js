@@ -51,7 +51,7 @@ export default {
     {
       key: 'hanwa', name: '阪和線', color: '#f39800', op: 'jrw', vmax: 120,
       safety: ['ats_p'], maxCars: 8, heading: 45, endEnd: 'boundary',
-      attach: { line: 'kanjo', at: '天王寺', mode: 'branch', offset: 150, ownStation: true },
+      attach: { line: 'kanjo', at: '天王寺', mode: 'branch' },
       turns: { '美章園': 100, '日根野': 125 },
       stations: [
         ['天王寺', 0.0, 't', P(60, 'urban', { stubs: 4 })], ['美章園', 1.5, 's', P(8, 'residential')], ['南田辺', 3.0, 's', P(10, 'residential')],
@@ -80,7 +80,7 @@ export default {
     {
       key: 'yamatoji', name: '大和路線', color: '#00a95f', op: 'jrw', vmax: 120,
       safety: ['ats_p'], maxCars: 8, heading: 25,
-      attach: { line: 'kanjo', at: '天王寺', mode: 'branch', offset: 300, ownStation: true },
+      attach: { line: 'kanjo', at: '天王寺', mode: 'branch' },
       turns: { '東部市場前': 0, '王寺': 340, '奈良': 300 },
       stations: [
         ['天王寺', 0.0, 'p', P(40, 'urban')], ['東部市場前', 2.4, 's', P(10, 'mixed')], ['平野', 3.9, 'pd', P(12, 'residential')],
@@ -95,7 +95,7 @@ export default {
     {
       key: 'yumesaki', name: 'JRゆめ咲線', color: '#e4007f', op: 'jrw', vmax: 85,
       safety: ['ats_p'], maxCars: 8, heading: 145,
-      attach: { line: 'kanjo', at: '西九条', mode: 'branch', offset: 200, ownStation: true },
+      attach: { line: 'kanjo', at: '西九条', mode: 'branch' },
       turns: { '安治川口': 180 },
       stations: [
         ['西九条', 0.0, 's', P(10, 'mixed')], ['安治川口', 2.4, 's', P(8, 'business')], ['ユニバーサルシティ', 3.2, 's', P(45, 'tourist')],

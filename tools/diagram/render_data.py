@@ -7,6 +7,7 @@ D = json.loads(s[s.index('export default ') + 15:s.rindex(';')])[line]
 xs = [p[0] for m in D['mains'] for p in m['pts']] + [p[0] for t in D['tracks'] for p in t['pts']]
 ys = [p[1] for m in D['mains'] for p in m['pts']] + [p[1] for t in D['tracks'] for p in t['pts']]
 X0, X1, Y0, Y1 = min(xs), max(xs), min(ys) - 30, max(ys) + 30
+if len(sys.argv) > 5: X0, X1 = float(sys.argv[4]), float(sys.argv[5])
 rows = max(1, int((X1 - X0) // row_w) + 1); rh = Y1 - Y0
 o = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {row_w + 20} {rows * rh}" width="{(row_w + 20) * 1.3:.0f}" height="{rows * rh * 1.3:.0f}"><rect width="100%" height="100%" fill="#fff"/>']
 def poly(pts, col, w, dash=''):

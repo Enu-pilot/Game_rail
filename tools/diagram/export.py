@@ -1,5 +1,5 @@
 # 配線略図の帯から、サンプル路線ごとの配線データ（帯座標）を書き出す
-import sys, json, math, re
+import sys, json, math, re, os
 sys.path.insert(0, '/tmp/claude-0/hs')
 from strip import *
 import strip as _strip
@@ -73,15 +73,19 @@ def clip_poly(pts, x0, x1):
     if cur is not None: out.append((cur, cur_cut, False))
     return [(q, sa, sb) for q, sa, sb in out if len(q) >= 2 and plen(q) > 0.3]
 
-def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None):
+def in_bldg(S, p, m=1.5):
+    """端点が建屋（車庫）の中か縁にある：建屋の中で終わる線"""
+    return any(b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m and (b[2] - b[0]) > 6 for b in S.bldgs)
+
+def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=()):
     keys = keys or images_for(page, names)
     if not keys: raise RuntimeError(f'{page}: {names[0]}〜{names[-1]} の画像がありません')
-    S0 = Strip(*assemble(keys))
+    S0 = Strip(*assemble(keys, flip=flip))
     lab = station_labels(S0, names)
     rot = False
     if names[0] in lab and names[-1] in lab and lab[names[0]][0][0] > lab[names[-1]][0][0]:
         rot = True
-    S = Strip(*assemble(keys, rot=rot)) if rot else S0
+    S = Strip(*assemble(keys, rot=rot, flip=flip)) if rot else S0
     lab = station_labels(S, names)
     missing = [n for n in names if n not in lab]
     # 本線をたどる：最初の2駅の間（なければ seed）で本線の本数だけ線が通る位置
@@ -122,6 +126,11 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
             b = i0
             while b < len(path) - 1 and path[b + 1] not in used: b += 1
             path = path[a:b + 1]
+        if os.environ.get('DEBUG_TRACE'):
+            for nn in (l, r):
+                print('  main', k, 'end node', nn, S.nodes[nn], 'adj', [(x, [round(v,1) for v in S.edges[x]['pts'][0]], [round(v,1) for v in S.edges[x]['pts'][-1]]) for x in S.adj[nn]])
+                for x in S.adj[nn]:
+                    if x in path: print('     from', x, 'cands', forward_cands(S, x, nn))
         paths.append(path)
     main_ids = set(e for p in paths for e in p)
     main_pts = [ordered_path(S, p) for p in paths]
@@ -210,7 +219,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
         for w, cutflag in ((0, sa), (-1, sb)):
             if cutflag: ends.append('boundary'); continue
             p0 = q[w]; q1 = q[1] if w == 0 else q[-2]
-            ends.append('buffer' if has_buffer(p0, math.atan2(p0[1] - q1[1], p0[0] - q1[0]), S.thin) else 'boundary')
+            ends.append('buffer' if has_buffer(p0, math.atan2(p0[1] - q1[1], p0[0] - q1[0]), S.thin) or in_bldg(S, p0) else 'boundary')
         out_mains.append(dict(pts=R(q), under=under, ends=ends))
     # 路線の両端の駅より先の本線（車両基地や他線へ続く部分）は、本線から外して普通の線路にする
     tails = []
@@ -329,7 +338,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
                 n = c['na'] if w == 0 else c['nb']
                 if len(S.adj[n]) > 1: ends.append('open'); continue
                 q1 = pts[1] if w == 0 else pts[-2]
-                ends.append('buffer' if has_buffer(p0, math.atan2(p0[1] - q1[1], p0[0] - q1[0]), S.thin) else 'boundary')
+                ends.append('buffer' if has_buffer(p0, math.atan2(p0[1] - q1[1], p0[0] - q1[0]), S.thin) or in_bldg(S, p0) else 'boundary')
             tracks.append(dict(pts=R(pts), ends=ends, under=dashed, stations=[n for n in sts if any(b[2] >= min(p[0] for p in pts) and b[0] <= max(p[0] for p in pts) for b in plat_of[n])], use=use,
                                foreign=not direct,
                                reach=sorted(reach)))
@@ -346,6 +355,50 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
     inr = lambda b: b[2] >= cx0 and b[0] <= cx1
     texts = [dict(s=t['s'], x=round(t['x'], 1), x1=round(t['x1'], 1), y=round(t['y'], 1), size=round(t['size'], 1)) for t in S.texts
              if cx0 <= t['x'] <= cx1 and not is_station_label(t)]
+    # 転車台：重なって描かれた同じものを1つにし、台を通り抜ける線は台の縁で切る（台に放射状に集まる線にする）
+    tts = []
+    for t in S.tts:
+        if cx0 <= t['x'] <= cx1 and t['r'] > 2 and not any(seglen((t['x'], t['y']), (u['x'], u['y'])) < 1 for u in tts): tts.append(t)
+    def cut_circle(pts, c, r):
+        def inside(p): return seglen(p, c) < r - 1e-6
+        pieces, cur = [], []
+        for k in range(len(pts)):
+            p = pts[k]
+            if k == 0:
+                if not inside(p): cur = [p]
+                continue
+            a = pts[k - 1]
+            dx, dy = p[0] - a[0], p[1] - a[1]
+            fx, fy = a[0] - c[0], a[1] - c[1]
+            A = dx * dx + dy * dy; Bq = 2 * (fx * dx + fy * dy); C = fx * fx + fy * fy - r * r
+            disc = Bq * Bq - 4 * A * C
+            ts = []
+            if A > 1e-12 and disc > 0:
+                sq = math.sqrt(disc)
+                ts = sorted(x for x in ((-Bq - sq) / (2 * A), (-Bq + sq) / (2 * A)) if 0 < x < 1)
+            for x in ts:
+                q = (a[0] + dx * x, a[1] + dy * x)
+                if cur:
+                    cur.append(q); pieces.append(cur); cur = []
+                else:
+                    cur = [q]
+            if not inside(p): cur.append(p)
+        if cur: pieces.append(cur)
+        return [pc for pc in pieces if len(pc) >= 2 and sum(seglen(pc[i - 1], pc[i]) for i in range(1, len(pc))) > 0.5]
+    for tt in tts:
+        c, r = (tt['x'], tt['y']), tt['r']
+        new = []
+        for t in tracks:
+            if min(seglen(p, c) for p in t['pts']) > r + 30 or not any(seglen(p, c) < r for p in t['pts']) and all(
+                    dist_seg(c, t['pts'][k - 1], t['pts'][k])[0] >= r for k in range(1, len(t['pts']))):
+                new.append(t); continue
+            pcs = cut_circle([tuple(p) for p in t['pts']], c, r)
+            for pc in pcs:
+                e0 = t['ends'][0] if seglen(pc[0], t['pts'][0]) < 0.01 else 'open'
+                e1 = t['ends'][1] if seglen(pc[-1], t['pts'][-1]) < 0.01 else 'open'
+                nt = dict(t); nt['pts'] = R(pc); nt['ends'] = [e0, e1]
+                new.append(nt)
+        tracks = new
     # 交差（接続点のない交わり）：ダイヤモンドクロッシングか立体交差か
     polys = [(('m', k), m['pts'], m['under']) for k, m in enumerate(out_mains)] + \
             [(('t', k), t['pts'], t['under']) for k, t in enumerate(tracks)]
@@ -379,7 +432,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
     return dict(page=page, rot=rot, keys=keys, missing=missing, x0=round(cx0, 2), x1=round(cx1, 2),
                 mains=out_mains, tracks=tracks, stations=stations,
                 bldgs=[[round(v, 2) for v in b] for b in S.bldgs if inr(b)],
-                tts=[dict(x=round(t['x'], 2), y=round(t['y'], 2), r=round(t['r'], 2)) for t in S.tts if cx0 <= t['x'] <= cx1],
+                tts=[dict(x=round(t['x'], 2), y=round(t['y'], 2), r=round(t['r'], 2)) for t in tts],
                 texts=texts, depots=depots, crossings=crossings,
                 plains=[[round(a, 1), round(b, 1)] for a, b in plains if b >= cx0 and a <= cx1])
 

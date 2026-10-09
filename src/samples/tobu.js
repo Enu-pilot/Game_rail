@@ -59,7 +59,7 @@ export default {
     {
       key: 'kinugawa', name: '鬼怒川線', color: '#7fb13a', op: 'tobu', vmax: 85, double: false,
       safety: ['tdatc'], maxCars: 6, heading: 255, endEnd: 'boundary',
-      attach: { line: 'nikko', at: '下今市', mode: 'branch', offset: 250, ownStation: true },
+      attach: { line: 'nikko', at: '下今市', mode: 'branch' },
       turns: { '大谷向': 285 },
       stations: [
         // 下今市・鬼怒川温泉には機回し線と転車台がある（SL大樹）

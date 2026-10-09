@@ -61,7 +61,7 @@ def slim(d):
         if not t.get('foreign'): t.pop('foreign', None)
     return d
 
-def build_line(sample, line, parts, shared0=False):
+def build_line(sample, line, parts, shared0=False, ring=False):
     names = names_of(sample, line)
     out = []
     pos = 0
@@ -72,9 +72,11 @@ def build_line(sample, line, parts, shared0=False):
         first = (not shared0) if k == 0 else False
         p = export_part(page, seg, n_mains=pt.get('n', 2), first_complex=first,
                         last_complex=True, seed=pt.get('seed'), prefer=pt.get('prefer', (1, -1)),
-                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'))
+                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()))
         out.append(p)
     d = merge_parts(out)
+    if ring and names[-1] == names[0] and d['stations'][-1]['name'] != names[-1]:
+        d['stations'].append(dict(name=names[-1], x=None))   # 環状線の継目の駅（起点と同じ駅）
     if d['missing']: print('  !! 駅名が見つからない', sample, line, d['missing'])
     return slim(d)
 
@@ -104,10 +106,11 @@ CONFIG = {
         'kashihara': dict(shared0=True, parts=[part('pr/kinki/kashihara', '大和西大寺', '橿原神宮前')]),
     },
     'osaka': {
-        'hanwa': dict(parts=[part('jr/west/hanwa', '天王寺', '和歌山')]),
+        'kanjo': dict(ring=True, parts=[part('jr/west/osakakanjo', '天王寺', '新今宮', flip=('jr_west_osakakanjo__020_01.svg',))]),
+        'hanwa': dict(shared0=True, parts=[part('jr/west/hanwa', '天王寺', '和歌山')]),
         'kanku': dict(shared0=True, parts=[part('jr/west/kansai-airport', '日根野', '関西空港')]),
-        'yamatoji': dict(parts=[part('jr/west/kansai', '天王寺', '加茂')]),
-        'yumesaki': dict(parts=[part('jr/west/sakurajima', '西九条', '桜島')]),
+        'yamatoji': dict(shared0=True, parts=[part('jr/west/kansai', '天王寺', '加茂')]),
+        'yumesaki': dict(shared0=True, parts=[part('jr/west/sakurajima', '西九条', '桜島')]),
     },
     'ichibata': {
         'kitamatsue': dict(parts=[part('pr/ichibata/kitamatsue', '電鉄出雲市', '松江しんじ湖温泉', n=1)]),
@@ -129,7 +132,7 @@ CONFIG = {
     'tobu': {
         'isesaki': dict(parts=[part('pr/tobu/isesaki', '浅草', '東武動物公園')]),
         'nikko': dict(shared0=True, parts=[part('pr/tobu/nikko', '東武動物公園', '東武日光')]),
-        'kinugawa': dict(parts=[part('pr/tobu/kinugawa', '下今市', '新藤原', n=1)]),
+        'kinugawa': dict(shared0=True, parts=[part('pr/tobu/kinugawa', '下今市', '新藤原', n=1)]),
     },
     'nankai': {
         'honsen': dict(parts=[part('pr/nankai/main', '難波', '和歌山市')]),
@@ -154,7 +157,7 @@ if __name__ == '__main__':
         for line, cfg in lines.items():
             print(sample, line)
             try:
-                data[line] = build_line(sample, line, cfg['parts'], cfg.get('shared0', False))
+                data[line] = build_line(sample, line, cfg['parts'], cfg.get('shared0', False), cfg.get('ring', False))
             except Exception as e:
                 print('  !! 失敗', sample, line, e)
         js = '// 配線略図.net（https://www.haisenryakuzu.net/、CC BY 4.0）の配線図から読み取った駅の配線\n' \
