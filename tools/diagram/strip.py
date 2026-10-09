@@ -499,8 +499,12 @@ def all_labels(S):
     return out
 
 def station_labels(S, names):
-    """駅名ラベルの中心 x（同じ駅名が複数あれば全部）"""
-    want = {norm_name(n): n for n in names}
+    """駅名ラベルの中心 x（同じ駅名が複数あれば全部）。「九条（奈良）」のような括弧書きは外して照合"""
+    want = {}
+    for n in names:
+        want[norm_name(n)] = n
+        base = re.sub(r'[（(].*?[）)]$', '', n)
+        if base != n: want.setdefault(norm_name(base), n)
     out = defaultdict(list)
     for t in S.texts:
         if not is_station_label(t): continue
@@ -547,6 +551,8 @@ def greedy_reach(S, eid, n, sign, steps=300):
         seen.add(nxt); n = nx; cur = nxt
     return best
 
+TRACE_TARGET = {'lo': None, 'hi': None}     # 路線の端の駅の x（先読みで「そこまで届けば十分」とする）
+
 def trace(S, eid, start_node, prefer=0):
     """辺 eid から start_node と反対の向きへ、まっすぐ進めるところまでたどる。
     分岐では、先へ（路線の続く方へ）遠くまで続く側を選び、同じくらいならまっすぐな側"""
@@ -563,6 +569,8 @@ def trace(S, eid, start_node, prefer=0):
         else:
             reach = [(greedy_reach(S, x, n, sign), d, x, sy) for d, x, sy in c]
             far = max(r[0] for r in reach)
+            tgt = TRACE_TARGET['hi'] if sign > 0 else TRACE_TARGET['lo']
+            if tgt is not None: far = min(far, tgt * sign)
             good = [r for r in reach if r[0] >= far - 8]
             good.sort(key=lambda r: r[1])
             if len(good) >= 2 and good[1][1] - good[0][1] <= 0.15:

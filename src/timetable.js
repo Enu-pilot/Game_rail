@@ -52,7 +52,7 @@ export function lineStations(doc, g, line) {
   for (let i = 0; i < ids.length; i++) {
     const o = doc.objects.find(x => x.id === ids[i]);
     if (!o) { out.push({ id: ids[i], name: '（削除された駅）', km, missing: true }); continue; }
-    let path = null, turnouts = [];
+    let path = null, turnouts = [], fromTrack = null;
     if (i > 0) {
       const prev = doc.objects.find(x => x.id === ids[i - 1]);
       let d = 0;
@@ -64,18 +64,34 @@ export function lineStations(doc, g, line) {
             path = [{ trackId: o.trackId, fromAt: a, toAt: b }];
           }
         } else {
-          const r = findRoute(doc, g, { fromTrackId: prev.trackId, toTrackId: o.trackId, trainLength: 0 });
-          if (r.found) {
-            // 経路は線路の区間単位なので、発駅の位置から着駅の位置までに切りそろえる
-            path = trimHopPath(doc, r.path, prev, o);
-            d = path.reduce((a, p2) => a + Math.abs(p2.toAt - p2.fromAt), 0) + pathExtra(doc, path);
-            turnouts = (r.legs || []).flatMap(lg => lg.turnouts || []);
+          // 上下線を別の線路で描いた駅どうしは、上下どちらの本線から出て・どちらに着くのがよいか（折返しが少なく短い方）
+          let best = null;
+          for (const fa of [prev.trackId, prev.upTrackId].filter(id => id && hasTrack(doc, id))) {
+            for (const fb of [o.trackId, o.upTrackId].filter(id => id && hasTrack(doc, id))) {
+              const A = fa === prev.trackId ? prev : { ...prev, trackId: fa };
+              const Bo = fb === o.trackId ? o : { ...o, trackId: fb };
+              let cand = null;
+              if (fa === fb) {
+                const a = stationAt(doc, A), b = stationAt(doc, Bo);
+                if (a != null && b != null) cand = { turns: 0, d: Math.abs(b - a) + segmentExtra(doc, fa, a, b), path: [{ trackId: fa, fromAt: a, toAt: b }], turnouts: [] };
+              } else {
+                const r = findRoute(doc, g, { fromTrackId: fa, toTrackId: fb, trainLength: 0 });
+                if (r.found) {
+                  // 経路は線路の区間単位なので、発駅の位置から着駅の位置までに切りそろえる
+                  const pth = trimHopPath(doc, r.path, A, Bo);
+                  cand = { turns: Math.max(0, (r.legs || []).length - 1), d: pth.reduce((a2, p2) => a2 + Math.abs(p2.toAt - p2.fromAt), 0) + pathExtra(doc, pth),
+                    path: pth, turnouts: (r.legs || []).flatMap(lg => lg.turnouts || []) };
+                }
+              }
+              if (cand && (!best || cand.turns < best.turns || (cand.turns === best.turns && cand.d < best.d - 1))) best = { ...cand, from: fa };
+            }
           }
+          if (best) { path = best.path; d = best.d; turnouts = best.turnouts; fromTrack = best.from; }
         }
       }
       km += d;
     }
-    out.push({ id: o.id, object: o, name: o.label || '駅', trackId: o.trackId, km, missing: false, path, turnouts });
+    out.push({ id: o.id, object: o, name: o.label || '駅', trackId: o.trackId, km, missing: false, path, turnouts, fromTrack });
   }
   _lineCache.set(line.id, { sig, value: out });
   return out;
@@ -402,6 +418,14 @@ export function mainTrackOf(stationObj, up, fast = false) {
   return up && stationObj.upTrackId ? stationObj.upTrackId : stationObj.trackId;
 }
 
+/**
+ * 路線から見た向きを、駅（を共有する別の路線）の上下に読み替える。
+ * 直通先の路線の起点になる共有駅では、子路線の「下り」が親路線の「上り」側の線から出ていくことがある（line.flip[駅番号]）。
+ */
+export function stationUp(line, idx, up) {
+  return line && line.flip && line.flip[idx] ? !up : up;
+}
+
 /** 駅の本線（上下・緩急のすべて） */
 export function stationMains(stationObj) {
   if (!stationObj) return [];
@@ -428,7 +452,8 @@ export function trainPlatform(doc, train, stations, idx) {
   const assigned = train.platforms && train.platforms[idx];
   if (assigned && hasTrack(doc, assigned)) return assigned;
   const o = st.object;
-  const up = train.toIdx < train.fromIdx;
+  const line = doc.lines ? doc.lines.find(l => l.id === train.lineId) : null;
+  const up = stationUp(line, idx, train.toIdx < train.fromIdx);
   let m = null;
   if (o && (o.upTrackId || o.fastTrackId)) {
     m = mainTrackOf(o, up, !slowType(train));
@@ -475,7 +500,7 @@ function platformUses(doc, line, stations, trains, headwaySec) {
       const onMain = !stObj || !stObj.trackId || trackId === stObj.trackId;
       // 本線は前後が複線なら上下別の線路（始発・終着の列車も、渡り線で反対側の線へ移るとみなす）
       const sepDir = onMain && !split && dbl(st.idx - 1) && dbl(st.idx);
-      const up = tr.toIdx < tr.fromIdx;
+      const up = stationUp(line, st.idx, tr.toIdx < tr.fromIdx);
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;
       uses.push({

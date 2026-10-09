@@ -4,11 +4,13 @@
 // 秋田新幹線（田沢湖線・奥羽本線）と山形新幹線（奥羽本線）は単線の在来線を走るミニ新幹線。こまちは大曲でスイッチバックする。
 // 北海道新幹線 新函館北斗〜札幌は延伸後を想定したキロ程。
 
+import diagram from './data/tohoku.js';
 import { P } from './util.js';
 
 const S = (name, km, type = 'p', riders = 5, kind = 'mixed', extra = {}) => [name, km, type, P(riders, kind, extra)];
 
 export default {
+  diagram,
   id: 'tohoku', no: 7,
   title: '東北・上越・北陸・秋田・山形・北海道新幹線',
   note: 'はやぶさ＋こまち・やまびこ＋つばさの併結と盛岡・福島での分割併合、単線のミニ新幹線、大曲のスイッチバック、札幌延伸。',

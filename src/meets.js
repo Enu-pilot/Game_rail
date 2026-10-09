@@ -5,7 +5,7 @@
 //   ・後続の速い列車が追いつく         → 手前の待避可能駅で待避
 // となるよう、発時刻の早い順に貪欲に待ち時間を決める。
 
-import { computeSchedule, stationTracks, stationMains, mainTrackOf, trainPlatform, trackUseOf, fmtHM, isCompanion } from './timetable.js';
+import { computeSchedule, stationTracks, stationMains, mainTrackOf, trainPlatform, trackUseOf, stationUp, fmtHM, isCompanion } from './timetable.js';
 
 /** 種別の優先度（大きいほど優等） */
 const RANK = { ltd: 7, commltd: 6, rapidexp: 5, express: 4, rapid: 3, semi: 2.5, local: 2, deadhead: 1, freight: 0 };
@@ -115,8 +115,8 @@ function noPassStations(doc, line, stations) {
     if (!dbl) return;
     // 前後とも複線なら、副本線のある向きだけ待避できる
     const both = !sectionSingle(line, i) && !sectionSingle(line, i - 1);
-    if (!(both ? canPassDir(doc, st, false) : canPass(doc, st))) down.add(i);
-    if (!(both ? canPassDir(doc, st, true) : canPass(doc, st))) up.add(i);
+    if (!(both ? canPassDir(doc, st, stationUp(line, i, false)) : canPass(doc, st))) down.add(i);
+    if (!(both ? canPassDir(doc, st, stationUp(line, i, true)) : canPass(doc, st))) up.add(i);
   });
   return { down, up };
 }
@@ -130,7 +130,7 @@ function holdStation(doc, line, stations, train, stops, enterIdx) {
   for (let k = pos; k >= 0; k--) {
     const idx = order[k];
     const both = !sectionSingle(line, idx) && !sectionSingle(line, idx - 1);
-    const ok = both ? canPassDir(doc, stations[idx], up) : canPass(doc, stations[idx]);
+    const ok = both ? canPassDir(doc, stations[idx], stationUp(line, idx, up)) : canPass(doc, stations[idx]);
     if (ok || k === 0) return { idx, atOrigin: k === 0 };
   }
   return null;
@@ -382,7 +382,7 @@ export function assignPlatforms(doc, line, stations, trains, sched, holds, plats
       const waits = (+((holds[t.id] || {})[idx]) || 0) > 0;
       const ends = idx === t.fromIdx || idx === t.toIdx;
       const hint = (t.platforms || {})[idx] || (plats[t.id] || {})[idx];
-      const up = t.toIdx < t.fromIdx;
+      const up = stationUp(line, idx, t.toIdx < t.fromIdx);
       const mainId = split ? mainTrackOf(obj, up, quadHere && !slowTrack(t)) : obj.trackId;
       // 通過・途中停車の列車は、反対向き・別の緩急の本線や反対向き専用の副本線には入らない
       let ids = split && !ends

@@ -324,6 +324,18 @@ export function buildNetwork(spec) {
   };
   for (let k = 0; k < 3 && fit() > 5; k++);
 
+  // 直通先の起点（共有する駅）で、子路線の下りが親路線の上り本線から出ていくなら向きを読み替える
+  {
+    store.rev++;
+    const gq = buildGraph(doc);
+    for (const E of Object.values(lines)) {
+      const st0 = E.stations[0];
+      if (!E.spec.attach || !st0 || !st0.shared || !st0.obj || !st0.obj.upTrackId) continue;
+      const sts = lineStations(doc, gq, E.line);
+      if (sts[1] && sts[1].fromTrack && sts[1].fromTrack === st0.obj.upTrackId) E.line.flip = { 0: true };
+    }
+  }
+
   /* ---- 4) 直通先（抽象）を実際の路線から導く ---- */
   const thIds = {};
   doc.throughLines = [];
@@ -1118,7 +1130,6 @@ function junctionTargets(L, parent, ps) {
   const memo = parent._junction.get(L.key);
   if (memo) return memo;
   const X = ps.diag.X;
-  const keys = L.stations.slice(1, 4).map(s => s[0]).concat(L.name.split(/[・（）]/).map(w => w.replace(/線$/, '')).filter(w => w.length >= 2));
   const cands = [];
   PD.D.tracks.forEach((d, k) => {
     const t = PD.trackOf[k];
@@ -1133,7 +1144,11 @@ function junctionTargets(L, parent, ps) {
     });
   });
   const used = parent._usedExits || (parent._usedExits = new Set());
-  let out = cands.filter(c => c.lbl && keys.some(kw => c.lbl.includes(kw)));
+  // 行先表示に子路線の駅名があるものを先に、無ければ路線名のもの
+  const stKeys = L.stations.slice(1, 4).map(s => s[0]);
+  const lnKeys = L.name.split(/[・（）]/).map(w => w.replace(/線$/, '')).filter(w => w.length >= 2);
+  let out = cands.filter(c => c.lbl && stKeys.some(kw => c.lbl.includes(kw)));
+  if (!out.length) out = cands.filter(c => c.lbl && lnKeys.some(kw => c.lbl.includes(kw)));
   if (!out.length) {
     // 行先表示の無い出口：近い2本（本線の本数ぶん）
     const free = cands.filter(c => !c.lbl && !used.has(c.key));
@@ -1143,6 +1158,9 @@ function junctionTargets(L, parent, ps) {
   }
   for (const c of out) used.add(c.key);
   parent._junction.set(L.key, out);
+  if (typeof process !== 'undefined' && process.env && process.env.DEBUG_JUNCTION) {
+    console.log(`[接続] ${L.name} ← ${parent.spec.name}/${L.attach.at}: 候補${cands.length} 採用${out.length}`, cands.map(c => `${c.lbl || '(無表示)'}${out.includes(c) ? '◎' : ''}`).join(' / '));
+  }
   return out;
 }
 
@@ -1192,6 +1210,15 @@ function linkAttach(L, child, parent, tracks) {
     const perp = p => -Math.sin(h) * p.x + Math.cos(h) * p.y;
     const T2 = targets.slice().sort((a, b) => perp(a.p) - perp(b.p));
     let S2 = src.slice().sort((a, b) => perp(a.p) - perp(b.p));
+    if (T2.length > S2.length && S2.length) {
+      // 出口の方が多ければ、並びの中で幅がいちばん狭いひと続きを使う
+      let best = 0, bw = Infinity;
+      for (let i = 0; i + S2.length <= T2.length; i++) {
+        const w = perp(T2[i + S2.length - 1].p) - perp(T2[i].p);
+        if (w < bw) { bw = w; best = i; }
+      }
+      T2.splice(0, T2.length, ...T2.slice(best, best + S2.length));
+    }
     if (S2.length !== T2.length) {
       // 数が合わなければ本線を優先して近いものどうし
       S2 = src.filter(x => x.main);

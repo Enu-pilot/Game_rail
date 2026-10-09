@@ -3,11 +3,13 @@
 // 東海道・山陽は16両・ATC-NS、九州新幹線は8両・DS-ATC。
 // 16両ののぞみは博多まで、九州へは8両のみずほ・さくら（山陽・九州の車両）が直通する。
 
+import diagram from './data/tokaido.js';
 import { P } from './util.js';
 
 const TK = (name, km, type = 'p', riders = 20, kind = 'mixed', extra = {}) => [name, km, type, P(riders, kind, extra)];
 
 export default {
+  diagram,
   id: 'tokaido', no: 6,
   title: '東海道・山陽・九州新幹線',
   note: '東京から鹿児島中央まで1325.9km。16両ののぞみは博多まで、九州へは8両のみずほ・さくらが直通する。',

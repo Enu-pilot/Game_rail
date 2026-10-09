@@ -266,6 +266,8 @@ export function migrate(doc) {
     double: l.double !== false,          // 既定の線路条件（複線かどうか）
     secSingle: (l.secSingle && typeof l.secSingle === 'object') ? { ...l.secSingle } : {},  // 駅間ごとの単線指定
     secQuad: (l.secQuad && typeof l.secQuad === 'object') ? { ...l.secQuad } : {},        // 駅間ごとの複々線指定
+    // 共有する駅で、この路線の上下が駅（親路線）の上下と逆になる駅番号
+    ...(l.flip && typeof l.flip === 'object' && Object.keys(l.flip).length ? { flip: { ...l.flip } } : {}),
     operatorId: l.operatorId || null,
     safety: Array.isArray(l.safety) ? l.safety.slice() : [],     // 走るのに必要な保安装置
     maxCars: Number.isFinite(l.maxCars) ? l.maxCars : 10,        // ホーム有効長（両数）

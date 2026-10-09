@@ -96,10 +96,60 @@ CONFIG = {
         'sotetsu': dict(shared0=True, parts=[part('pr/sagami/shinyokohama', '新横浜', '西谷', pick=[-2, -1], between=('新横浜', '羽沢横浜国大', 0.5)),
                                               part('pr/sagami/main', '西谷', '海老名')]),
     },
+    'kintetsu': {
+        'nara': dict(parts=[part('pr/kinki/namba', '大阪難波', '大阪上本町'), part('pr/kinki/osaka', '大阪上本町', '布施'),
+                            part('pr/kinki/nara', '布施', '近鉄奈良')]),
+        'hanshin': dict(shared0=True, parts=[part('pr/hanshin/namba', '大阪難波', '尼崎'), part('pr/hanshin/main', '尼崎', '神戸三宮')]),
+        'kyoto': dict(shared0=True, parts=[part('pr/kinki/kyoto', '大和西大寺', '京都')]),
+        'kashihara': dict(shared0=True, parts=[part('pr/kinki/kashihara', '大和西大寺', '橿原神宮前')]),
+    },
+    'osaka': {
+        'hanwa': dict(parts=[part('jr/west/hanwa', '天王寺', '和歌山')]),
+        'kanku': dict(shared0=True, parts=[part('jr/west/kansai-airport', '日根野', '関西空港')]),
+        'yamatoji': dict(parts=[part('jr/west/kansai', '天王寺', '加茂')]),
+        'yumesaki': dict(parts=[part('jr/west/sakurajima', '西九条', '桜島')]),
+    },
+    'ichibata': {
+        'kitamatsue': dict(parts=[part('pr/ichibata/kitamatsue', '電鉄出雲市', '松江しんじ湖温泉', n=1)]),
+        'taisha': dict(parts=[part('pr/ichibata/taisha', '川跡', '出雲大社前', n=1)]),
+    },
+    'tokaido': {
+        'tokaido': dict(parts=[part('jr/shinkansen/tokaido', '東京', '新大阪')]),
+        'sanyo': dict(shared0=True, parts=[part('jr/shinkansen/sanyo', '新大阪', '博多')]),
+        'kyushu': dict(shared0=True, parts=[part('jr/shinkansen/kyushu', '博多', '鹿児島中央')]),
+    },
+    'tohoku': {
+        'tohoku': dict(parts=[part('jr/shinkansen/tohoku', '東京', '新青森')]),
+        'joetsu': dict(shared0=True, parts=[part('jr/shinkansen/joetsu', '大宮', '新潟')]),
+        'hokurikuE': dict(shared0=True, parts=[part('jr/shinkansen/hokuriku', '高崎', '上越妙高')]),
+        'hokurikuW': dict(shared0=True, parts=[part('jr/shinkansen/hokuriku', '上越妙高', '敦賀')]),
+        'akita': dict(parts=[part('jr/east/tazawako', '盛岡', '大曲', n=1), part('jr/east/ou_1', '大曲', '秋田', n=1)]),
+        'yamagata': dict(parts=[part('jr/east/ou_1', '福島', '新庄', n=1)]),
+    },
+    'tobu': {
+        'isesaki': dict(parts=[part('pr/tobu/isesaki', '浅草', '東武動物公園')]),
+        'nikko': dict(shared0=True, parts=[part('pr/tobu/nikko', '東武動物公園', '東武日光')]),
+        'kinugawa': dict(parts=[part('pr/tobu/kinugawa', '下今市', '新藤原', n=1)]),
+    },
+    'nankai': {
+        'honsen': dict(parts=[part('pr/nankai/main', '難波', '和歌山市')]),
+        'kuko': dict(shared0=True, parts=[part('pr/nankai/airport', '泉佐野', '関西空港')]),
+        'koya': dict(parts=[part('pr/nankai/koya', '難波', '極楽橋')]),
+    },
+    'asakusa': {
+        'asakusa': dict(parts=[part('metro/tokyotoei/asakusa', '西馬込', '押上')]),
+        'keikyu': dict(shared0=True, parts=[part('pr/keikyu/main', '泉岳寺', '堀ノ内'), part('pr/keikyu/kurihama', '堀ノ内', '三崎口')]),
+        'haneda': dict(shared0=True, parts=[part('pr/keikyu/kuko', '京急蒲田', '羽田空港第1・第2ターミナル')]),
+        'keisei': dict(shared0=True, parts=[part('pr/keisei/oshiage', '押上', '青砥'), part('pr/keisei/main', '青砥', '成田空港')]),
+        'ueno': dict(shared0=True, parts=[part('pr/keisei/main', '青砥', '京成上野')]),
+        'access': dict(shared0=True, parts=[part('pr/keisei/naritakuko', '京成高砂', '成田空港（アクセス線）')]),
+    },
 }
 
 if __name__ == '__main__':
+    only = sys.argv[1:]
     for sample, lines in CONFIG.items():
+        if only and sample not in only: continue
         data = {}
         for line, cfg in lines.items():
             print(sample, line)

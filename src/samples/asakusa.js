@@ -4,11 +4,13 @@
 // エアポート快特は羽田空港から京急・浅草線・京成・成田スカイアクセス線を通って成田空港まで。
 // 京成の上野方（京成上野〜青砥）とスカイアクセス線（京成高砂〜成田空港）は分岐線として描く。
 
+import diagram from './data/asakusa.js';
 import { P } from './util.js';
 
 const S = (name, km, type = 's', riders = 5, kind = 'residential', extra = {}) => [name, km, type, P(riders, kind, extra)];
 
 export default {
+  diagram,
   id: 'asakusa', no: 10,
   title: '京成線〜都営浅草線〜京急線',
   note: '羽田空港から成田空港まで、京急・都営浅草線・京成（スカイアクセス線）の相互直通。12両の京急は浅草線に入れない。',

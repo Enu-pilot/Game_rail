@@ -3,11 +3,13 @@
 // 難波〜岸里玉出は本線と高野線の線路別複々線（ここでは別々の路線として描く）。
 // 高野線は橋本から先が単線の山岳区間（各駅で行き違い）。ラピート・空港急行は泉佐野から空港線へ。
 
+import diagram from './data/nankai.js';
 import { P } from './util.js';
 
 const S = (name, km, type = 's', riders = 5, kind = 'residential', extra = {}) => [name, km, type, P(riders, kind, extra)];
 
 export default {
+  diagram,
   id: 'nankai', no: 9,
   title: '南海電鉄（本線・空港線・高野線）',
   note: '難波から和歌山市・関西空港・極楽橋へ。ラピート・サザン・空港急行、単線の高野線山岳区間。',

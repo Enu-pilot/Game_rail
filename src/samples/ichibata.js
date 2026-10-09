@@ -3,9 +3,11 @@
 // 全線単線。行き違いできる駅は 電鉄出雲市・大津町・川跡・雲州平田・津ノ森・秋鹿町・
 // 松江イングリッシュガーデン前・松江しんじ湖温泉・出雲大社前。一畑口はスイッチバック駅。
 
+import diagram from './data/ichibata.js';
 import { P } from './util.js';
 
 export default {
+  diagram,
   id: 'ichibata', no: 5,
   title: '一畑電車（北松江線・大社線）',
   note: '宍道湖の北岸を走る単線のローカル線。一畑口のスイッチバック、川跡での大社線との接続。',

@@ -3,9 +3,11 @@
 // 奈良線は運転系統上の「大阪難波〜近鉄奈良」（難波線・大阪線 上本町〜布施を含む）。
 // 大和西大寺では京都線と橿原線が奈良線をまたいで平面交差する。
 
+import diagram from './data/kintetsu.js';
 import { P } from './util.js';
 
 export default {
+  diagram,
   id: 'kintetsu', no: 2,
   title: '近鉄奈良線と阪神なんば線・京都線・橿原線',
   note: '大阪難波から阪神なんば線（→阪神本線 神戸三宮）へ直通。大和西大寺で京都線・橿原線と平面交差する。',

@@ -4,9 +4,11 @@
 // 大和路快速・関空/紀州路快速は環状線を1周して元の線へ戻る。
 // 関空快速と紀州路快速は天王寺〜日根野（と環状線内）で併結し、日根野で分割・併合する。
 
+import diagram from './data/osaka.js';
 import { P } from './util.js';
 
 export default {
+  diagram,
   id: 'osaka', no: 3,
   title: '大阪環状線と阪和線・大和路線',
   note: '環状線を1周して戻る大和路快速・関空/紀州路快速、日根野での分割・併合、西九条からのJRゆめ咲線。',

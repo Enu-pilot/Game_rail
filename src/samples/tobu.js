@@ -4,11 +4,13 @@
 // SL大樹は下今市〜鬼怒川温泉の機関車牽引列車で、両端の駅で機回し（転車台つき）をする。
 // 鬼怒川線は単線（大桑・新高徳・鬼怒川温泉・鬼怒川公園で行き違い）。新藤原から先は野岩鉄道・会津鉄道。
 
+import diagram from './data/tobu.js';
 import { P } from './util.js';
 
 const S = (name, km, type = 's', riders = 5, kind = 'residential', extra = {}) => [name, km, type, P(riders, kind, extra)];
 
 export default {
+  diagram,
   id: 'tobu', no: 8,
   title: '東武 浅草〜日光・鬼怒川温泉',
   note: '特急スペーシアX・リバティ（下今市で分割・併合）、SL大樹の機回しと転車台、単線の鬼怒川線。',

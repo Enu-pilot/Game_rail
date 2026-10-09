@@ -2,10 +2,13 @@
 import sys, json, math, re
 sys.path.insert(0, '/tmp/claude-0/hs')
 from strip import *
+import strip as _strip
+TRACE_TARGET = _strip.TRACE_TARGET
 
 def images_for(page, names):
     ims = page_images(page)
     want = [norm_name(n) for n in names]
+    want = want + [norm_name(re.sub(r'[（(].*?[）)]$', '', n)) for n in names]
     idx = [i for i, (k, t) in enumerate(ims) if any(w + '駅' in norm_name(t) or w in norm_name(t).split('_')[-1] for w in want)]
     if not idx: return []
     return [k for k, t in ims[min(idx):max(idx) + 1]]
@@ -103,6 +106,9 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
             if len(c) > max(pick): ce = [c[i] for i in pick]; break
         elif len(c) == n_mains: ce = c; break
     if ce is None: raise RuntimeError(f'{page}: 本線の本数 {n_mains} の位置が見つかりません')
+    xs_lab = [lab[n][0][0] for n in names if n in lab]
+    TRACE_TARGET['lo'] = min(xs_lab) if xs_lab else None
+    TRACE_TARGET['hi'] = max(xs_lab) if xs_lab else None
     paths = []
     for k, (y, eid) in enumerate(ce):
         pref = prefer[k] if k < len(prefer) else 0
@@ -126,7 +132,11 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
     # 駅ごとのホーム
     # ホームは、サンプルにない駅も含めていちばん近い駅名のもの（サンプルの駅のものだけ使う）
     alll = all_labels(S)
-    want = {norm_name(n): n for n in names}
+    want = {}
+    for n in names:
+        want[norm_name(n)] = n
+        base = re.sub(r'[（(].*?[）)]$', '', n)
+        if base != n: want.setdefault(norm_name(base), n)
     plat_of = defaultdict(list)
     for b in S.plats:
         cx = (b[0] + b[2]) / 2
