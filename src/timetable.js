@@ -388,14 +388,63 @@ export function stationTracks(doc, stationObj) {
   return stationObj.trackId ? [stationObj.trackId] : [];
 }
 
+/**
+ * 駅の本線（列車の向き・緩急で決まる）。
+ * 複線を上下2本の線路で描いた駅は upTrackId が上り本線、複々線の駅は fastTrackId / fastUpTrackId が急行線。
+ * どれも無ければ駅マーカーが乗っている線路（trackId）が上下共用の本線。
+ */
+export function mainTrackOf(stationObj, up, fast = false) {
+  if (!stationObj) return null;
+  if (fast) {
+    const f = up ? (stationObj.fastUpTrackId || stationObj.fastTrackId) : stationObj.fastTrackId;
+    if (f) return f;
+  }
+  return up && stationObj.upTrackId ? stationObj.upTrackId : stationObj.trackId;
+}
+
+/** 駅の本線（上下・緩急のすべて） */
+export function stationMains(stationObj) {
+  if (!stationObj) return [];
+  return [stationObj.trackId, stationObj.upTrackId, stationObj.fastTrackId, stationObj.fastUpTrackId].filter(Boolean);
+}
+
+/** 番線を使える向き（線路の use、なければ名前の「下り副本線」「上り副本線」） */
+export function trackUseOf(doc, id) {
+  const t = doc.tracks.find(k => k.id === id);
+  if (!t) return null;
+  if (t.use === 'down' || t.use === 'up') return t.use;
+  if ((t.name || '').endsWith('下り副本線')) return 'down';
+  if ((t.name || '').endsWith('上り副本線')) return 'up';
+  return null;
+}
+
+/** 複々線で緩行線を走る種別（meets.js の優先度 2.5 以下に合わせる） */
+export const slowType = t => ['local', 'semi', 'deadhead', 'freight'].includes(t.type) || !t.type;
+
 /** 列車がその駅で使う番線 */
 export function trainPlatform(doc, train, stations, idx) {
   const st = stations[idx];
   if (!st) return null;
   const assigned = train.platforms && train.platforms[idx];
   if (assigned && hasTrack(doc, assigned)) return assigned;
-  const list = st.object ? stationTracks(doc, st.object) : [];
-  return list[0] || st.trackId || null;
+  const o = st.object;
+  const up = train.toIdx < train.fromIdx;
+  let m = null;
+  if (o && (o.upTrackId || o.fastTrackId)) {
+    m = mainTrackOf(o, up, !slowType(train));
+    if (m && !hasTrack(doc, m)) m = null;
+  }
+  const list = o ? stationTracks(doc, o) : [];
+  m = m || list[0] || st.trackId || null;
+  // ホームのない本線（通過線）に止まる列車は、その向きで使えるホームの線へ
+  const stops = !(train.skip || []).includes(idx);
+  if (stops && o && o.noStop && o.noStop.includes(m)) {
+    const mains = stationMains(o);
+    const alt = list.find(id => !o.noStop.includes(id) && !mains.includes(id) && trackUseOf(doc, id) !== (up ? 'down' : 'up'))
+      || list.find(id => !o.noStop.includes(id) && id === mainTrackOf(o, up));
+    if (alt) return alt;
+  }
+  return m;
 }
 
 /**
@@ -421,24 +470,23 @@ function platformUses(doc, line, stations, trains, headwaySec) {
       const through = !ends.includes(st.idx);
       // 本線（駅マーカーが乗っている線路）は複線を1本で表しているので、
       // 前後が複線なら上下で別の線路とみなす。待避線などの副本線は1本の線路
+      // （上下線を別の線路で描いた駅は、線路そのものが分かれているので分けない）
+      const split = !!(stObj && (stObj.upTrackId || stObj.fastTrackId));
       const onMain = !stObj || !stObj.trackId || trackId === stObj.trackId;
       // 本線は前後が複線なら上下別の線路（始発・終着の列車も、渡り線で反対側の線へ移るとみなす）
-      const sepDir = onMain && dbl(st.idx - 1) && dbl(st.idx);
+      const sepDir = onMain && !split && dbl(st.idx - 1) && dbl(st.idx);
       const up = tr.toIdx < tr.fromIdx;
       const a = (st.arr ?? st.dep) - headwaySec / 2;
       const b = (st.dep ?? st.arr) + headwaySec / 2;
       uses.push({
         train: tr, idx: st.idx, trackId, from: a, to: b, skip: st.skip, up,
         // 同じ線路でも駅が違えば番線の競合ではない（駅間の支障は運転整理で見る）
-        key: `${st.idx}|${trackId}|${sepDir ? (up ? 'up' : 'down') : ''}${onMain && quadAt(st.idx) ? (slowType(tr) ? '|緩' : '|急') : ''}`,
+        key: `${st.idx}|${trackId}|${sepDir ? (up ? 'up' : 'down') : ''}${onMain && !split && quadAt(st.idx) ? (slowType(tr) ? '|緩' : '|急') : ''}`,
       });
     }
   }
   return uses;
 }
-
-/** 複々線で緩行線を走る種別（meets.js の優先度 2.5 以下に合わせる） */
-const slowType = t => ['local', 'semi', 'deadhead', 'freight'].includes(t.type) || !t.type;
 
 // timetable.js からは meets.js を読み込まない（循環参照を避ける）ため、同じ判定をここにも置く
 function sectionSingleLocal(line, i) {

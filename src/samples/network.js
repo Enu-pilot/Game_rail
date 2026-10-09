@@ -13,11 +13,12 @@
 import { newDoc, uid, store } from '../store.js';
 import { objectDef, TURNOUT_TYPE_BY_VARIANT, FORMATION_COLORS } from '../catalog.js';
 import { buildGraph, junctionNodes, turnoutSpecAt } from '../topology.js';
-import { polylineLength, pointAt } from '../geom.js';
+import { polylineLength, pointAt, distToPolyline } from '../geom.js';
 import { lineStations, computeSchedule } from '../timetable.js';
 import { buildRosters } from '../duty.js';
 import { planMeets } from '../meets.js';
 import { initCompany } from '../company.js';
+import { stripMapping, baseline, arcPath, mapPolyline, yAt, KY } from './diagramLine.js';
 
 const DEG = Math.PI / 180;
 const LOOP_OFF = 30;          // 待避線の線路中心間隔（描画上）
@@ -77,7 +78,13 @@ export function buildNetwork(spec) {
   const stationObjByName = {};
 
   /* ---- 1) 路線ごとに本線・駅・待避線を描く ---- */
+  const gaps = [];
   for (const L of spec.lines) {
+    const D = spec.diagram && spec.diagram[L.key];
+    if (D) {
+      drawDiagramLine(L, D, { lines, tracks, objects, stationObjByName, SP, gaps, T, O });
+      continue;
+    }
     const st = L.stations.map(([name, km, type = 's', extra = {}]) => ({ name, km, type, extra }));
     // 先頭駅は接続先の路線と共用。ownStation なら分岐した先に自線のホーム（別の駅標）を置く
     const shared0 = !!L.attach && !L.attach.ownStation;
@@ -247,6 +254,8 @@ export function buildNetwork(spec) {
       if (!stationObjByName[S.name]) stationObjByName[S.name] = obj;
       entry.stations.push({ ...S, s: pos[i], obj, p, loops, shared: false });
     }
+    // 配線略図で描いた路線から分かれる場合は、その本線へつなぐ
+    if (L.attach && lines[L.attach.line] && lines[L.attach.line].diagram) linkAttach(L, entry, lines[L.attach.line], tracks);
   }
 
   // 駅間省略の記号（あとでキロ程に合わせて調整する）
@@ -258,8 +267,8 @@ export function buildNetwork(spec) {
     const off = L.attach.offset ?? 220;
     (avoid[L.attach.line] = avoid[L.attach.line] || []).push([ps.s + Math.min(0, off) - 40, ps.s + Math.max(0, off) + 40]);
   }
-  const gaps = [];
   for (const E of Object.values(lines)) {
+    if (E.diagram) continue;
     for (let i = 1; i < E.stations.length; i++) {
       const a = E.stations[i - 1], b = E.stations[i];
       const s0 = a.shared ? 0 : a.s;
@@ -271,7 +280,7 @@ export function buildNetwork(spec) {
       const p = E.path.at(sm);
       const g = O('gap_break', p.x, p.y, { rot: p.angle, trackId: E.main.id, extraM: 0 });
       objects.push(g);
-      gaps.push({ line: E, i, obj: g });
+      gaps.push({ line: E, i, objs: [g] });
     }
   }
 
@@ -304,7 +313,11 @@ export function buildNetwork(spec) {
         const got = sts[i].km - sts[i - 1].km;
         const diff = want - got;
         const gp = gaps.find(x => x.line === E && x.i === i);
-        if (gp && Math.abs(diff) > 5) { gp.obj.extraM = Math.max(0, gp.obj.extraM + diff); worst = Math.max(worst, Math.abs(diff)); }
+        if (gp && Math.abs(diff) > 5) {
+          const v = Math.max(0, gp.objs[0].extraM + diff);
+          for (const o of gp.objs) o.extraM = v;
+          worst = Math.max(worst, Math.abs(diff));
+        }
       }
     }
     return worst;
@@ -384,6 +397,19 @@ export function buildNetwork(spec) {
     const platforms = {};
     for (let i = lo; i <= hi; i++) {
       const S = E.stations[i];
+      if (S.diag) {
+        // 配線略図の駅：止まる列車は、その向きでホームに面した線へ（通過線しかない本線には止めない）
+        const stops = !skip.includes(i);
+        const list = up ? S.diag.stop.up : S.diag.stop.down;
+        const own = up ? (S.obj.upTrackId || S.obj.trackId) : S.obj.trackId;
+        if (i === fromIdx || i === toIdx) {
+          const pool = list.length ? list : (S.obj.tracks || [own]);
+          platforms[i] = pool[(counters[S.name] = (counters[S.name] || 0) + 1) % pool.length];
+        } else if (stops && list.length && !list.includes(own)) {
+          platforms[i] = list.find(id => id !== S.obj.trackId && id !== S.obj.upTrackId) || list[0];
+        }
+        continue;
+      }
       if (!S.loops) continue;
       const stops = !skip.includes(i);
       const slow = (RANK[(sv.types && sv.types[E.key]) || sv.type] ?? 3) <= 2.5;
@@ -598,12 +624,50 @@ export function buildNetwork(spec) {
     const carLen = ((spec.fleet && spec.fleet.carLengthM) || 20) + 1;
     const lenM = Math.max(220, (dp.cars || 10) * carLen + 40) * 2;   // 1線に2編成
     const nStable = Math.max(dp.min || 4, Math.ceil(setsHere / 2) + 1);
-    const yard = buildDepot(E, S, dp, nStable, lenM);
-    tracks.push(...yard.tracks);
-    objects.push(...yard.objects);
-    if (dp.own || extra) {
-      depotTracks.push(...yard.stabling.map(t => ({ t, left: 2, depot: dp })));
-      if (yard.shop) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
+    // 配線略図に描かれた車両基地があればその線路を使い、足りなければ描き足す
+    const drawn = E.diagram ? diagramDepot(E, dp, objects) : null;
+    const setLen = (dp.cars || 10) * carLen + 10;
+    let cap = 0;
+    if (drawn) {
+      for (const t of drawn.stabling) {
+        const left = Math.floor(polylineLength(t.points) / setLen);
+        if (!left) continue;
+        cap += left;
+        if (dp.own || extra) depotTracks.push({ t, left, depot: dp });
+      }
+      if (drawn.shop && (dp.own || extra)) depotTracks.push({ t: drawn.shop, left: 1, depot: dp, shop: true });
+      // 足りなければ、同じ路線の駅の留置線・引上線（夜間の留置）も使う
+      if (cap < setsHere + 1 && (dp.own || extra)) {
+        for (const t of E.diagram.trackOf) {
+          if (!t || (t.kind !== 'stabling' && t.kind !== 'shunting') || depotTracks.some(d => d.t === t)) continue;
+          const left = Math.floor(polylineLength(t.points) / setLen);
+          if (!left) continue;
+          depotTracks.push({ t, left, depot: dp });
+          cap += left;
+          if (cap >= setsHere + 1) break;
+        }
+      }
+    }
+    if (!drawn || cap < setsHere) {
+      const need = drawn ? Math.max(2, Math.ceil((setsHere + 1 - cap) / 2) + 1) : nStable;
+      const yard = buildDepot(E, S, dp, need, lenM, !!drawn);
+      tracks.push(...yard.tracks);
+      objects.push(...yard.objects);
+      // 上下2本の本線で描いた路線では、入出庫線の根元を近い方の本線につなぐ
+      if (E.mains && E.mains.length) {
+        const io = yard.tracks[0], q = io.points[1];
+        let best = null;
+        for (const t of E.mains) {
+          const r = distToPolyline(q.x, q.y, t.points);
+          if (!best || r.d < best.d) best = { d: r.d, t, at: r.at };
+        }
+        const pp = pointAt(best.t.points, Math.max(15, Math.min(polylineLength(best.t.points) - 15, best.at - 40)));
+        io.points[0] = { x: Math.round(pp.x * 10) / 10, y: Math.round(pp.y * 10) / 10 };
+      }
+      if (dp.own || extra) {
+        depotTracks.push(...yard.stabling.map(t => ({ t, left: 2, depot: dp })));
+        if (yard.shop && !(drawn && drawn.shop)) depotTracks.push({ t: yard.shop, left: 1, depot: dp, shop: true });
+      }
     }
   }
   /* ---- 7) 分岐器を接続点から自動生成 ---- */
@@ -716,21 +780,24 @@ function dummyTrain(line, fromIdx, toIdx, vmax) {
  * 車両基地：駅の先から入出庫線を出し、はしご状に留置線を並べる。
  * side = +1 / -1 で本線のどちら側に置くか。
  */
-function buildDepot(E, S, dp, nStable, lenM) {
+function buildDepot(E, S, dp, nStable, lenM, annex = false) {
   const side = dp.side || 1;
   const s0 = S.s + (dp.offset ?? 200);
   const u = E.path.at(s0), a = u.angle;
   const ux = { x: Math.cos(a), y: Math.sin(a) };
   const nv = { x: -Math.sin(a) * side, y: Math.cos(a) * side };
-  const P = (du, dv) => ({ x: u.x + ux.x * du + nv.x * dv, y: u.y + ux.y * du + nv.y * dv });
+  // 配線略図で描いた路線では、駅の配線にかからないよう本線から離して置く
+  const far = E.diagram ? 150 : 0;
+  const P = (du, dv) => { const w = dv ? dv + far : 0; return { x: u.x + ux.x * du + nv.x * w, y: u.y + ux.y * du + nv.y * w }; };
   const tracks = [], objects = [];
-  const inOut = T(`${dp.name} 入出庫線`, 'entryexit', [P(0, 0), P(60, 50), P(120, 90)], {}, { maxSpeedKmh: 25 });
+  const nm = annex ? `${dp.name}（増設）` : dp.name;
+  const inOut = T(`${nm} 入出庫線`, 'entryexit', [P(0, 0), P(60, 50), P(120, 90)], {}, { maxSpeedKmh: 25 });
   tracks.push(inOut);
   // はしご（ラダー）
   const pitch = 14;
   const kinds = ['daily', 'periodic', 'washing'];
   const total = nStable + kinds.length;
-  const lad = T(`${dp.name} ラダー線`, 'shunting', [P(120, 90), P(120 + pitch * total, 90 + pitch * total)], { b: 'buffer' }, { maxSpeedKmh: 25 });
+  const lad = T(`${nm} ラダー線`, 'shunting', [P(120, 90), P(120 + pitch * total, 90 + pitch * total)], { b: 'buffer' }, { maxSpeedKmh: 25 });
   tracks.push(lad);
   const stabling = [];
   let shop = null;
@@ -739,12 +806,464 @@ function buildDepot(E, S, dp, nStable, lenM) {
     const kind = j < kinds.length ? kinds[j] : 'stabling';
     const name = kind === 'daily' ? '仕業検査線' : kind === 'periodic' ? '交番検査線' : kind === 'washing' ? '洗浄線' : `${j - kinds.length + 1}番線`;
     const len = kind === 'stabling' ? lenM : lenM / 2 + 20;
-    const t = T(`${dp.name} ${name}`, kind, [P(du, dv), P(du + len, dv)], { b: 'buffer' }, { maxSpeedKmh: 15 });
+    const t = T(`${nm} ${name}`, kind, [P(du, dv), P(du + len, dv)], { b: 'buffer' }, { maxSpeedKmh: 15 });
     tracks.push(t);
     if (kind === 'stabling') stabling.push(t);
     if (kind === 'periodic') shop = t;
   }
   const lbl = P(120 + lenM / 2, 60);
-  objects.push(O('admin_office', lbl.x, lbl.y, { label: dp.name, rot: a, w: 50, h: 22 }));
+  if (!annex) objects.push(O('admin_office', lbl.x, lbl.y, { label: dp.name, rot: a, w: 50, h: 22 }));
   return { tracks, objects, stabling, shop };
+}
+
+/* ---------------- 配線略図から描く路線 ---------------- */
+
+/** 帯の上の点から近い文字（「〜方」などの行先表示）を探す */
+function labelNear(D, x, y, r = 40) {
+  let best = null;
+  for (const t of D.texts || []) {
+    if (!/方$/.test(t.s)) continue;
+    const cx = (t.x + t.x1) / 2;
+    const d = Math.hypot(Math.max(0, Math.abs(cx - x) - (t.x1 - t.x) / 2), t.y - y);
+    if (d <= r && (!best || d < best.d)) best = { d, s: t.s };
+  }
+  return best ? best.s.replace(/方$/, '') : '';
+}
+
+/**
+ * 配線略図のデータ D から1路線を描く。
+ * 本線は上下2本（単線なら1本）の線路、駅の配線（副本線・渡り線・留置線・ホーム）は図のとおり。
+ */
+function drawDiagramLine(L, D, ctx) {
+  const { lines, tracks, objects, stationObjByName, SP, gaps } = ctx;
+  const st = L.stations.map(([name, km, type = 's', extra = {}]) => ({ name, km, type, extra }));
+  const shared0 = !!L.attach && !L.attach.ownStation;
+  const map = stripMapping(D, st, SP, { shared0 });
+  const base = baseline(D, map.seps);
+
+  // 経路の始点と向き
+  let P0 = L.origin || { x: 0, y: 0 }, heading = (L.heading ?? 0) * DEG;
+  let headingTurn = null;
+  if (L.attach) {
+    const parent = lines[L.attach.line];
+    const ps = parent && parent.stations.find(x => x.name === L.attach.at);
+    if (!parent || !ps) throw new Error(`${L.name}: 接続先 ${L.attach.line}/${L.attach.at} がありません`);
+    const conn = attachPoint(L, parent, ps);
+    P0 = conn.p;
+    // 接続点では接続先の線の向きのまま出て、最初の駅間で路線の向きに曲がる
+    if (conn.heading != null) {
+      if (L.heading != null) headingTurn = L.heading * DEG;
+      heading = conn.heading;
+    }
+  }
+  // 曲がり角は、その駅の先の駅間（分岐のない区間）の中ほど
+  const turns = [];
+  for (const [nm, tv] of Object.entries(L.turns || {})) {
+    const i = st.findIndex(s => s.name === nm);
+    if (i < 0 || !map.seps.length) continue;
+    const tdeg = tv != null && typeof tv === 'object' ? tv.h : tv;
+    const sep = map.seps[Math.min(i, map.seps.length - 1)];
+    turns.push({ u: map.U((sep[0] + sep[1]) / 2), h: tdeg * DEG });
+  }
+  if (headingTurn != null && map.seps.length) {
+    const u0 = map.U((map.seps[0][0] + map.seps[0][1]) / 2);
+    if (!turns.some(t => Math.abs(t.u - u0) < 1)) turns.push({ u: u0, h: headingTurn });
+  }
+  turns.sort((a, b) => a.u - b.u);
+  let pathPts;
+  if (L.ring) {
+    const R = (map.total + 40) / (2 * Math.PI);
+    const C = add(P0, { x: 0, y: -R });
+    pathPts = [];
+    const N = 240;
+    for (let k = 0; k <= N; k++) {
+      const a = Math.PI / 2 - (k / N) * 2 * Math.PI * (map.total / (map.total + 40));
+      pathPts.push({ x: C.x + R * Math.cos(a), y: C.y + R * Math.sin(a) });
+    }
+  } else {
+    pathPts = arcPath(P0, heading, turns, map.total + 5);
+  }
+  const path = makePath(pathPts);
+  const M = (X, Y) => {
+    const u = map.U(X), v = (Y - base(X)) * KY;
+    const p = path.at(u), n = path.nrm(u);
+    return { x: p.x + n.x * v, y: p.y + n.y * v };
+  };
+
+  // 本線
+  const dn = D.mains.length > 1;
+  const mains = D.mains.map((m, k) => {
+    const pts = mapPolyline(m.pts, M);
+    // 端：図で車止めなら車止め、他線へ続くなら場外（子路線がつながればあとで 'open' にする）
+    const endA = m.ends[0] === 'buffer' ? 'buffer' : (L.attach ? 'open' : (L.startEnd === 'buffer' ? 'buffer' : 'boundary'));
+    const endB = m.ends[1] === 'buffer' ? 'buffer' : (L.ring ? 'open' : (L.endEnd === 'buffer' ? 'buffer' : 'boundary'));
+    const t = T(`${L.trackName || L.name}${dn ? (k === 0 ? '下り本線' : '上り本線') : ''}`, 'main', pts, { a: endA, b: endB }, { maxSpeedKmh: L.vmax ?? null });
+    if (m.under && m.under.length) {
+      t.underRanges = m.under.map(([xa, xb]) => {
+        const ya = yAt(m.pts, xa), yb = yAt(m.pts, xb);
+        const pa = M(xa, ya ?? base(xa)), pb = M(xb, yb ?? base(xb));
+        const a = distToPolyline(pa.x, pa.y, pts).at, b = distToPolyline(pb.x, pb.y, pts).at;
+        return [Math.min(a, b), Math.max(a, b)];
+      });
+    }
+    tracks.push(t);
+    return t;
+  });
+  const entry = { spec: L, main: mains[0], mains, path, stations: [], key: L.key, diagram: { D, map, M } };
+  lines[L.key] = entry;
+  if (L.ring) {
+    // 環状線の継目
+    for (const t of mains) {
+      const a = t.points[t.points.length - 1], b = t.points[0];
+      if (Math.hypot(a.x - b.x, a.y - b.y) > 1) tracks.push(T(`${t.name}（継目）`, 'main', [a, b], {}, { maxSpeedKmh: L.vmax ?? null }));
+    }
+  }
+
+  // 駅の名前（いちばん近い駅）
+  const nearStation = x => {
+    let best = null;
+    st.forEach((s, i) => { const d = Math.abs((map.cx[i] ?? 1e9) - x); if (!best || d < best.d) best = { d, name: s.name }; });
+    return best ? best.name : L.name;
+  };
+  // 配線（本線以外の線路）
+  const count = {};
+  const trackOf = D.tracks.map(d => {
+    const pts = mapPolyline(d.pts, M);
+    if (pts.length < 2 || polylineLength(pts) < 1) return null;
+    const xs = d.pts.map(p => p[0]);
+    const xm = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const lenU = d.pts.reduce((a, p, i) => i ? a + Math.hypot(p[0] - d.pts[i - 1][0], p[1] - d.pts[i - 1][1]) : 0, 0);
+    const buffer = d.ends.includes('buffer'), boundary = d.ends.includes('boundary');
+    let kind = 'other', name;
+    if (d.stations && d.stations.length) {
+      kind = 'platform';
+      const sn = d.stations[0];
+      const k = (count[`${sn}|p`] = (count[`${sn}|p`] || 0) + 1);
+      name = `${sn} ${d.use === 'down' ? '下り' : d.use === 'up' ? '上り' : ''}副本線${k > 1 ? k : ''}`;
+    } else if (boundary) {
+      const ei = d.ends[0] === 'boundary' ? 0 : d.pts.length - 1;
+      const lbl = labelNear(D, d.pts[ei][0], d.pts[ei][1]);
+      name = lbl ? `${lbl}への線` : `${nearStation(xm)} 他線`;
+      kind = 'other';
+    } else if (buffer && lenU < 14 && d.ends.includes('open')) {
+      kind = 'siding'; name = `${nearStation(xm)} 安全側線`;
+    } else if (buffer) {
+      kind = lenU > 45 ? 'stabling' : 'shunting';
+      const sn = nearStation(xm);
+      const k = (count[`${sn}|s`] = (count[`${sn}|s`] || 0) + 1);
+      name = `${sn} ${kind === 'stabling' ? '留置線' : '引上線'}${k}`;
+    } else {
+      const sn = nearStation(xm);
+      const k = (count[`${sn}|o`] = (count[`${sn}|o`] || 0) + 1);
+      name = `${sn} ${lenU < 40 ? '渡り線' : '側線'}${k}`;
+    }
+    const t = T(name, kind, pts, { a: d.ends[0], b: d.ends[1] }, { maxSpeedKmh: kind === 'platform' ? 45 : 25 });
+    if (d.use) t.use = d.use;
+    if (d.under) t.level = -1;
+    tracks.push(t);
+    return t;
+  });
+  entry.diagram.trackOf = trackOf;
+
+  // 交差：平面交差はダイヤモンドクロッシング、立体交差は上を通る線を level=1 に
+  const isConnector = k => {
+    const d = D.tracks[k];
+    if (!d || d.ends[0] !== 'open' || d.ends[1] !== 'open') return false;
+    const L2 = d.pts.reduce((a, p, i) => i ? a + Math.hypot(p[0] - d.pts[i - 1][0], p[1] - d.pts[i - 1][1]) : 0, 0);
+    return L2 < 45;
+  };
+  for (const c of D.crossings || []) {
+    const ta = c.a[0] === 'm' ? mains[c.a[1]] : trackOf[c.a[1]];
+    const tb = c.b[0] === 'm' ? mains[c.b[1]] : trackOf[c.b[1]];
+    if (!ta || !tb) continue;
+    if (c.grade) {
+      // 破線（下をくぐる）でない方を上にする（本線は level を変えない）
+      if (c.aUnder && c.b[0] === 't' && !c.bUnder) tb.level = Math.max(tb.level || 0, 1);
+      if (c.bUnder && c.a[0] === 't' && !c.aUnder) ta.level = Math.max(ta.level || 0, 1);
+      if (c.aUnder && c.a[0] === 't') ta.level = -1;
+      if (c.bUnder && c.b[0] === 't') tb.level = -1;
+      continue;
+    }
+    // シーサスクロッシング（渡り線どうしの交差）は渡り線の組として扱うので、記号は置かない
+    if (c.a[0] === 't' && c.b[0] === 't' && isConnector(c.a[1]) && isConnector(c.b[1])) continue;
+    const p = M(c.x, c.y);
+    const r = distToPolyline(p.x, p.y, ta.points);
+    const ang = pointAt(ta.points, r.at).angle;
+    objects.push(O('diamond', p.x, p.y, { rot: ang, label: 'ダイヤモンドクロッシング' }));
+  }
+
+  // 建屋・転車台
+  for (const b of D.bldgs || []) {
+    const w = (b[2] - b[0]) * map.kx, h = (b[3] - b[1]) * KY;
+    if (w < 3 || h < 3) continue;
+    const c = M((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+    const ang = path.at(map.U((b[0] + b[2]) / 2)).angle;
+    // 線路が中を通る建屋は検修庫（車庫）、それ以外は職場などの建物
+    const through = D.tracks.concat(D.mains).some(d => d.pts.some((p, j) => {
+      const q = d.pts[j - 1];
+      if (!q) return false;
+      for (let f = 0; f <= 1; f += 0.1) {
+        const x = q[0] + (p[0] - q[0]) * f, y = q[1] + (p[1] - q[1]) * f;
+        if (x > b[0] && x < b[2] && y > b[1] && y < b[3]) return true;
+      }
+      return false;
+    }));
+    objects.push(O(through ? 'inspection_shed' : 'parts_shop', c.x, c.y, { w, h, rot: ang, label: through ? '検修庫' : '' }));
+  }
+  for (const t of D.tts || []) {
+    const c = M(t.x, t.y);
+    objects.push(O('turntable', c.x, c.y, { label: `${nearStation(t.x)}転車台` }));
+  }
+
+  // 駅
+  for (let i = 0; i < st.length; i++) {
+    const S = st[i];
+    if (i === 0 && shared0) {
+      const obj = stationObjByName[S.name];
+      entry.stations.push({ ...S, s: 0, obj, p: obj ? { x: obj.x, y: obj.y } : P0, shared: true, loops: {} });
+      continue;
+    }
+    const X = map.cx[i];
+    const ds = D.stations[i] || {};
+    const yD = yAt(D.mains[0].pts, X);
+    const u = map.U(X);
+    const p = M(X, yD ?? base(X));
+    const ang = path.at(u).angle;
+    const upHere = mains[1] && yAt(D.mains[1].pts, X) != null ? mains[1] : null;
+    // 自路線の本線に直接つながるホーム線だけをこの駅の番線にする（他社線・並行線のホームは描くだけ）
+    const own = D.tracks.map((d, k) => (d.stations || []).includes(S.name) && !d.foreign && trackOf[k] ? trackOf[k] : null).filter(Boolean);
+    const stTracks = [mains[0].id, ...(upHere ? [upHere.id] : []), ...own.map(t => t.id)];
+    const hasPlats = !!(ds.plats && ds.plats.length);
+    const mp = ds.mainPlat || [];
+    const noStop = hasPlats ? mains.filter((t, k) => !mp.includes(k) && (k === 0 || t === upHere)).map(t => t.id) : [];
+    const loopSeam = L.ring && (i === 0 || i === st.length - 1) && st[0].name === st[st.length - 1].name;
+    const half = loopSeam ? 0.5 : 1;
+    const obj = O('station_mark', p.x, p.y, {
+      label: S.name, trackId: mains[0].id, tracks: stTracks, rot: ang,
+      population: Math.round((S.extra.pop ?? 20000) * half), jobs: Math.round((S.extra.jobs ?? 5000) * half),
+      kindId: S.extra.kind || 'residential',
+    });
+    if (upHere) obj.upTrackId = upHere.id;
+    if (noStop.length) obj.noStop = noStop;
+    objects.push(obj);
+    for (const b of ds.plats || []) {
+      const c = M((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+      // ホームは図より少し短く細く（図では端の渡り線に接して描かれていることがある）
+      const w = (b[2] - b[0]) * map.kx * 0.86, h = Math.max(4, (b[3] - b[1]) * KY * 0.7);
+      objects.push(O('platform_island', c.x, c.y, { w, h, rot: path.at(map.U((b[0] + b[2]) / 2)).angle }));
+    }
+    // 列車の向きごとに止まれる番線（ホームに面した線）
+    const stop = { down: [], up: [] };
+    if (!noStop.includes(mains[0].id)) stop.down.push(mains[0].id);
+    if (upHere && !noStop.includes(upHere.id)) stop.up.push(upHere.id);
+    else if (!upHere && !noStop.includes(mains[0].id)) stop.up.push(mains[0].id);
+    // 向きの決まった副本線を先に、上下共用の線をあとに
+    for (const t of own.slice().sort((a, b) => (a.use ? 0 : 1) - (b.use ? 0 : 1))) {
+      if (t.use !== 'up') stop.down.push(t.id);
+      if (t.use !== 'down') stop.up.push(t.id);
+    }
+    if (!stationObjByName[S.name]) stationObjByName[S.name] = obj;
+    entry.stations.push({ ...S, s: u, obj, p, loops: {}, shared: false, diag: { stop, X } });
+  }
+
+  // 駅間省略の記号：各駅間の分岐のない区間の中ほど、上下の本線それぞれに
+  for (let i = 1; i < st.length; i++) {
+    const [r, l] = map.seps[i - 1];
+    const X = (r + l) / 2;
+    const objs = [];
+    D.mains.forEach((m, k) => {
+      const y = yAt(m.pts, X);
+      if (y == null) return;
+      const p = M(X, y);
+      const g = O('gap_break', p.x, p.y, { rot: path.at(map.U(X)).angle, trackId: mains[k].id, extraM: 0 });
+      objects.push(g); objs.push(g);
+    });
+    if (objs.length) gaps.push({ line: entry, i, objs });
+  }
+
+  // 接続先の路線とつなぐ
+  if (L.attach) linkAttach(L, entry, lines[L.attach.line], tracks);
+  return entry;
+}
+
+/** 接続点（子路線の経路の始点）と向き */
+function attachPoint(L, parent, ps) {
+  const ex = junctionTargets(L, parent, ps);
+  if (ex.length) {
+    const hx = ex.reduce((a, e) => a + Math.cos(e.dir), 0), hy = ex.reduce((a, e) => a + Math.sin(e.dir), 0);
+    const h = Math.atan2(hy, hx);
+    const c = { x: ex.reduce((a, e) => a + e.p.x, 0) / ex.length, y: ex.reduce((a, e) => a + e.p.y, 0) / ex.length };
+    return { p: { x: c.x + Math.cos(h) * 30, y: c.y + Math.sin(h) * 30 }, heading: h };
+  }
+  if (L.attach.mode === 'end') {
+    const ends = parentEnds(parent, ps);
+    if (ends.length) {
+      const p = { x: ends.reduce((a, e) => a + e.p.x, 0) / ends.length, y: ends.reduce((a, e) => a + e.p.y, 0) / ends.length };
+      return { p, heading: ends[0].heading };
+    }
+  }
+  const off = L.attach.offset ?? 220;
+  const q = parent.path.at(ps.s + off);
+  return { p: { x: q.x, y: q.y }, heading: null };
+}
+
+/**
+ * 親路線の配線図で、接続駅から子路線の方へ出ていく線の端（「〜方」の行先表示が子路線の駅名・路線名のもの）。
+ * 行先表示が合うものが無ければ、接続駅の近くで外へ出ていく線のうち、ほかの子路線が使っていないもの。
+ */
+function junctionTargets(L, parent, ps) {
+  const PD = parent.diagram;
+  if (!PD || !ps || !ps.diag || L.attach.ownStation) return [];
+  if (!parent._junction) parent._junction = new Map();
+  const memo = parent._junction.get(L.key);
+  if (memo) return memo;
+  const X = ps.diag.X;
+  const keys = L.stations.slice(1, 4).map(s => s[0]).concat(L.name.split(/[・（）]/).map(w => w.replace(/線$/, '')).filter(w => w.length >= 2));
+  const cands = [];
+  PD.D.tracks.forEach((d, k) => {
+    const t = PD.trackOf[k];
+    if (!t) return;
+    d.ends.forEach((e, w) => {
+      if (e !== 'boundary') return;
+      const q = d.pts[w === 0 ? 0 : d.pts.length - 1];
+      if (Math.abs(q[0] - X) > 160) return;
+      const pts = t.points, i = w === 0 ? 0 : pts.length - 1, j = w === 0 ? 1 : pts.length - 2;
+      cands.push({ key: `${k}|${w}`, p: pts[i], dir: Math.atan2(pts[i].y - pts[j].y, pts[i].x - pts[j].x),
+        track: t, which: w === 0 ? 'a' : 'b', lbl: labelNear(PD.D, q[0], q[1], 60) });
+    });
+  });
+  const used = parent._usedExits || (parent._usedExits = new Set());
+  let out = cands.filter(c => c.lbl && keys.some(kw => c.lbl.includes(kw)));
+  if (!out.length) {
+    // 行先表示の無い出口：近い2本（本線の本数ぶん）
+    const free = cands.filter(c => !c.lbl && !used.has(c.key));
+    const want = (L.double === false || L.stations.length < 2) ? 1 : 2;
+    free.sort((a, b) => Math.hypot(a.p.x - ps.p.x, a.p.y - ps.p.y) - Math.hypot(b.p.x - ps.p.x, b.p.y - ps.p.y));
+    out = free.slice(0, Math.max(want, free.filter(c => Math.hypot(c.p.x - free[0].p.x, c.p.y - free[0].p.y) < 80).length));
+  }
+  for (const c of out) used.add(c.key);
+  parent._junction.set(L.key, out);
+  return out;
+}
+
+/** 親路線の本線の端（接続駅に近い側）と、外向きの向き */
+function parentEnds(parent, ps) {
+  const out = [];
+  for (const t of parent.mains || [parent.main]) {
+    const pts = t.points;
+    const a = pts[0], b = pts[pts.length - 1];
+    const da = Math.hypot(a.x - ps.p.x, a.y - ps.p.y), db = Math.hypot(b.x - ps.p.x, b.y - ps.p.y);
+    if (da <= db) out.push({ t, which: 'a', p: a, heading: Math.atan2(a.y - pts[1].y, a.x - pts[1].x) });
+    else out.push({ t, which: 'b', p: b, heading: Math.atan2(b.y - pts[pts.length - 2].y, b.x - pts[pts.length - 2].x) });
+  }
+  return out;
+}
+
+/**
+ * 子路線の起点側の切り口（本線・切れている線）を、親路線の出口につなぐ。
+ * 画像の継ぎ目と同じく、進む向きに対して左から順に組にする。
+ */
+function linkAttach(L, child, parent, tracks) {
+  const ps = parent.stations.find(x => x.name === L.attach.at);
+  const mains = child.mains || [child.main];
+  // 子路線の切り口
+  const src = mains.map(t => ({ t, which: 'a', p: t.points[0], main: true }));
+  if (child.diagram) {
+    const D = child.diagram.D;
+    D.tracks.forEach((d, k) => {
+      const t = child.diagram.trackOf[k];
+      if (!t) return;
+      d.ends.forEach((e, w) => {
+        if (e !== 'boundary') return;
+        const q = d.pts[w === 0 ? 0 : d.pts.length - 1];
+        if (Math.abs(q[0] - D.x0) > 1.5) return;
+        src.push({ t, which: w === 0 ? 'a' : 'b', p: w === 0 ? t.points[0] : t.points[t.points.length - 1], main: false });
+      });
+    });
+  }
+  const link = (s, p, setEnd) => {
+    setEnd();
+    s.t.ends[s.which] = 'open';
+    if (Math.hypot(p.x - s.p.x, p.y - s.p.y) > 3) tracks.push(T(`${L.name} 連絡線`, s.main ? 'main' : 'other', [p, s.p], {}, { maxSpeedKmh: L.vmax ?? null }));
+  };
+  const targets = junctionTargets(L, parent, ps);
+  if (targets.length) {
+    const h = Math.atan2(targets.reduce((a, e) => a + Math.sin(e.dir), 0), targets.reduce((a, e) => a + Math.cos(e.dir), 0));
+    const perp = p => -Math.sin(h) * p.x + Math.cos(h) * p.y;
+    const T2 = targets.slice().sort((a, b) => perp(a.p) - perp(b.p));
+    let S2 = src.slice().sort((a, b) => perp(a.p) - perp(b.p));
+    if (S2.length !== T2.length) {
+      // 数が合わなければ本線を優先して近いものどうし
+      S2 = src.filter(x => x.main);
+      const used = new Set();
+      for (const s of S2) {
+        let best = null;
+        T2.forEach((tg, k) => { if (!used.has(k)) { const d = Math.hypot(tg.p.x - s.p.x, tg.p.y - s.p.y); if (!best || d < best.d) best = { d, k, tg }; } });
+        if (best) { used.add(best.k); link(s, best.tg.p, () => { best.tg.track.ends[best.tg.which] = 'open'; }); }
+      }
+      return;
+    }
+    S2.forEach((s, k) => { const tg = T2[k]; link(s, tg.p, () => { tg.track.ends[tg.which] = 'open'; }); });
+    return;
+  }
+  if (L.attach.mode === 'end') {
+    // 直通：親の終点で続くなら下り↔下り、親の起点で続くなら下り↔上り
+    const ends = parentEnds(parent, ps);
+    const atEnd = parent.stations.indexOf(ps) === parent.stations.length - 1;
+    const order = ends.length === mains.length && mains.length === 2 ? (atEnd ? [0, 1] : [1, 0]) : null;
+    src.filter(x => x.main).forEach((s, k) => {
+      let e = order ? ends[order[k]] : null;
+      if (!e) e = ends.slice().sort((a, b) => Math.hypot(a.p.x - s.p.x, a.p.y - s.p.y) - Math.hypot(b.p.x - s.p.x, b.p.y - s.p.y))[0];
+      if (e) link(s, e.p, () => { e.t.ends[e.which] = 'open'; });
+    });
+    return;
+  }
+  // 出口が見つからなければ、親の本線の途中へ分岐でつなぐ
+  for (const s of src.filter(x => x.main)) {
+    let near = null;
+    for (const t of parent.mains || [parent.main]) {
+      const r = distToPolyline(s.p.x, s.p.y, t.points);
+      if (!near || r.d < near.d) near = { d: r.d, t, at: r.at };
+    }
+    if (near) {
+      const q = pointAt(near.t.points, Math.max(10, Math.min(polylineLength(near.t.points) - 10, near.at)));
+      link(s, { x: q.x, y: q.y }, () => {});
+    }
+  }
+}
+
+/** 配線略図に描かれた車両基地（基地名の文字の近くの留置線）を使う */
+function diagramDepot(E, dp, objects) {
+  const { D, trackOf, M, map } = E.diagram;
+  const lbl = (D.depots || []).find(t => t.s.includes(dp.name) || dp.name.includes(t.s.replace(/^.*(鉄道|電鉄|地下鉄|交通局|JR東海|JR西日本|JR東日本|JR九州|JR北海道)/, '')));
+  if (!lbl) return null;
+  const x0 = lbl.x - 220, x1 = lbl.x1 + 260, y0 = lbl.y - 140, y1 = lbl.y + 140;
+  const inBox = d => d.pts.some(p => p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1);
+  const stabling = [];
+  let shop = null, k = 0;
+  D.tracks.forEach((d, i) => {
+    const t = trackOf[i];
+    if (!t || t.kind === 'platform' || t.kind === 'siding' || !inBox(d)) return;
+    if (!d.ends.includes('buffer')) return;
+    const lenU = d.pts.reduce((a, p, j) => j ? a + Math.hypot(p[0] - d.pts[j - 1][0], p[1] - d.pts[j - 1][1]) : 0, 0);
+    if (lenU < 35) return;
+    // 建屋の中を通る線は検修線
+    const inside = (D.bldgs || []).some(b => (b[2] - b[0]) > 8 && d.pts.some((p, j) => {
+      // 線分が建屋の中を通るか（端点だけでなく途中も見る）
+      const q = d.pts[j - 1];
+      if (!q) return false;
+      for (let f = 0; f <= 1; f += 0.1) {
+        const x = q[0] + (p[0] - q[0]) * f, y = q[1] + (p[1] - q[1]) * f;
+        if (x >= b[0] && x <= b[2] && y >= b[1] - 2 && y <= b[3] + 2) return true;
+      }
+      return false;
+    }));
+    if (inside && !shop) { t.kind = 'inspection'; t.name = `${dp.name} 検修線`; shop = t; return; }
+    t.kind = 'stabling'; t.name = `${dp.name} ${++k}番線`;
+    stabling.push(t);
+  });
+  if (!stabling.length) return null;
+  const c = M((lbl.x + lbl.x1) / 2, lbl.y);
+  objects.push(O('admin_office', c.x, c.y, { label: dp.name, rot: E.path.at(map.U(lbl.x)).angle, w: 50, h: 22 }));
+  return { stabling, shop };
 }

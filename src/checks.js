@@ -73,6 +73,13 @@ function samples(t) {
 let _crossCache = { rev: -1, doc: null, list: null };
 
 /** 接続点をもたない線路どうしの交差点（分岐器・クロッシング未設置の箇所） */
+/** 線路のその点が立体交差の下をくぐる区間か */
+function underAt(t, p) {
+  if (!t.underRanges || !t.underRanges.length) return false;
+  const at = distToPolyline(p.x, p.y, t.points).at;
+  return t.underRanges.some(([a, b]) => at >= a - 2 && at <= b + 2);
+}
+
 export function crossingPoints(doc, g, rev) {
   if (_crossCache.list && _crossCache.rev === rev && _crossCache.doc === doc) return _crossCache.list;
   const tracks = doc.tracks.filter(t => t.points && t.points.length >= 2 && polylineLength(t.points) > 0.5);
@@ -87,6 +94,8 @@ export function crossingPoints(doc, g, rev) {
           const x = segIntersect(A.points[a - 1], A.points[a], B.points[b - 1], B.points[b]);
           if (!x) continue;
           if (g && g.nodes.some(n => dist(n.x, n.y, x.x, x.y) <= (g.tol || 6) + 1)) continue;
+          // 立体交差（高さの違う線・下をくぐる区間）は交差ではない
+          if ((A.level || 0) !== (B.level || 0) || underAt(A, x) || underAt(B, x)) continue;
           const angA = Math.atan2(A.points[a].y - A.points[a - 1].y, A.points[a].x - A.points[a - 1].x);
           const angB = Math.atan2(B.points[b].y - B.points[b - 1].y, B.points[b].x - B.points[b - 1].x);
           list.push({ x: x.x, y: x.y, a: A.id, b: B.id, aName: A.name, bName: B.name, angA, angB });
@@ -130,6 +139,8 @@ function runChecks(doc, g, rev) {
     for (let j = i + 1; j < tracks.length; j++) {
       const A = tracks[i], B = tracks[j];
       if (bboxFar(boxes.get(A.id), boxes.get(B.id), minSp + 2)) continue;
+      // 高さの違う線（立体交差の上下）は離隔・交差を見ない
+      if ((A.level || 0) !== (B.level || 0)) continue;
       const shared = sharedNodes(A, B);
 
       // --- 交差（接続点なし） ---

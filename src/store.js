@@ -172,6 +172,10 @@ export function migrate(doc) {
     ends: { a: (t.ends && t.ends.a) || 'open', b: (t.ends && t.ends.b) || 'open' },
     maxSpeedKmh: Number.isFinite(t.maxSpeedKmh) ? t.maxSpeedKmh : null,
     note: t.note || '',
+    // 番線を使える向き（'down' / 'up'）、立体交差（level: -1 下をくぐる / 1 上を越える、underRanges: 下をくぐる区間）
+    ...(t.use === 'down' || t.use === 'up' ? { use: t.use } : {}),
+    ...(Number.isFinite(t.level) && t.level ? { level: t.level } : {}),
+    ...(Array.isArray(t.underRanges) && t.underRanges.length ? { underRanges: t.underRanges.map(r => [+r[0] || 0, +r[1] || 0]) } : {}),
   }));
   d.objects = (doc.objects || []).map(o => {
     const type = o.type || 'station_bldg';
@@ -197,6 +201,11 @@ export function migrate(doc) {
       divergeSpeedKmh: Number.isFinite(o.divergeSpeedKmh) ? o.divergeSpeedKmh : null,
       xang: Number.isFinite(o.xang) ? o.xang : null,   // 平面交差の交差角[rad]
       label: o.label ?? '', note: o.note || '', trackId: o.trackId || null,
+      // 駅：上り本線・急行線（上下線・緩急線を別の線路で描いた駅）、ホームのない本線（通過線）
+      ...(o.upTrackId ? { upTrackId: o.upTrackId } : {}),
+      ...(o.fastTrackId ? { fastTrackId: o.fastTrackId } : {}),
+      ...(o.fastUpTrackId ? { fastUpTrackId: o.fastUpTrackId } : {}),
+      ...(Array.isArray(o.noStop) && o.noStop.length ? { noStop: o.noStop.slice() } : {}),
     };
   });
   d.formations = (doc.formations || []).map(f => ({

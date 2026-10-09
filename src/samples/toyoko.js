@@ -3,9 +3,12 @@
 // キロ程：Wikipedia 各線の駅一覧
 // 種別の停車駅は現行ダイヤを参考にした概略。本数はゲーム用に間引いたパターンダイヤ。
 
+import diagram from './data/toyoko.js';
+
 const R = (k, pop, jobs, kind) => ({ pop: pop * 1000, jobs: jobs * 1000, kind });
 
 export default {
+  diagram,
   id: 'toyoko', no: 1,
   title: '東急東横線と相互直通各線',
   note: '渋谷で副都心線（→有楽町線→東武東上線／西武池袋線）、横浜でみなとみらい線、日吉で東急新横浜線（→相鉄線）とつながる6社直通。',

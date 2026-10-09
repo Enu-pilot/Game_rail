@@ -1,6 +1,6 @@
 // 線路の接続関係（トポロジー）の構築・入換経路探索・レイアウト検証
 
-import { polylineLength, pointAt, distToPolyline, dist, polylineIntersect } from './geom.js';
+import { polylineLength, pointAt, distToPolyline, distToSegment, dist, polylineIntersect } from './geom.js';
 import { trackKind, objectDef } from './catalog.js';
 import { trackCapacity, trackUsage, formationLength, store } from './store.js';
 
@@ -27,10 +27,27 @@ const angleDiff = (a, b) => Math.abs(norm(a - b));
 export function buildGraph(doc, tol = JOIN_TOL) {
   const nodes = [];
   const nodeById = new Map();
+  // ノードは格子で引く（線路が数千本ある路線網でも線形時間で済むように）
+  const NC = Math.max(tol, 1) * 2;
+  const nodeGrid = new Map();
+  const nkey = (i, j) => `${i},${j}`;
   const addNode = (x, y) => {
-    for (const n of nodes) if (dist(n.x, n.y, x, y) <= tol) return n;
-    const n = { id: `n${nodes.length}`, x, y, edges: [], ext: false, endOf: [] };
+    const ci = Math.floor(x / NC), cj = Math.floor(y / NC);
+    let best = null;
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        for (const n of nodeGrid.get(nkey(ci + di, cj + dj)) || []) {
+          const d = dist(n.x, n.y, x, y);
+          if (d <= tol && (!best || n.seq < best.seq)) best = n;
+        }
+      }
+    }
+    if (best) return best;
+    const n = { id: `n${nodes.length}`, seq: nodes.length, x, y, edges: [], ext: false, endOf: [] };
     nodes.push(n); nodeById.set(n.id, n);
+    const k = nkey(ci, cj);
+    if (!nodeGrid.has(k)) nodeGrid.set(k, []);
+    nodeGrid.get(k).push(n);
     return n;
   };
 
@@ -51,16 +68,47 @@ export function buildGraph(doc, tol = JOIN_TOL) {
   }
 
   // 2) 他線の端点が線路の途中に接する場合（分岐）
+  //    線分を格子に登録し、端点の近くの線分だけを調べる
+  const SC = 60;
+  const segGrid = new Map();
+  const lenOf = new Map();
   for (const t of tracks) {
-    const len = polylineLength(t.points);
-    for (const other of tracks) {
-      if (other.id === t.id) continue;
-      for (const p of [other.points[0], other.points[other.points.length - 1]]) {
-        const r = distToPolyline(p.x, p.y, t.points);
-        if (r.d > tol) continue;
+    let acc = 0;
+    for (let i = 1; i < t.points.length; i++) {
+      const a = t.points[i - 1], b = t.points[i];
+      const seg = { t, a, b, at0: acc, len: dist(a.x, a.y, b.x, b.y) };
+      acc += seg.len;
+      const i0 = Math.floor((Math.min(a.x, b.x) - tol) / SC), i1 = Math.floor((Math.max(a.x, b.x) + tol) / SC);
+      const j0 = Math.floor((Math.min(a.y, b.y) - tol) / SC), j1 = Math.floor((Math.max(a.y, b.y) + tol) / SC);
+      for (let ci = i0; ci <= i1; ci++) {
+        for (let cj = j0; cj <= j1; cj++) {
+          const k = nkey(ci, cj);
+          if (!segGrid.has(k)) segGrid.set(k, []);
+          segGrid.get(k).push(seg);
+        }
+      }
+    }
+    lenOf.set(t.id, acc);
+  }
+  for (const other of tracks) {
+    for (const p of [other.points[0], other.points[other.points.length - 1]]) {
+      // 線路ごとに、端点にいちばん近い位置
+      const near = new Map();
+      for (const seg of segGrid.get(nkey(Math.floor(p.x / SC), Math.floor(p.y / SC))) || []) {
+        if (seg.t.id === other.id) continue;
+        const d = distToSegment(p.x, p.y, seg.a.x, seg.a.y, seg.b.x, seg.b.y);
+        if (d > tol) continue;
+        const prev = near.get(seg.t.id);
+        if (prev && prev.d <= d) continue;
+        const dx = seg.b.x - seg.a.x, dy = seg.b.y - seg.a.y, l2 = dx * dx + dy * dy;
+        const u = l2 < 1e-12 ? 0 : Math.max(0, Math.min(1, ((p.x - seg.a.x) * dx + (p.y - seg.a.y) * dy) / l2));
+        near.set(seg.t.id, { d, at: seg.at0 + seg.len * u });
+      }
+      for (const [tid, r] of near) {
+        const len = lenOf.get(tid);
         if (r.at <= tol || r.at >= len - tol) continue;   // 端点同士は 1) で処理済み
         const node = addNode(p.x, p.y);
-        const list = attach.get(t.id);
+        const list = attach.get(tid);
         if (!list.some(a => Math.abs(a.at - r.at) < tol)) list.push({ at: r.at, node: node.id });
       }
     }
@@ -139,10 +187,11 @@ export function buildGraph(doc, tol = JOIN_TOL) {
     const def = objectDef(o.type);
     if (def.shape !== 'turnout') continue;
     let best = null;
+    const reach = def.variant === 'diamond' ? tol : tol * 4;
     for (const n of nodes) {
       if (!n.edges.length) continue;
       const d = dist(n.x, n.y, o.x, o.y);
-      if (d <= tol * 4 && (!best || d < best.d)) best = { n, d };
+      if (d <= reach && (!best || d < best.d)) best = { n, d };
     }
     if (best) {
       best.n.turnout = o.id;
@@ -646,7 +695,7 @@ export function turnoutSpecAt(doc, g, nodeId) {
  */
 function detectCrossovers(doc, g, opts = {}) {
   const maxLen = opts.maxLengthM ?? 140;        // これより長いものは連絡線とみなす
-  const parallelTol = opts.parallelTol ?? 0.5;  // 取り付く2線の平行とみなす角度差[rad]
+  const parallelTol = opts.parallelTol ?? 0.7;  // 取り付く2線の平行とみなす角度差[rad]（駅の手前で本線が開いていくところも含む）
   const byId = new Map(doc.tracks.map(t => [t.id, t]));
   const nodeAt = (x, y) => g.nodes.find(n => dist(n.x, n.y, x, y) <= g.tol + 0.5);
   const conns = [];
@@ -676,6 +725,7 @@ function detectCrossovers(doc, g, opts = {}) {
     conns.push({
       track: c, length: len, nodes: [n0, n1], trackIds: [aId, bId],
       key: [aId, bId].slice().sort().join('|'),
+      attached: new Set([...A, ...B]),
       mid: pointAt(c.points, len / 2),
     });
   }
@@ -687,7 +737,9 @@ function detectCrossovers(doc, g, opts = {}) {
     if (used.has(conns[i].track.id)) continue;
     let mate = null, cross = null;
     for (let j = i + 1; j < conns.length; j++) {
-      if (used.has(conns[j].track.id) || conns[i].key !== conns[j].key) continue;
+      if (used.has(conns[j].track.id)) continue;
+      // 同じ2線を結んでいるか（分岐点に他の線も集まっていて、最初の組が違うこともある）
+      if (conns[i].key !== conns[j].key && [...conns[i].attached].filter(id => conns[j].attached.has(id)).length < 2) continue;
       const x = polylineIntersect(conns[i].track.points, conns[j].track.points);
       if (x) { mate = conns[j]; cross = x; break; }
     }

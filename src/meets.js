@@ -5,7 +5,7 @@
 //   ・後続の速い列車が追いつく         → 手前の待避可能駅で待避
 // となるよう、発時刻の早い順に貪欲に待ち時間を決める。
 
-import { computeSchedule, stationTracks, trainPlatform, fmtHM, isCompanion } from './timetable.js';
+import { computeSchedule, stationTracks, stationMains, mainTrackOf, trainPlatform, trackUseOf, fmtHM, isCompanion } from './timetable.js';
 
 /** 種別の優先度（大きいほど優等） */
 const RANK = { ltd: 7, commltd: 6, rapidexp: 5, express: 4, rapid: 3, semi: 2.5, local: 2, deadhead: 1, freight: 0 };
@@ -25,27 +25,34 @@ export function sectionSingle(line, i) {
   return !line.double;
 }
 
-/** 駅の発着線の本数 */
+/**
+ * 駅の発着線の本数（1つの向きの列車が使える本数）。
+ * 上下線・緩急線を別の線路で描いた駅は、ほかの向き・緩急の本線を数えない。
+ */
 export function stationTrackCount(doc, st) {
-  return st && st.object ? stationTracks(doc, st.object).length : 0;
+  if (!st || !st.object) return 0;
+  const n = stationTracks(doc, st.object).length;
+  return n - Math.max(0, stationMains(st.object).length - 1);
 }
 
 /** 行き違い・待避ができる駅（発着線が2本以上） */
 export const canPass = (doc, st) => stationTrackCount(doc, st) >= 2;
 
 /**
+ * 番線を使える向き：線路の use（'down' / 'up'）、なければ名前（「下り副本線」「上り副本線」）。
+ * どちらでもなければ上下どちらにも使える。
+ */
+export const trackUse = trackUseOf;
+
+/**
  * 複線の駅で、その向きの列車が待避できるか。
- * 副本線が「下り副本線」だけ（または「上り副本線」だけ）の駅は、反対向きの列車は待避できない。
- * 名前で向きがわからない番線（手で描いた待避線・頭端線など）は上下どちらにも使えるとみなす。
+ * 副本線が下り用だけ（または上り用だけ）の駅は、反対向きの列車は待避できない。
  */
 export function canPassDir(doc, st, up) {
   if (!canPass(doc, st)) return false;
-  const main = st.object.trackId;
-  const names = stationTracks(doc, st.object).filter(id => id !== main)
-    .map(id => (doc.tracks.find(t => t.id === id) || {}).name || '');
-  const down = names.some(n => !n.endsWith('上り副本線'));
-  const upOk = names.some(n => !n.endsWith('下り副本線'));
-  return up ? upOk : down;
+  const mains = new Set(stationMains(st.object));
+  const others = stationTracks(doc, st.object).filter(id => !mains.has(id));
+  return others.some(id => trackUse(doc, id) !== (up ? 'down' : 'up'));
 }
 
 /**
@@ -347,11 +354,14 @@ export function assignPlatforms(doc, line, stations, trains, sched, holds, plats
   for (const [idx, list] of byStation) {
     const stn = stations[idx];
     if (!stn || !stn.object) continue;
-    const ids = stationTracks(doc, stn.object);
-    if (ids.length < 2) continue;                      // 番線が1本なら選びようがない
-    const mainId = stn.object.trackId;
-    const splitMain = dbl(idx - 1) && dbl(idx);
-    const trackPts = new Map(ids.map(id => [id, (doc.tracks.find(k => k.id === id) || {}).points || []]));
+    const all = stationTracks(doc, stn.object);
+    if (all.length < 2) continue;                      // 番線が1本なら選びようがない
+    const obj = stn.object;
+    // 上下線（緩急線）を別の線路で描いた駅は、列車ごとに本線が決まる
+    const split = !!(obj.upTrackId || obj.fastTrackId);
+    const mains = stationMains(obj);
+    const splitMain = !split && dbl(idx - 1) && dbl(idx);
+    const trackPts = new Map(all.map(id => [id, (doc.tracks.find(k => k.id === id) || {}).points || []]));
     const leftOf = (t, id) => {
       const up = t.toIdx < t.fromIdx;
       const pa = stations[up ? idx + 1 : idx - 1], pb = stations[up ? idx - 1 : idx + 1];
@@ -362,7 +372,7 @@ export function assignPlatforms(doc, line, stations, trains, sched, holds, plats
     };
     const busy = new Map();                            // key → [[from, to], ...]
     const quadHere = sectionQuad(line, idx - 1) || sectionQuad(line, idx);
-    const keyOf = (t, id) => (id === mainId
+    const keyOf = (t, id) => (id === obj.trackId && !split
       ? `${id}|${splitMain ? (t.toIdx < t.fromIdx ? 'u' : 'd') : ''}|${quadHere ? (slowTrack(t) ? 's' : 'f') : ''}`
       : id);
     const free = (k, a, b) => !(busy.get(k) || []).some(([x, y]) => a < y && x < b);
@@ -372,6 +382,17 @@ export function assignPlatforms(doc, line, stations, trains, sched, holds, plats
       const waits = (+((holds[t.id] || {})[idx]) || 0) > 0;
       const ends = idx === t.fromIdx || idx === t.toIdx;
       const hint = (t.platforms || {})[idx] || (plats[t.id] || {})[idx];
+      const up = t.toIdx < t.fromIdx;
+      const mainId = split ? mainTrackOf(obj, up, quadHere && !slowTrack(t)) : obj.trackId;
+      // 通過・途中停車の列車は、反対向き・別の緩急の本線や反対向き専用の副本線には入らない
+      let ids = split && !ends
+        ? all.filter(id => (id === mainId || !mains.includes(id)) && trackUse(doc, id) !== (up ? 'down' : 'up'))
+        : all;
+      // 止まる列車は、ホームのない線（通過線）には入れない
+      if (!st.skip && obj.noStop && obj.noStop.length) {
+        const ok = ids.filter(id => !obj.noStop.includes(id));
+        if (ok.length) ids = ok;
+      }
       const score = id => {
         if (id === hint && (!waits || id !== mainId)) return 0;
         if (waits) return id === mainId ? 4 : leftOf(t, id) ? 1 : 2;

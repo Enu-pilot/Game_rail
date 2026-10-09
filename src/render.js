@@ -157,6 +157,21 @@ function drawTrack(ctx, cam, doc, t, ui) {
     strokePts(ctx, sp);
   }
 
+  // 立体交差で下をくぐる線（全体が下の線・区間の指定）は、背景色の破線を重ねて破線に見せる
+  const unders = (t.level || 0) < 0 ? [[0, polylineLength(t.points)]] : (t.underRanges || []);
+  if (unders.length) {
+    ctx.save();
+    ctx.strokeStyle = '#0e1219';
+    ctx.lineWidth = Math.max(3, BALLAST_W * z) + 1;
+    ctx.setLineDash([Math.max(4, 5 * z), Math.max(4, 5 * z)]);
+    ctx.lineCap = 'butt';
+    for (const [a, b] of unders) {
+      const seg = subPolyline(t.points, Math.max(0, a), b);
+      if (seg.length >= 2) strokePts(ctx, screenPts(cam, seg));
+    }
+    ctx.restore();
+  }
+
   // 端部マーク（始端 A / 終端 B）
   if (z > 0.5) {
     ctx.fillStyle = kind.color;
