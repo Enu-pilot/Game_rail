@@ -857,7 +857,7 @@ function fitObjects(objects, tracks) {
   const pts = [];
   for (const t of tracks) {
     const L = polylineLength(t.points);
-    for (let d = 0; d <= L; d += 1.5) pts.push(pointAt(t.points, d));
+    for (let d = 0; d <= L; d += 0.75) pts.push(pointAt(t.points, d));
     pts.push(t.points[t.points.length - 1]);
   }
   // 点の索引
@@ -897,6 +897,12 @@ function fitObjects(objects, tracks) {
       let lo = -o.h / 2, hi = o.h / 2;
       for (const q of hs) { if (q.ly >= 0) hi = Math.min(hi, q.ly - HALF); else lo = Math.max(lo, q.ly + HALF); }
       if (hi - lo >= (isPlat ? 2.5 : 6)) { const h = hi - lo; move(o, 0, (lo + hi) / 2); o.h = h; hs = hits(o); }
+    }
+    if (hs.length && isPlat) {
+      // 端の角に曲がった線がかかるときは、その端を縮める（もとの長さの6割までなら）
+      let lo = -o.w / 2, hi = o.w / 2;
+      for (const q of hs) { if (q.lx >= 0) hi = Math.min(hi, q.lx - HALF); else lo = Math.max(lo, q.lx + HALF); }
+      if (hi - lo >= o.w * 0.6) { const w = hi - lo; move(o, (lo + hi) / 2, 0); o.w = w; hs = hits(o); }
     }
     if (hs.length && !isPlat) {
       // 建物はずらす
@@ -1325,20 +1331,38 @@ function drawDiagramLine(L, D, ctx) {
 
   // 建屋・転車台
   for (const b of D.bldgs || []) {
-    const w = (b[2] - b[0]) * map.kx, h = (b[3] - b[1]) * KY;
+    let w = (b[2] - b[0]) * map.kx, h = (b[3] - b[1]) * KY;
     if (w < 3 || h < 3) continue;
     const c = M((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
-    const ang = path.at(map.U((b[0] + b[2]) / 2)).angle;
+    let ang = path.at(map.U((b[0] + b[2]) / 2)).angle;
+    if (b.length >= 7) {
+      // 斜めに描いた建屋：図の向きと本来の大きさ（[x0, y0, x1, y1, 向き(度), 幅, 奥行き]）
+      const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2, a = b[4] * Math.PI / 180;
+      const ux = Math.cos(a), uy = Math.sin(a);
+      const pa = M(cx - ux * b[5] / 2, cy - uy * b[5] / 2), pb = M(cx + ux * b[5] / 2, cy + uy * b[5] / 2);
+      const qa = M(cx + uy * b[6] / 2, cy - ux * b[6] / 2), qb = M(cx - uy * b[6] / 2, cy + ux * b[6] / 2);
+      // 図は縦横の縮尺が違うので、長い辺（線路沿い）の向きにそろえ、短い辺はそれに直角な成分をとる
+      let L1 = { x: pb.x - pa.x, y: pb.y - pa.y }, L2 = { x: qb.x - qa.x, y: qb.y - qa.y };
+      if (Math.hypot(L2.x, L2.y) > Math.hypot(L1.x, L1.y)) [L1, L2] = [L2, L1];
+      w = Math.hypot(L1.x, L1.y);
+      h = Math.abs(L1.x * L2.y - L1.y * L2.x) / w;
+      ang = Math.atan2(L1.y, L1.x);
+    }
     // 線路が中を通る建屋は検修庫（車庫）、それ以外は職場などの建物
     const through = D.tracks.concat(D.mains).some(d => d.pts.some((p, j) => {
       const q = d.pts[j - 1];
       if (!q) return false;
       for (let f = 0; f <= 1; f += 0.1) {
         const x = q[0] + (p[0] - q[0]) * f, y = q[1] + (p[1] - q[1]) * f;
-        if (x > b[0] && x < b[2] && y > b[1] && y < b[3]) return true;
+        if (b.length >= 7) {
+          const a = b[4] * Math.PI / 180, dx = x - (b[0] + b[2]) / 2, dy = y - (b[1] + b[3]) / 2;
+          if (Math.abs(dx * Math.cos(a) + dy * Math.sin(a)) < b[5] / 2 && Math.abs(-dx * Math.sin(a) + dy * Math.cos(a)) < b[6] / 2) return true;
+        } else if (x > b[0] && x < b[2] && y > b[1] && y < b[3]) return true;
       }
       return false;
     }));
+    // 図で接して並ぶ建屋が、曲がった線路に沿わせたときに重ならないよう少し小さく
+    w = Math.max(3, w - 1.5); h = Math.max(3, h - 1.5);
     objects.push(O(through ? 'inspection_shed' : 'parts_shop', c.x, c.y, { w, h, rot: ang, label: through ? '検修庫' : '', _fit: !through }));
   }
   for (const t of D.tts || []) {

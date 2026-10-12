@@ -48,15 +48,60 @@ class Img:
         self.tracks = [{'pts': [tf(*p) for p in t['pts']], 'dashed': t.get('dashed', False), 'color': t['color'], 'img': key} for t in d['tracks']]
         self.thin = [[tf(*p) for p in t['pts']] for t in d['thin']]
         self.plats = [tb(p['box']) for p in d['plats']]
-        self.bldgs = [tb(b['box']) for b in d['bldgs']]
+        self.bldgs = [tb(b['box']) + list(b.get('rot', [])) for b in d['bldgs']]   # 斜めの建屋は [x0, y0, x1, y1, 向き, 幅, 奥行き]
         self.tts = [dict(x=tf(t['x'], t['y'])[0], y=tf(t['x'], t['y'])[1], r=t['r']) for t in d['tts']]
         self.texts = []
         for t in d['texts']:
             x0, y0 = tf(t['x'], t['y']); x1, _ = tf(t['x1'], t['y'])
             self.texts.append(dict(s=t['s'], x=min(x0, x1), x1=max(x0, x1), y=y0, size=t['size']))
+        self.drop_legend_boxes()
         self.fix_platform_outlines()
+        self.merge_platforms()
         # 線路の続きを示す記号（A, B …）
         self.letters = [t for t in self.texts if re.fullmatch(r'[A-Z]', t['s'].strip())]
+
+    def drop_legend_boxes(self):
+        """凡例（「交流25kV電化、軌間1067mm」など）を囲む四角の枠は線路ではないので除く"""
+        hz = [t for t in self.tracks if len(t['pts']) == 2 and abs(t['pts'][0][1] - t['pts'][1][1]) < 0.5]
+        vt = [t for t in self.tracks if len(t['pts']) == 2 and abs(t['pts'][0][0] - t['pts'][1][0]) < 0.5]
+        drop = set()
+        for a in hz:
+            for b in hz:
+                if a is b: continue
+                ax0, ax1 = sorted(p[0] for p in a['pts']); bx0, bx1 = sorted(p[0] for p in b['pts'])
+                ya, yb = a['pts'][0][1], b['pts'][0][1]
+                if not (yb > ya + 5 and abs(ax0 - bx0) < 2.5 and abs(ax1 - bx1) < 2.5): continue
+                sides = [v for v in vt if min(abs(v['pts'][0][0] - ax0), abs(v['pts'][0][0] - ax1)) < 2.5
+                         and abs(min(p[1] for p in v['pts']) - ya) < 2.5 and abs(max(p[1] for p in v['pts']) - yb) < 2.5]
+                if len(sides) < 2: continue
+                inside = [t for t in self.texts if ax0 <= t['x'] and t['x1'] <= ax1 + 40 and ya < t['y'] < yb]
+                if inside and all(re.search(r'(電化|軌間|凡例|Gauge|Electric)', t['s']) for t in inside):
+                    drop.update(id(t) for t in [a, b] + sides)
+                    # 枠の中の線（凡例の線の見本）も除く
+                    drop.update(id(t) for t in self.tracks if all(ax0 - 1 <= p[0] <= ax1 + 1 and ya - 1 <= p[1] <= yb + 1 for p in t['pts']))
+        if drop: self.tracks = [t for t in self.tracks if id(t) not in drop]
+
+    def merge_platforms(self):
+        """仕切り線で2つに分けて描いたホーム（同じ高さで接している四角）で、両側に面する線が同じものは1つのホームにする
+        （頭端式ホームと通りぬけのホームの突き合わせなど、面する線が違うものはそのまま）"""
+        hs = [(min(a[0], b[0]), max(a[0], b[0]), a[1]) for t in self.tracks for a, b in zip(t['pts'], t['pts'][1:]) if abs(a[1] - b[1]) < 0.3]
+        def faces(p):
+            out = set()
+            for x0, x1, y in hs:
+                if x0 <= p[0] + 1 and x1 >= p[2] - 1 and (0 < p[1] - y < 14 or 0 < y - p[3] < 14): out.add(round(y, 1))
+            return out
+        ps = sorted([list(b) for b in self.plats], key=lambda b: b[0])
+        lens = sorted(b[2] - b[0] for b in ps)
+        cap = 1.6 * lens[len(lens) // 2] if lens else 0     # この図のふつうのホームの長さの1.6倍まで
+        out = []
+        for b in ps:
+            m = next((o for o in out if abs(o[1] - b[1]) < 0.8 and abs(o[3] - b[3]) < 0.8 and b[0] <= o[2] + 1.5 and b[2] >= o[0] - 1.5), None)
+            # 合わせて長くなりすぎるもの（隣の駅のホームと接して描かれたものなど）は合わせない
+            if m and faces(m) and faces(m) == faces(b) and max(m[2], b[2]) - min(m[0], b[0]) <= cap:
+                m[0], m[2] = min(m[0], b[0]), max(m[2], b[2])
+            else:
+                out.append(b)
+        self.plats = out
 
     def fix_platform_outlines(self):
         """太線で描いたホームの枠（短い縦線＋横線）を線路から外してホームにする"""
@@ -389,7 +434,7 @@ def relocate_block(im, ea, eb, links, force=False):
         im.tracks[i]['pts'] = [tf(p) for p in im.tracks[i]['pts']]
     def tbox(b):
         q = [tf((b[0], b[1])), tf((b[2], b[3])), tf((b[0], b[3])), tf((b[2], b[1]))]
-        return [min(p[0] for p in q), min(p[1] for p in q), max(p[0] for p in q), max(p[1] for p in q)]
+        return [min(p[0] for p in q), min(p[1] for p in q), max(p[0] for p in q), max(p[1] for p in q)] + list(b[4:])
     inside = lambda b: b[0] >= bx0 and b[2] <= bx1 and b[1] >= by0 and b[3] <= by1
     im.bldgs = [tbox(b) if inside(b) else b for b in im.bldgs]
     im.plats = [tbox(b) if inside(b) else b for b in im.plats]
@@ -641,7 +686,8 @@ def station_labels(S, names):
         base = re.sub(r'[（(].*?[）)]$', '', n)
         if base != n: want.setdefault(norm_name(base), n)
     out = defaultdict(list)
-    labs = [t for t in S.texts if is_station_label(t)]
+    # 「西方」のように「方」で終わる駅名は、方向の書き込み（「博多方」）と区別するため駅名の一覧にあるときだけ
+    labs = [t for t in S.texts if is_station_label(t) or (t['size'] >= 13 and norm_name(t['s']) in want)]
     for t in labs:
         k = norm_name(t['s'])
         if k in want:
@@ -728,7 +774,7 @@ def greedy_reach(S, eid, n, sign, steps=300):
 TRACE_TARGET = {'lo': None, 'hi': None}     # 路線の端の駅の x（先読みで「そこまで届けば十分」とする）
 TRACE_COLOR = {'c': None}           # たどる線の色（指定があれば）
 
-def trace(S, eid, start_node, prefer=0):
+def trace(S, eid, start_node, prefer=0, avoid=frozenset()):
     """辺 eid から start_node と反対の向きへ、まっすぐ進めるところまでたどる。
     分岐では、先へ（路線の続く方へ）遠くまで続く側を選び、同じくらいならまっすぐな側"""
     path = [eid]
@@ -740,6 +786,13 @@ def trace(S, eid, start_node, prefer=0):
         c = forward_cands(S, cur, n)
         # 後戻りする（進む向きと逆へ行く）線は候補にしない（行き違い駅の分岐の先で反対側の線へ折り返さない）
         c = [cc for cc in c if (S.nodes[S.other(cc[1], n)][0] - S.nodes[n][0]) * sign >= -1 or S.edges[cc[1]].get('link')]
+        # ほかの本線がすでに通った線は、ほかに進める線があれば避ける
+        if avoid and any(cc[1] not in avoid for cc in c): c = [cc for cc in c if cc[1] not in avoid]
+        # その先でほかの本線に合流してしまう線（渡り線）も、ほかに進める線があれば避ける
+        if avoid:
+            into = lambda x: any(y in avoid for y in S.adj[S.other(x, n)])
+            if any(not into(cc[1]) for cc in c) and any(into(cc[1]) for cc in c):
+                c = [cc for cc in c if not into(cc[1])]
         if not c: break
         if len(c) == 1:
             nx = c[0][1]
@@ -764,13 +817,13 @@ def trace(S, eid, start_node, prefer=0):
         n = S.other(nx, n); cur = nx
     return path, n
 
-def trace_both(S, eid, prefer=0):
+def trace_both(S, eid, prefer=0, avoid=frozenset()):
     e = S.edges[eid]
     # 左向き（a,b のうち x の小さい側へ）
     left_node = e['a'] if S.nodes[e['a']][0] <= S.nodes[e['b']][0] else e['b']
     right_node = e['b'] if left_node == e['a'] else e['a']
-    fw, end_r = trace(S, eid, left_node, prefer)        # 右へ
-    bw, end_l = trace(S, eid, right_node, prefer)       # 左へ
+    fw, end_r = trace(S, eid, left_node, prefer, avoid)        # 右へ
+    bw, end_l = trace(S, eid, right_node, prefer, avoid)       # 左へ
     return list(reversed(bw[1:])) + fw, end_l, end_r
 
 def render_zoom(S, path, x0, x1, hl=None, scale=4):

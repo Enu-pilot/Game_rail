@@ -81,7 +81,7 @@ def merge_parts(parts):
                 if c[key][0] == 't': c[key][1] += nt
         out['crossings'] += p['crossings']
         out['stations'] = out['stations'] + p['stations'][1:]   # 接続駅は前の帯の方
-        out['bldgs'] += [[b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] for b in p['bldgs']]
+        out['bldgs'] += [[b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] + b[4:] for b in p['bldgs']]
         out['tts'] += [dict(x=t['x'] + dx, y=t['y'] + dy, r=t['r']) for t in p['tts']]
         out['texts'] += [dict(t, x=t['x'] + dx, x1=t['x1'] + dx, y=t['y'] + dy) for t in p['texts']]
         out['depots'] += [dict(t, x=t['x'] + dx, x1=t['x1'] + dx, y=t['y'] + dy) for t in p['depots']]
@@ -171,6 +171,11 @@ def part(page, a, b, **kw):
     return d
 
 CONFIG = {
+    'kagoshima': {
+        'main': dict(parts=[part('jr/kyushu/kagoshima_1', '門司港', '吉塚'), part('jr/kyushu/kagoshima_1', '吉塚', '八代', between=('竹下', '笹原', 0.5), prefer=(-1, 1))]),
+        'orange': dict(shared0=True, parts=[part('pr/hisatsu-orange', '八代', '川内', n=1)]),
+        'south': dict(shared0=True, parts=[part('jr/kyushu/kagoshima_2', '川内', '鹿児島', n=1)]),
+    },
     'chichibu': {
         'main': dict(parts=[part('pr/chichibu/chichibu', '羽生', '三峰口', n=1)]),
     },

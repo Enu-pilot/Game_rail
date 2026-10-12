@@ -114,6 +114,29 @@ def in_bldg(S, p, m=1.5):
     """端点が建屋（車庫）の中か縁にある：建屋の中で終わる線"""
     return any(b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m and (b[2] - b[0]) > 6 for b in S.bldgs)
 
+def paths_cross(S, pa, pb):
+    """2本の本線（辺の列）が、共有する節点以外のところで交わるか"""
+    def segs(p):
+        out = []
+        for x in p:
+            q = S.edges[x]['pts']
+            out += list(zip(q, q[1:]))
+        return out
+    A, B = segs(pa), segs(pb)
+    def inter(s, t):
+        (x1, y1), (x2, y2) = s; (x3, y3), (x4, y4) = t
+        d = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
+        if abs(d) < 1e-9: return False
+        u = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / d
+        v = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / d
+        return 0.02 < u < 0.98 and 0.02 < v < 0.98
+    for s in A:
+        sx0, sx1 = sorted((s[0][0], s[1][0]))
+        for t in B:
+            if max(t[0][0], t[1][0]) < sx0 or min(t[0][0], t[1][0]) > sx1: continue
+            if inter(s, t): return True
+    return False
+
 def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=(), extra_names=(), color=None):
     keys = keys or images_for(page, names)
     if not keys: raise RuntimeError(f'{page}: {names[0]}〜{names[-1]} の画像がありません')
@@ -158,19 +181,63 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
         path, l, r = trace_both(S, eid, pref)
         # ほかの本線と同じ線路をたどってしまった部分は切る（合流した先は相手の本線）
         used = set(e for p in paths for e in p)
-        if any(e in used for e in path):
-            i0 = path.index(eid)
+        def cut(p):
+            # 始めの辺から、ほかの本線の線に入る手前まで
+            i0 = p.index(eid)
             a = i0
-            while a > 0 and path[a - 1] not in used: a -= 1
+            while a > 0 and p[a - 1] not in used: a -= 1
             b = i0
-            while b < len(path) - 1 and path[b + 1] not in used: b += 1
-            path = path[a:b + 1]
+            while b < len(p) - 1 and p[b + 1] not in used: b += 1
+            return p[a:b + 1]
+        span = lambda p: max(q[0] for x in p for q in S.edges[x]['pts']) - min(q[0] for x in p for q in S.edges[x]['pts'])
+        if any(e in used for e in path):
+            # ほかの本線の線を避けてたどり直し（渡り線で隣の線へ移らずに続く線）、長く続くほうを使う
+            p2, l2, r2 = trace_both(S, eid, pref, frozenset(used))
+            if os.environ.get('DEBUG_TRACE'):
+                print('  retrace', k, S.nodes[l], S.nodes[r], '->', S.nodes[l2], S.nodes[r2], any(e in used for e in p2))
+                for x in p2:
+                    if x in used: print('    used', x, S.edges[x]['pts'][0], S.edges[x]['pts'][-1])
+                    xs = [q[0] for q in S.edges[x]['pts']]
+                    if os.environ.get('DBG_X0') and float(os.environ['DBG_X0']) <= min(xs) <= float(os.environ['DBG_X1']):
+                        print('    p2', x, [tuple(round(v,1) for v in q) for q in S.edges[x]['pts']], 'used' if x in used else '')
+            path = cut(path)
+            p2 = cut(p2)
+            # たどり直した線が、ほかの本線と交差する（立体交差・平面交差で向こう側へ渡る）なら使わない
+            if span(p2) > span(path) and not any(paths_cross(S, p2, q) for q in paths): path = p2
         if os.environ.get('DEBUG_TRACE'):
             for nn in (l, r):
                 print('  main', k, 'end node', nn, S.nodes[nn], 'adj', [(x, [round(v,1) for v in S.edges[x]['pts'][0]], [round(v,1) for v in S.edges[x]['pts'][-1]]) for x in S.adj[nn]])
                 for x in S.adj[nn]:
                     if x in path: print('     from', x, 'cands', forward_cands(S, x, nn))
         paths.append(path)
+    # 2本の本線が途中で同じ線に入ってしまうとき（先にたどった本線が渡り線で隣の線へ移ったとき）は、
+    # 互いに相手の線を避けてたどり直し、両方が長く続く組み合わせにする
+    if len(paths) == 2:
+        def cut2(p, eid, used):
+            if eid not in p or eid in used: return p
+            i0 = p.index(eid); a = i0
+            while a > 0 and p[a - 1] not in used: a -= 1
+            b = i0
+            while b < len(p) - 1 and p[b + 1] not in used: b += 1
+            return p[a:b + 1]
+        sp = lambda p: max(q[0] for x in p for q in S.edges[x]['pts']) - min(q[0] for x in p for q in S.edges[x]['pts'])
+        best = (sp(paths[0]) + sp(paths[1]), list(paths))
+        prf = lambda k: prefer[k] if k < len(prefer) else 0
+        raw = [trace_both(S, ce[0][1], prf(0))[0], None]
+        raw[1] = trace_both(S, ce[1][1], prf(1), frozenset(raw[0]))[0]
+        for it in range(4):
+            shared = set(raw[0]) & set(raw[1])
+            c0 = cut2(raw[0], ce[0][1], set(raw[1]) if it % 2 else shared - set(raw[0]))
+            c1 = cut2(raw[1], ce[1][1], set(raw[0]))
+            if it % 2 == 0: c0 = cut2(raw[0], ce[0][1], set(c1))
+            tot = sp(c0) + sp(c1)
+            if paths_cross(S, c0, c1): tot = -1
+            if os.environ.get('DEBUG_TRACE'): print('  alt', it, round(sp(c0)), round(sp(c1)), len(shared))
+            if tot > best[0] + 1: best = (tot, [c0, c1])
+            if not shared: break
+            k = it % 2
+            raw[k] = trace_both(S, ce[k][1], prf(k), frozenset(set(raw[1 - k]) - shared))[0]
+        paths = best[1]
     main_ids = set(e for p in paths for e in p)
     main_pts = [ordered_path(S, p) for p in paths]
     allx = [p[0] for e in S.edges for p in e['pts']]
@@ -413,7 +480,8 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
                              ext=[round(v, 2) for v in extent(n)], mainPlat=main_plat[n]))
     inr = lambda b: b[2] >= cx0 and b[0] <= cx1
     texts = [dict(s=t['s'], x=round(t['x'], 1), x1=round(t['x1'], 1), y=round(t['y'], 1), size=round(t['size'], 1)) for t in S.texts
-             if cx0 <= t['x'] <= cx1 and not is_station_label(t)]
+             if (cx0 <= t['x'] <= cx1 or (t['s'].strip().endswith('方') and t['x1'] >= cx0 - 40 and t['x'] <= cx1 + 40))   # 図の端の外に書いた行先も
+             and not is_station_label(t)]
     # この路線にない駅（並行する他線だけが止まる駅）：位置とホーム、ホームに面した線
     extra = {}
     if extra_names:

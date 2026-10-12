@@ -159,7 +159,13 @@ def parse(path):
             if stroke not in ('none', None) and sw >= 1.2:
                 out['plats'].append({'box': box, 'color': stroke})
             elif stroke not in ('none', None) and sw > 0:
-                out['bldgs'].append({'box': box, 'fill': fill})
+                bd = {'box': box, 'fill': fill}
+                # 斜めに置いた建屋：向き（度）と本来の幅・奥行きも残す
+                ex, ey = corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]
+                ang = math.degrees(math.atan2(ey, ex)) % 180
+                if min(ang % 90, 90 - ang % 90) > 3:
+                    bd['rot'] = [ang, math.hypot(ex, ey), math.hypot(corners[3][0] - corners[0][0], corners[3][1] - corners[0][1])]
+                out['bldgs'].append(bd)
             elif fill not in ('none',):
                 out['fills'].append({'box': box, 'fill': fill})
             return
