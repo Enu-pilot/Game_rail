@@ -220,7 +220,13 @@ export function buildNetwork(spec) {
           loops[`stub${j}`] = t;
         }
       }
-      if (S.extra.ra) {
+      if (S.extra.ra && S.type === 't' && loops.stub1) {
+        // 頭端式の駅の機回し：1番線と2番線を車止めの手前の渡り線でつなぐ（2番線を通って機関車を付け替える）
+        const endS = i === 0 ? pos[i] - 60 : pos[i] + 60, dir = i === 0 ? 1 : -1;
+        const qa = path.at(endS + dir * 30);
+        const qb = add(path.at(endS + dir * 55), path.nrm(endS + dir * 55), -24);
+        tracks.push(T(`${S.name}機回し線`, 'runaround', [qa, qb], {}, { maxSpeedKmh: 15 }));
+      } else if (S.extra.ra) {
         // 機回し線：本線から分かれて駅の外側を回る線（機関車を列車の反対側へ付け替える）
         const side = S.type === 'p' || S.type === 'pd' ? 1 : -1;
         const off = (S.type === 'p' ? 2 : 1) * LOOP_OFF * side;
