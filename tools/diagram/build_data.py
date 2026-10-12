@@ -145,7 +145,7 @@ CONFIG = {
                                               part('pr/sagami/main', '西谷', '海老名')]),
     },
     'kintetsu': {
-        'nara': dict(parts=[part('pr/kinki/namba', '大阪難波', '大阪上本町'), part('pr/kinki/osaka', '大阪上本町', '布施'),
+        'nara': dict(parts=[part('pr/kinki/namba', '大阪難波', '大阪上本町'), part('pr/kinki/osaka', '大阪上本町', '布施', pick=[0, 2], between=('鶴橋', '布施', 0.5)),
                             part('pr/kinki/nara', '布施', '近鉄奈良')]),
         'hanshin': dict(shared0=True, parts=[part('pr/hanshin/namba', '大阪難波', '尼崎'), part('pr/hanshin/main', '尼崎', '神戸三宮')]),
         'kyoto': dict(shared0=True, parts=[part('pr/kinki/kyoto', '大和西大寺', '京都')]),

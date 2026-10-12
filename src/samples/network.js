@@ -1502,6 +1502,14 @@ function junctionTargets(L, parent, ps) {
       .sort((a, b) => Math.min(...out.map(o => Math.hypot(o.p.x - a.p.x, o.p.y - a.p.y))) - Math.min(...out.map(o => Math.hypot(o.p.x - b.p.x, o.p.y - b.p.y))));
     out = out.concat(extra.slice(0, L._cuts - out.length));
   }
+  // 切り口より多ければ、接続先の本線に直接つながる出口を優先して切り口の数だけ
+  if (L._cuts && out.length > L._cuts) {
+    const onMain = c => {
+      const pts = c.track.points, q = c.which === 'a' ? pts[pts.length - 1] : pts[0];
+      return (parent.mains || [parent.main]).some(t => distToPolyline(q.x, q.y, t.points).d < 3);
+    };
+    out = out.slice().sort((a, b) => (onMain(b) ? 1 : 0) - (onMain(a) ? 1 : 0)).slice(0, L._cuts);
+  }
   for (const c of out) used.add(c.key);
   parent._junction.set(L.key, out);
   if (typeof process !== 'undefined' && process.env && process.env.DEBUG_JUNCTION) {

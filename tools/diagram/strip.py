@@ -416,8 +416,40 @@ class Strip:
         self.bldgs = [b for im in imgs for b in im.bldgs]
         self.tts = [t for im in imgs for t in im.tts]
         self.texts = [t for im in imgs for t in im.texts]
+        self.drop_duplicates()
         self.bridge_gaps()
         self.build_graph()
+
+    def drop_duplicates(self):
+        """同じところに重ねて描かれた線（二重線）を1本にする"""
+        def inside(a, b):
+            # a の点がすべて b の上にある
+            pa = a['pts']
+            pb = b['pts']
+            for k in range(len(pa)):
+                p = pa[k]
+                if min(dist_seg(p, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > 0.4: return False
+                if k:
+                    m = ((pa[k - 1][0] + p[0]) / 2, (pa[k - 1][1] + p[1]) / 2)
+                    if min(dist_seg(m, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > 0.4: return False
+            return True
+        tr = self.tracks
+        drop = set()
+        boxes = []
+        for t in tr:
+            xs = [p[0] for p in t['pts']]; ys = [p[1] for p in t['pts']]
+            boxes.append((min(xs), min(ys), max(xs), max(ys)))
+        for i in range(len(tr)):
+            if i in drop or len(tr[i]['pts']) < 2: continue
+            for j in range(len(tr)):
+                if j == i or j in drop or len(tr[j]['pts']) < 2: continue
+                bi, bj = boxes[i], boxes[j]
+                if bi[0] < bj[0] - 0.5 or bi[2] > bj[2] + 0.5 or bi[1] < bj[1] - 0.5 or bi[3] > bj[3] + 0.5: continue
+                if tr[i].get('dashed') != tr[j].get('dashed'): continue
+                if inside(tr[i], tr[j]):
+                    drop.add(i); break
+        if drop:
+            self.tracks = [t for k, t in enumerate(tr) if k not in drop]
 
     def bridge_gaps(self):
         """一直線に並んだ線路の端どうしが、描画上わずかに離れているところをつなぐ"""
@@ -670,17 +702,20 @@ def forward_cands(S, eid, n):
     return sorted(out)
 
 def greedy_reach(S, eid, n, sign, steps=300):
-    """辺 eid に入って節点 n から、いちばんまっすぐな線をたどって行ける x の最遠（sign の向き）"""
+    """辺 eid に入って節点 n から、折り返さずに行ける x の最遠（sign の向き）。分岐はどちらへも探す"""
     best = S.nodes[n][0] * sign
-    cur, seen = eid, {eid}
-    for _ in range(steps):
-        nx = S.other(cur, n)
+    seen = set()
+    stack = [(eid, n)]
+    visits = 0
+    while stack and visits < 4000:
+        cur, frm = stack.pop()
+        if (cur, frm) in seen: continue
+        seen.add((cur, frm)); visits += 1
+        nx = S.other(cur, frm)
         best = max(best, S.nodes[nx][0] * sign)
-        c = forward_cands(S, cur, nx)
-        if not c: break
-        nxt = c[0][1]
-        if nxt in seen: break
-        seen.add(nxt); n = nx; cur = nxt
+        for d, x, sy in forward_cands(S, cur, nx):
+            if d > math.radians(70): continue
+            stack.append((x, nx))
     return best
 
 TRACE_TARGET = {'lo': None, 'hi': None}     # 路線の端の駅の x（先読みで「そこまで届けば十分」とする）
