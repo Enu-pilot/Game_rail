@@ -14,6 +14,32 @@ def merge_parts(parts):
     out = json.loads(json.dumps(parts[0]))
     for p in parts[1:]:
         p = json.loads(json.dumps(p))
+        # 前の帯の終点の先（本線を切り離した部分）は、次の帯の本線と重なるので除く
+        drop = {k for k, t in enumerate(out['tracks']) if t.get('tail')}
+        parts_tail_pts = {k: out['tracks'][k]['pts'] for k in drop}
+        if drop:
+            remap, keep = {}, []
+            for k, t in enumerate(out['tracks']):
+                if k in drop: continue
+                remap[k] = len(keep); keep.append(t)
+            out['tracks'] = keep
+            cr = []
+            for c in out['crossings']:
+                if (c['a'][0] == 't' and c['a'][1] in drop) or (c['b'][0] == 't' and c['b'][1] in drop): continue
+                for key in ('a', 'b'):
+                    if c[key][0] == 't': c[key][1] = remap[c[key][1]]
+                cr.append(c)
+            out['crossings'] = cr
+            # 除いた線にだけつながっていた端は、場外へ続く端にする
+            def near_poly(e, pts):
+                return any(dist_seg(e, pts[j - 1], pts[j])[0] < 0.6 for j in range(1, len(pts)))
+            others = [t['pts'] for t in out['tracks']] + [m['pts'] for m in out['mains']]
+            for t in out['tracks']:
+                for w in (0, -1):
+                    e = t['pts'][w]
+                    if t['ends'][w] != 'open' or not any(near_poly(e, parts_tail_pts[k]) for k in drop): continue
+                    if any(o is not t['pts'] and near_poly(e, o) for o in others): continue
+                    t['ends'][w] = 'boundary'
         dx = out['x1'] + 30 - p['x0']
         # 縦：本線の中心をそろえる
         def ends_y(part, last):
@@ -196,6 +222,27 @@ CONFIG = {
     },
 }
 
+def fix_ichibataguchi(d):
+    """一畑口（スイッチバック駅）：園からの線は図では駅の東端（松江方と同じ側）に入るが、
+    折り返し線がないと入線できないので、駅の西端からホームの線に入る形にする（停車時間で折り返しを見込む）"""
+    st = next(s for s in d['stations'] if s['name'] == '一畑口')
+    x0 = st['ext'][0]
+    m = d['mains'][0]
+    # 駅の手前まで本線、その先は西端（車止め）の線へ
+    k = next(i for i, p in enumerate(m['pts']) if p[0] >= x0 - 1)
+    tail = m['pts'][k:]
+    for t in d['tracks']:
+        if '一畑口' in t['stations'] and t['ends'][1] == 'buffer' and abs(t['pts'][0][0] - tail[-1][0]) < 1 and abs(t['pts'][0][1] - tail[-1][1]) < 1:
+            west = t['pts'][-1]
+            m['pts'] = m['pts'][:k] + [[west[0] - 12, m['pts'][k - 1][1]], west]
+            m['ends'][1] = 'open'
+            t['ends'][1] = 'open'
+            t['ends'][0] = 'buffer'      # 東端は、園からの線が入っていたところ
+            break
+    return d
+
+FIXES = {('ichibata', 'kitamatsue'): fix_ichibataguchi}
+
 if __name__ == '__main__':
     only = sys.argv[1:]
     for sample, lines in CONFIG.items():
@@ -205,6 +252,7 @@ if __name__ == '__main__':
             print(sample, line)
             try:
                 data[line] = build_line(sample, line, cfg['parts'], cfg.get('shared0', False), cfg.get('ring', False))
+                if (sample, line) in FIXES: data[line] = FIXES[(sample, line)](data[line])
             except Exception as e:
                 print('  !! 失敗', sample, line, e)
         js = '// 配線略図.net（https://www.haisenryakuzu.net/、CC BY 4.0）の配線図から読み取った駅の配線\n' \

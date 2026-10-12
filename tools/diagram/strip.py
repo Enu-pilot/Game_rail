@@ -422,16 +422,18 @@ class Strip:
 
     def drop_duplicates(self):
         """同じところに重ねて描かれた線（二重線）を1本にする"""
+        # 四線軌条（軌間の違う線を並べて描いた二重線）もまとめる
+        tol = 1.8
         def inside(a, b):
-            # a の点がすべて b の上にある
+            # a の点がすべて b の上（すぐそば）にある
             pa = a['pts']
             pb = b['pts']
             for k in range(len(pa)):
                 p = pa[k]
-                if min(dist_seg(p, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > 0.4: return False
+                if min(dist_seg(p, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > tol: return False
                 if k:
                     m = ((pa[k - 1][0] + p[0]) / 2, (pa[k - 1][1] + p[1]) / 2)
-                    if min(dist_seg(m, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > 0.4: return False
+                    if min(dist_seg(m, pb[j - 1], pb[j])[0] for j in range(1, len(pb))) > tol: return False
             return True
         tr = self.tracks
         drop = set()
@@ -444,7 +446,7 @@ class Strip:
             for j in range(len(tr)):
                 if j == i or j in drop or len(tr[j]['pts']) < 2: continue
                 bi, bj = boxes[i], boxes[j]
-                if bi[0] < bj[0] - 0.5 or bi[2] > bj[2] + 0.5 or bi[1] < bj[1] - 0.5 or bi[3] > bj[3] + 0.5: continue
+                if bi[0] < bj[0] - tol or bi[2] > bj[2] + tol or bi[1] < bj[1] - tol or bi[3] > bj[3] + tol: continue
                 if tr[i].get('dashed') != tr[j].get('dashed'): continue
                 if inside(tr[i], tr[j]):
                     drop.add(i); break

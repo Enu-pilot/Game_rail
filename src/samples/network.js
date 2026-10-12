@@ -1055,9 +1055,20 @@ function labelNear(D, x, y, r = 40) {
     if (!/方$/.test(t.s)) continue;
     const cx = (t.x + t.x1) / 2;
     const d = Math.hypot(Math.max(0, Math.abs(cx - x) - (t.x1 - t.x) / 2), t.y - y);
-    if (d <= r && (!best || d < best.d)) best = { d, s: t.s };
+    if (d <= r && (!best || d < best.d)) best = { d, s: t.s, t };
   }
   return best ? best.s.replace(/方$/, '') : '';
+}
+/** labelNear と同じで、表示そのものと距離も返す */
+function labelNearInfo(D, x, y, r = 40) {
+  let best = null;
+  for (const t of D.texts || []) {
+    if (!/方$/.test(t.s)) continue;
+    const cx = (t.x + t.x1) / 2;
+    const d = Math.hypot(Math.max(0, Math.abs(cx - x) - (t.x1 - t.x) / 2), t.y - y);
+    if (d <= r && (!best || d < best.d)) best = { d, t };
+  }
+  return best;
 }
 
 /**
@@ -1468,10 +1479,21 @@ function junctionTargets(L, parent, ps) {
       const wide = L.attach.exit ? 400 : 100;
       if (q[0] < ext[0] - wide || q[0] > ext[1] + wide) return;
       const pts = t.points, i = w === 0 ? 0 : pts.length - 1, j = w === 0 ? 1 : pts.length - 2;
+      const li = labelNearInfo(PD.D, q[0], q[1], 60);
       cands.push({ key: `${k}|${w}`, p: pts[i], dir: Math.atan2(pts[i].y - pts[j].y, pts[i].x - pts[j].x),
-        track: t, which: w === 0 ? 'a' : 'b', lbl: labelNear(PD.D, q[0], q[1], 60) });
+        track: t, which: w === 0 ? 'a' : 'b', lbl: li ? li.t.s.replace(/方$/, '') : '', lblT: li && li.t, lblD: li ? li.d : 0 });
     });
   });
+  // 1つの行先表示が近くの2組の出口に届くときは、表示にいちばん近い組（複線なら2本）だけをその行先にする
+  {
+    const byT = new Map();
+    for (const c of cands) if (c.lblT) { if (!byT.has(c.lblT)) byT.set(c.lblT, []); byT.get(c.lblT).push(c); }
+    for (const list of byT.values()) {
+      if (list.length <= 2) continue;
+      list.sort((a, b) => a.lblD - b.lblD);
+      for (const c of list.slice(2)) { c.lbl = ''; c.weak = true; }
+    }
+  }
   const used = parent._usedExits || (parent._usedExits = new Set());
   // 行先表示に子路線の駅名があるものを先に、無ければ路線名のもの
   const stKeys = L.stations.slice((L.prefix || 0) + 1, (L.prefix || 0) + 4).map(s => s[0]);
@@ -1479,7 +1501,10 @@ function junctionTargets(L, parent, ps) {
   // 行先表示の文字を指定してあればそれ（例：北総線の「新柴又方」）
   let out = L.attach.exit ? cands.filter(c => c.lbl && c.lbl.includes(L.attach.exit)) : [];
   if (!out.length) out = cands.filter(c => c.lbl && stKeys.some(kw => c.lbl.includes(kw)));
-  if (!out.length && !L.attach.exit) out = cands.filter(c => c.lbl && lnKeys.some(kw => c.lbl.includes(kw)));
+  // 直通（接続先の本線の終わりに続く）なら、行先の駅名が合う出口だけ。合わなければ本線の端につなぐ
+  // 直通（接続先の本線の終わりに続く）なら路線名では選ばない（「西武有楽町線」と「有楽町線」のような取り違えを避ける）。
+  // 行先表示のない出口があればそれ、なければ本線の端につなぐ
+  if (!out.length && !L.attach.exit && L.attach.mode !== 'end') out = cands.filter(c => c.lbl && lnKeys.some(kw => c.lbl.includes(kw)));
   if (!out.length) {
     // 行先表示の無い出口：近い2本（本線の本数ぶん）
     const free = cands.filter(c => !c.lbl && !used.has(c.key));
