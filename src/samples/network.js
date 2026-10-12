@@ -688,6 +688,7 @@ export function buildNetwork(spec) {
     }
   }
   fitObjects(objects, tracks);
+  closeDanglingEnds(tracks);
   /* ---- 7) 分岐器を接続点から自動生成 ---- */
   const tmp = { ...doc, tracks, objects, formations: [] };
   const g = buildGraph(tmp);
@@ -977,6 +978,26 @@ function prefixStations(L, pre, lines, objects, stationObjByName, all = pre) {
     out.push({ ...S, s: PD.map.U(X), obj, p, loops: {}, shared: false, diag: { stop: { down: [dn.id], up: [(up || dn).id] }, X } });
   }
   return out;
+}
+
+/** どの線路にもつながっていない「つながる」端は車止めにする（配線図の重複線を除いたあとなどに残る） */
+function closeDanglingEnds(tracks) {
+  const idx = segIndex(tracks, []);
+  for (const t of tracks) {
+    for (const w of ['a', 'b']) {
+      if (t.ends[w] !== 'open') continue;
+      const p = w === 'a' ? t.points[0] : t.points[t.points.length - 1];
+      let hit = false;
+      const i = Math.floor(p.x / idx.cell), j = Math.floor(p.y / idx.cell);
+      for (let a = i - 1; a <= i + 1 && !hit; a++) for (let b = j - 1; b <= j + 1 && !hit; b++) {
+        for (const [s, e] of idx.m.get(a + ',' + b) || []) {
+          if (t.points.includes(s) && t.points.includes(e)) continue;     // 自分の線分
+          if (distToSegment(p.x, p.y, s.x, s.y, e.x, e.y) < 3.5) { hit = true; break; }
+        }
+      }
+      if (!hit) t.ends[w] = 'buffer';
+    }
+  }
 }
 
 /** 線路の線分の索引（近くの線路をすばやく探す） */

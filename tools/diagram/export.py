@@ -103,6 +103,13 @@ def compute_crossings(out_mains, tracks):
                                           grade=bool(ua or ub), aUnder=bool(ua), bUnder=bool(ub)))
     return crossings
 
+def yAt_py(pts, x):
+    for k in range(1, len(pts)):
+        a, b = pts[k - 1], pts[k]
+        if min(a[0], b[0]) - 1e-6 <= x <= max(a[0], b[0]) + 1e-6 and abs(b[0] - a[0]) > 1e-9:
+            return a[1] + (b[1] - a[1]) * (x - a[0]) / (b[0] - a[0])
+    return None
+
 def in_bldg(S, p, m=1.5):
     """端点が建屋（車庫）の中か縁にある：建屋の中で終わる線"""
     return any(b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m and (b[2] - b[0]) > 6 for b in S.bldgs)
@@ -253,6 +260,26 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
             p0 = q[w]; q1 = q[1] if w == 0 else q[-2]
             ends.append('buffer' if has_buffer(p0, math.atan2(p0[1] - q1[1], p0[0] - q1[0]), S.thin) or in_bldg(S, p0) else 'boundary')
         out_mains.append(dict(pts=R(q), under=under, ends=ends))
+    # 上下2本の本線の切り口が同じ点（渡り線の交点など）に重なったら、2本が離れたところまで切り詰める
+    if len(out_mains) == 2:
+        def ys_at(x):
+            return [yAt_py(m['pts'], x) for m in out_mains]
+        for side in (0, -1):
+            a, b = out_mains[0]['pts'][side], out_mains[1]['pts'][side]
+            if seglen(a, b) >= 3: continue
+            x = a[0]
+            step = 1 if side == 0 else -1
+            for _ in range(200):
+                x += step
+                ya, yb = ys_at(x)
+                if ya is None or yb is None: break
+                if abs(ya - yb) >= 6:
+                    for m in out_mains:
+                        pcs = clip_poly(m['pts'], x, 1e9) if side == 0 else clip_poly(m['pts'], -1e9, x)
+                        if pcs:
+                            pcs.sort(key=lambda p: -plen(p[0]))
+                            m['pts'] = R(pcs[0][0])
+                    break
     # 路線の両端の駅より先の本線（車両基地や他線へ続く部分）は、本線から外して普通の線路にする
     tails = []
     def plat_range(n):

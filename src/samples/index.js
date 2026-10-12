@@ -12,6 +12,7 @@ import tohoku from './tohoku.js';
 import tobu from './tobu.js';
 import nankai from './nankai.js';
 import asakusa from './asakusa.js';
+import chichibu from './chichibu.js';
 
 // 路線網のサンプルは組み立てのときに行き違い・待避まで入れてある（dispatched）
 const net = spec => ({ no: spec.no, id: spec.id, name: spec.title, spec, dispatched: true, build: () => buildNetwork(spec) });
@@ -28,6 +29,7 @@ export const SAMPLES = [
   net(tobu),
   net(nankai),
   net(asakusa),
+  net(chichibu),
 ];
 
 export const sampleById = id => SAMPLES.find(s => s.id === id) || SAMPLES[0];

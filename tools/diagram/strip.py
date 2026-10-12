@@ -228,10 +228,13 @@ def assemble(keys, rot=False, flip=()):
                 for r, l in zip(R, L):
                     links.append([r['p'], l['p']])
             elif L and R:
-                # 数が違うときは近いものどうし
-                for r in R:
-                    best = min(L, key=lambda l: abs(l['p'][1] - r['p'][1]))
-                    if abs(best['p'][1] - r['p'][1]) < 12: links.append([r['p'], best['p']])
+                # 数が違うときは近いものどうしを1対1で
+                pairs = sorted(((abs(l['p'][1] - r['p'][1]), i, j) for i, r in enumerate(R) for j, l in enumerate(L)))
+                ur, ul = set(), set()
+                for d, i, j in pairs:
+                    if d >= 12 or i in ur or j in ul: continue
+                    ur.add(i); ul.add(j)
+                    links.append([R[i]['p'], L[j]['p']])
         imgs.append(im)
         prev = im
     # 記号（A など）どうしをつなぐ：別の画像なら線でつなぎ、同じ画像の中なら記号側のまとまり（車庫など）を寄せる
@@ -717,6 +720,8 @@ def greedy_reach(S, eid, n, sign, steps=300):
         best = max(best, S.nodes[nx][0] * sign)
         for d, x, sy in forward_cands(S, cur, nx):
             if d > math.radians(70): continue
+            # 後戻りする（進む向きと逆へ行く）線はたどらない
+            if (S.nodes[S.other(x, nx)][0] - S.nodes[nx][0]) * sign < -1: continue
             stack.append((x, nx))
     return best
 
@@ -733,6 +738,8 @@ def trace(S, eid, start_node, prefer=0):
     seen = {eid}
     while True:
         c = forward_cands(S, cur, n)
+        # 後戻りする（進む向きと逆へ行く）線は候補にしない（行き違い駅の分岐の先で反対側の線へ折り返さない）
+        c = [cc for cc in c if (S.nodes[S.other(cc[1], n)][0] - S.nodes[n][0]) * sign >= -1 or S.edges[cc[1]].get('link')]
         if not c: break
         if len(c) == 1:
             nx = c[0][1]

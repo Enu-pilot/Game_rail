@@ -171,6 +171,9 @@ def part(page, a, b, **kw):
     return d
 
 CONFIG = {
+    'chichibu': {
+        'main': dict(parts=[part('pr/chichibu/chichibu', '羽生', '三峰口', n=1)]),
+    },
     'toyoko': {
         'toyoko': dict(parts=[part('pr/tokyu/toyoko', '渋谷', '横浜')]),
         'fukutoshin': dict(shared0=True, parts=[part('metro/tokyometro/fukutoshin', '渋谷', '池袋'),
