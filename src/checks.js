@@ -166,6 +166,8 @@ function runChecks(doc, g, rev) {
       for (const s of sampled.get(A.id)) {
         if (shared.some(n => dist(n.x, n.y, s.x, s.y) <= JUNCTION_SKIP)) continue;
         const r = distToPolyline(s.x, s.y, B.points);
+        // 立体交差で下をくぐる区間どうしは間隔を見ない
+        if (r.d < minSp && (underAt(A, s) || underAt(B, s))) continue;
         if (shared.length) {
           const p = pointAt(B.points, r.at);
           if (shared.some(n => dist(n.x, n.y, p.x, p.y) <= JUNCTION_SKIP)) continue;

@@ -24,8 +24,8 @@ export default {
   lines: [
     {
       key: 'main', name: '大井川本線', color: '#c4161c', op: 'oigawa', vmax: 65, double: false,
-      safety: ['ats_sn'], maxCars: 7, heading: 335,
-      turns: { '神尾': 350, '家山': 20, '地名': 345, '下泉': 10, '駿河徳山': 330 },
+      safety: ['ats_sn'], maxCars: 7, heading: 265,
+      turns: { '神尾': 260, '家山': 290, '地名': 255, '下泉': 280, '駿河徳山': 240 },
       stations: [
         ['金谷', 0.0, 't', P(1.5, 'mixed', { stubs: 1 })],
         ['新金谷', 2.3, 'pd', P(1.5, 'tourist', { ra: true, tt: true })],

@@ -25,8 +25,8 @@ export default {
   lines: [
     {
       key: 'main', name: '秩父本線', color: '#0b5aa8', op: 'chichibu', vmax: 85, double: false,
-      safety: ['ats_sn'], maxCars: 4, heading: 230,
-      turns: { '熊谷': 250, '寄居': 225, '長瀞': 200, '秩父': 225 },
+      safety: ['ats_sn'], maxCars: 4, heading: 170,
+      turns: { '熊谷': 150, '寄居': 155, '長瀞': 105, '秩父': 140 },
       stations: [
         ['羽生', 0.0, 't', P(2.5, 'mixed', { stubs: 1 })],
         ['西羽生', 1.2, 's', P(0.2, 'residential')],

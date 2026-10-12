@@ -13,7 +13,7 @@
 import { newDoc, uid, store } from '../store.js';
 import { objectDef, TURNOUT_TYPE_BY_VARIANT, FORMATION_COLORS } from '../catalog.js';
 import { buildGraph, junctionNodes, turnoutSpecAt, crossoverUnits } from '../topology.js';
-import { polylineLength, pointAt, distToPolyline, distToSegment } from '../geom.js';
+import { polylineLength, pointAt, distToPolyline, distToSegment, segIntersect } from '../geom.js';
 import { lineStations, computeSchedule } from '../timetable.js';
 import { buildRosters } from '../duty.js';
 import { planMeets } from '../meets.js';
@@ -321,6 +321,34 @@ export function buildNetwork(spec) {
         const got = sts[i].km - sts[i - 1].km;
         const diff = want - got;
         const gp = gaps.find(x => x.line === E && x.i === i);
+        if (gp && Math.abs(diff) > 5 && sts[i].path && sts[i].path.length) {
+          // 経路が省略の記号を通らない（接続の線などで記号を避けて行ける）ときは、経路のいちばん長い線にも記号を置く
+          const atOn = (t, o) => {
+            let best = 1e18, at = 0, acc = 0;
+            for (let j = 1; j < t.points.length; j++) {
+              const a = t.points[j - 1], b = t.points[j], L = Math.hypot(b.x - a.x, b.y - a.y) || 1e-9;
+              const u = Math.max(0, Math.min(1, ((o.x - a.x) * (b.x - a.x) + (o.y - a.y) * (b.y - a.y)) / (L * L)));
+              const d = Math.hypot(a.x + (b.x - a.x) * u - o.x, a.y + (b.y - a.y) * u - o.y);
+              if (d < best) { best = d; at = acc + L * u; }
+              acc += L;
+            }
+            return at;
+          };
+          const passes = sts[i].path.some(p => gp.objs.some(o => {
+            if (o.trackId !== p.trackId) return false;
+            const t = doc.tracks.find(x => x.id === p.trackId), at = atOn(t, o);
+            return at >= Math.min(p.fromAt, p.toAt) - 1 && at <= Math.max(p.fromAt, p.toAt) + 1;
+          }));
+          if (!passes) {
+            const pc = sts[i].path.reduce((a, p) => (Math.abs(p.toAt - p.fromAt) > Math.abs(a.toAt - a.fromAt) ? p : a));
+            const t = doc.tracks.find(x => x.id === pc.trackId);
+            if (t) {
+              const q = pointAt(t.points, (pc.fromAt + pc.toAt) / 2);
+              const g2 = O('gap_break', q.x, q.y, { rot: q.angle, trackId: t.id, extraM: gp.objs[0].extraM });
+              doc.objects.push(g2); gp.objs.push(g2);
+            }
+          }
+        }
         if (gp && Math.abs(diff) > 5) {
           const v = Math.max(0, gp.objs[0].extraM + diff);
           for (const o of gp.objs) o.extraM = v;
@@ -330,7 +358,7 @@ export function buildNetwork(spec) {
     }
     return worst;
   };
-  for (let k = 0; k < 3 && fit() > 5; k++);
+  for (let k = 0; k < 4 && fit() > 5; k++);
 
   // 直通先の起点（共有する駅）で、子路線の下りが親路線の上り本線から出ていくなら向きを読み替える
   {
@@ -703,6 +731,33 @@ export function buildNetwork(spec) {
     for (const pd of pendingDiamonds) {
       const sc = units.some(u => u.kind === 'scissors' && u.connectors.some(c => c.id === pd.a) && u.connectors.some(c => c.id === pd.b));
       if (!sc) objects.push(O('diamond', pd.x, pd.y, { rot: pd.rot, label: 'ダイヤモンドクロッシング' }));
+    }
+  }
+  // ダイヤモンドクロッシングを、線路が実際に交わるところへ寄せる（車両基地の線を描き直したときなどにずれる）
+  {
+    const xs = [];
+    const box = t => { let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; for (const p of t.points) { a = Math.min(a, p.x); b = Math.min(b, p.y); c = Math.max(c, p.x); d = Math.max(d, p.y); } return [a, b, c, d]; };
+    const bx = tracks.map(box);
+    for (let i = 0; i < tracks.length; i++) for (let j = i + 1; j < tracks.length; j++) {
+      const A = tracks[i], B = tracks[j], ba = bx[i], bb = bx[j];
+      if ((A.level || 0) !== (B.level || 0) || ba[2] < bb[0] || bb[2] < ba[0] || ba[3] < bb[1] || bb[3] < ba[1]) continue;
+      for (let a = 1; a < A.points.length; a++) for (let b = 1; b < B.points.length; b++) {
+        const x = segIntersect(A.points[a - 1], A.points[a], B.points[b - 1], B.points[b]);
+        if (!x || g.nodes.some(n => Math.hypot(n.x - x.x, n.y - x.y) <= (g.tol || 6) + 1)) continue;
+        xs.push({ x: x.x, y: x.y, rot: Math.atan2(A.points[a].y - A.points[a - 1].y, A.points[a].x - A.points[a - 1].x), main: A.kind === 'main' || B.kind === 'main' });
+      }
+    }
+    const dia = objects.filter(o => o.type === 'diamond');
+    const atX = o => xs.some(x => Math.hypot(x.x - o.x, x.y - o.y) <= 12);
+    for (const x of xs) {
+      if (dia.some(o => Math.hypot(o.x - x.x, o.y - x.y) <= 12)) continue;
+      const cand = dia.filter(o => Math.hypot(o.x - x.x, o.y - x.y) <= 45 && !atX(o)).sort((p, q) => Math.hypot(p.x - x.x, p.y - x.y) - Math.hypot(q.x - x.x, q.y - x.y))[0];
+      if (cand) { cand.x = x.x; cand.y = x.y; cand.rot = x.rot; }
+      else if (!x.main) {
+        // 図では平面で交わっている（破線でない）のに記号がないところにも置く（本線どうしの交わりは配線の誤りとして残す）
+        const o = O('diamond', x.x, x.y, { rot: x.rot, label: 'ダイヤモンドクロッシング' });
+        objects.push(o); dia.push(o);
+      }
     }
   }
   let no = 0;
@@ -1458,7 +1513,15 @@ function drawDiagramLine(L, D, ctx) {
   // 駅間省略の記号：各駅間の分岐のない区間の中ほど、上下の本線それぞれに
   for (let i = 1; i < st.length; i++) {
     const [r, l] = map.seps[i - 1];
-    const X = (r + l) / 2;
+    // 駅間でいちばん線の本数が少ないところ（複線から単線になる駅間なら単線の側）の、なるべく中ほど
+    const crossN = x => D.mains.concat(D.tracks).filter(d => { const xs = d.pts.map(q => q[0]); return Math.min(...xs) < x && Math.max(...xs) > x; }).length;
+    // 接続先から入る最初の駅間は、接続の線が本線に合流したあと（駅間の先の方）に置く
+    const aim = shared0 && i === 1 ? r + (l - r) * 0.85 : (r + l) / 2;
+    let X = aim, bestN = crossN(X);
+    for (let k = 1; k < 20; k++) {
+      const x = r + (l - r) * k / 20, n = crossN(x);
+      if (n < bestN || (n === bestN && Math.abs(x - aim) < Math.abs(X - aim))) { X = x; bestN = n; }
+    }
     const objs = [];
     D.mains.forEach((m, k) => {
       const y = yAt(m.pts, X);
@@ -1536,6 +1599,20 @@ function junctionTargets(L, parent, ps) {
         track: t, which: w === 0 ? 'a' : 'b', lbl: li ? li.t.s.replace(/方$/, '') : '', lblT: li && li.t, lblD: li ? li.d : 0 });
     });
   });
+  // 終点に続く路線なら、場外へ続く本線の端も出口（本線と並ぶ線が両方とも場外へ続くとき）
+  if (L.attach.mode === 'end' && cands.length) {
+    PD.D.mains.forEach((d, k) => {
+      const t = (parent.mains || [parent.main])[k];
+      if (!t || d.ends[1] !== 'boundary') return;
+      const q = d.pts[d.pts.length - 1];
+      const ext = (PD.D.stations[parent.stations.indexOf(ps)] || {}).ext || [X - 60, X + 60];
+      if (q[0] < ext[0] - 100 || q[0] > ext[1] + 100) return;
+      const pts = t.points, i = pts.length - 1;
+      const li = labelNearInfo(PD.D, q[0], q[1], 60);
+      cands.push({ key: `m${k}|1`, p: pts[i], dir: Math.atan2(pts[i].y - pts[i - 1].y, pts[i].x - pts[i - 1].x),
+        track: t, which: 'b', lbl: li ? li.t.s.replace(/方$/, '') : '', lblT: li && li.t, lblD: li ? li.d : 0 });
+    });
+  }
   // 1つの行先表示が近くの2組の出口に届くときは、表示にいちばん近い組（複線なら2本）だけをその行先にする
   {
     const byT = new Map();

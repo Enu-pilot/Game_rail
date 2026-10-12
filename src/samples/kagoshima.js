@@ -26,8 +26,8 @@ export default {
   lines: [
     {
       key: 'main', name: '鹿児島本線（門司港〜八代）', trackName: '鹿児島本線', color: '#e60012', op: 'jrk', vmax: 130,
-      safety: ['ats_sn'], maxCars: 9, heading: 250,
-      turns: { '小倉': 230, '折尾': 220, '福間': 240, '博多': 180, '鳥栖': 200, '大牟田': 170, '熊本': 190, '宇土': 200 },
+      safety: ['ats_sn'], maxCars: 9, heading: 135,
+      turns: { '小倉': 175, '折尾': 140, '福間': 135, '博多': 70, '鳥栖': 95, '大牟田': 70, '熊本': 105 },
       stations: [
         K('門司港', 0.0, 5, 'tourist', 't', { stubs: 4 }), K('小森江', 4.0, 1.5), K('門司', 5.5, 9, 'mixed'),
         K('小倉', 11.0, 37, 'urban'), K('西小倉', 11.8, 5, 'mixed'), K('九州工大前', 15.3, 5, 'school'), K('戸畑', 17.2, 12, 'mixed'),
@@ -51,9 +51,9 @@ export default {
     },
     {
       key: 'orange', name: '肥薩おれんじ鉄道線', color: '#f08300', op: 'orange', vmax: 85, double: false,
-      safety: ['ats_sn'], maxCars: 2, heading: 200, endEnd: 'boundary',
+      safety: ['ats_sn'], maxCars: 2, heading: 110, endEnd: 'boundary',
       attach: { line: 'main', at: '八代', mode: 'end' },
-      turns: { '佐敷': 180, '水俣': 215, '阿久根': 180 },
+      turns: { '佐敷': 90, '水俣': 125, '阿久根': 90 },
       stations: [
         K('八代', 0.0), K('肥後高田', 4.8, 0.3), K('日奈久温泉', 10.1, 0.2, 'tourist'), K('肥後二見', 13.7, 0.1),
         K('上田浦', 18.0, 0.1), K('たのうら御立岬公園', 22.1, 0.1, 'tourist'), K('肥後田浦', 23.6, 0.1), K('海浦', 26.7, 0.05),
@@ -66,9 +66,9 @@ export default {
     },
     {
       key: 'south', name: '鹿児島本線（川内〜鹿児島）', trackName: '鹿児島本線', color: '#c8102e', op: 'jrk', vmax: 110,
-      safety: ['ats_sn'], maxCars: 6, heading: 160, endEnd: 'boundary',
+      safety: ['ats_sn'], maxCars: 6, heading: 100, endEnd: 'boundary',
       attach: { line: 'orange', at: '川内', mode: 'end' },
-      turns: { '串木野': 130, '伊集院': 120 },
+      turns: { '串木野': 50, '伊集院': 30 },
       stations: [
         K('川内', 0.0), K('隈之城', 2.6, 1), K('木場茶屋', 5.7, 0.3), K('串木野', 12.0, 1, 'mixed'), K('神村学園前', 14.2, 1, 'school'),
         K('市来', 16.6, 0.6), K('湯之元', 20.4, 0.4, 'tourist'), K('東市来', 22.9, 0.3), K('伊集院', 28.8, 3, 'mixed'),

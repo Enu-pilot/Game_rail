@@ -223,20 +223,24 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
         sp = lambda p: max(q[0] for x in p for q in S.edges[x]['pts']) - min(q[0] for x in p for q in S.edges[x]['pts'])
         best = (sp(paths[0]) + sp(paths[1]), list(paths))
         prf = lambda k: prefer[k] if k < len(prefer) else 0
-        raw = [trace_both(S, ce[0][1], prf(0))[0], None]
-        raw[1] = trace_both(S, ce[1][1], prf(1), frozenset(raw[0]))[0]
-        for it in range(4):
-            shared = set(raw[0]) & set(raw[1])
-            c0 = cut2(raw[0], ce[0][1], set(raw[1]) if it % 2 else shared - set(raw[0]))
-            c1 = cut2(raw[1], ce[1][1], set(raw[0]))
-            if it % 2 == 0: c0 = cut2(raw[0], ce[0][1], set(c1))
-            tot = sp(c0) + sp(c1)
-            if paths_cross(S, c0, c1): tot = -1
-            if os.environ.get('DEBUG_TRACE'): print('  alt', it, round(sp(c0)), round(sp(c1)), len(shared))
-            if tot > best[0] + 1: best = (tot, [c0, c1])
-            if not shared: break
-            k = it % 2
-            raw[k] = trace_both(S, ce[k][1], prf(k), frozenset(set(raw[1 - k]) - shared))[0]
+        for first in (0, 1):
+          # どちらの本線を先にたどるか、両方ためす
+          raw = [None, None]
+          raw[first] = trace_both(S, ce[first][1], prf(first))[0]
+          raw[1 - first] = trace_both(S, ce[1 - first][1], prf(1 - first), frozenset(raw[first]))[0]
+          for it in range(5):
+              c1 = cut2(raw[1], ce[1][1], set(raw[0]))
+              c0 = cut2(raw[0], ce[0][1], set(c1))
+              tot = sp(c0) + sp(c1)
+              if paths_cross(S, c0, c1): tot = -1
+              if os.environ.get('DEBUG_TRACE'): print('  alt', it, round(sp(c0)), round(sp(c1)), tot)
+              if tot > best[0] + 1: best = (tot, [c0, c1])
+              # 交互に、相手の線を避けてたどり直す
+              k = 0 if it % 2 == 0 else 1
+              av = set(raw[1 - k]) - {ce[k][1]}
+              new = trace_both(S, ce[k][1], prf(k), frozenset(av))[0]
+              if new == raw[k] and it > 0: break
+              raw[k] = new
         paths = best[1]
     main_ids = set(e for p in paths for e in p)
     main_pts = [ordered_path(S, p) for p in paths]

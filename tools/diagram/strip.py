@@ -218,7 +218,7 @@ def edge_stubs(img):
     def near_exit(d):
         for t in exits:
             cx = (t['x'] + t['x1']) / 2
-            if abs(d['p'][1] - (t['y'] - 4)) < 18 and (min(abs(d['p'][0] - t['x']), abs(d['p'][0] - t['x1'])) < 40 or t['x'] - 5 <= d['p'][0] <= t['x1'] + 5):
+            if abs(d['p'][1] - (t['y'] - 4)) < 18 and (min(abs(d['p'][0] - t['x']), abs(d['p'][0] - t['x1'])) < 25 or t['x'] - 5 <= d['p'][0] <= t['x1'] + 5):
                 return True
         return False
     dg = [d for d in dg if not near_exit(d)]
@@ -690,6 +690,10 @@ def station_labels(S, names):
     labs = [t for t in S.texts if is_station_label(t) or (t['size'] >= 13 and norm_name(t['s']) in want)]
     for t in labs:
         k = norm_name(t['s'])
+        # 「（東京）」のように、かっこでくくった駅名（図の外の駅の位置を示すもの）
+        if k not in want:
+            k2 = norm_name(re.sub(r'^[（(](.*)[）)]$', r'\1', t['s'].strip()))
+            if k2 in want: k = k2
         if k in want:
             out[want[k]].append(((t['x'] + t['x1']) / 2, t['y']))
             continue
@@ -752,7 +756,7 @@ def forward_cands(S, eid, n):
             out.append((d, x, math.sin(h)))
     return sorted(out)
 
-def greedy_reach(S, eid, n, sign, steps=300):
+def greedy_reach(S, eid, n, sign, steps=300, avoid=frozenset()):
     """辺 eid に入って節点 n から、折り返さずに行ける x の最遠（sign の向き）。分岐はどちらへも探す"""
     best = S.nodes[n][0] * sign
     seen = set()
@@ -768,6 +772,7 @@ def greedy_reach(S, eid, n, sign, steps=300):
             if d > math.radians(70): continue
             # 後戻りする（進む向きと逆へ行く）線はたどらない
             if (S.nodes[S.other(x, nx)][0] - S.nodes[nx][0]) * sign < -1: continue
+            if x in avoid: continue          # ほかの本線へ入ったら、その先は数えない
             stack.append((x, nx))
     return best
 
@@ -797,7 +802,7 @@ def trace(S, eid, start_node, prefer=0, avoid=frozenset()):
         if len(c) == 1:
             nx = c[0][1]
         else:
-            reach = [(greedy_reach(S, x, n, sign), d, x, sy) for d, x, sy in c]
+            reach = [(greedy_reach(S, x, n, sign, avoid=avoid), d, x, sy) for d, x, sy in c]
             far = max(r[0] for r in reach)
             tgt = TRACE_TARGET['hi'] if sign > 0 else TRACE_TARGET['lo']
             if tgt is not None: far = min(far, tgt * sign)

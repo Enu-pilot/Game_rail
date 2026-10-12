@@ -67,12 +67,37 @@ def merge_parts(parts):
                 s['plats'] = [[b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] for b in s['plats']]
         # 本線どうしをつなぐ（数が同じなら順に、違えば近いものへ）
         A = out['mains']; B = p['mains']
+        # 数が同じなら高さの順に組にする（帯の中で上下が入れ替わっていることがある）
+        Aord = sorted(A, key=lambda a: a['pts'][-1][1]); Bord = sorted(B, key=lambda b: b['pts'][0][1])
         for k, m in enumerate(B):
-            src = A[k] if len(A) == len(B) else min(A, key=lambda a: abs(a['pts'][-1][1] - m['pts'][0][1]))
+            src = Aord[Bord.index(m)] if len(A) == len(B) else min(A, key=lambda a: abs(a['pts'][-1][1] - m['pts'][0][1]))
             src['pts'] = src['pts'] + m['pts']
             src['under'] += m['under']
             src['ends'][1] = m['ends'][1]
         out['mains'] = A
+        # 継ぎ目で切れている本線以外の線（複線のもう1本など）も、高さの近いものどうしをつなぐ
+        joined = set()
+        for ta in out['tracks']:
+            if ta['ends'][1] != 'boundary' or ta['pts'][-1][0] < out['x1'] - 6: continue
+            e = ta['pts'][-1]
+            cand = [(abs(tb['pts'][0][1] - e[1]), k) for k, tb in enumerate(p['tracks'])
+                    if k not in joined and tb['ends'][0] == 'boundary' and tb['pts'][0][0] <= p['x0'] + dx + 6 and abs(tb['pts'][0][1] - e[1]) < 12]
+            if not cand: continue
+            k = min(cand)[1]
+            tb = p['tracks'][k]
+            ta['pts'] = ta['pts'] + tb['pts']
+            ta['ends'] = [ta['ends'][0], tb['ends'][1]]
+            ta['stations'] = list(dict.fromkeys((ta.get('stations') or []) + (tb.get('stations') or [])))
+            joined.add(k)
+        if joined:
+            keep = [t for k, t in enumerate(p['tracks']) if k not in joined]
+            remap = {}
+            for k in range(len(p['tracks'])):
+                if k not in joined: remap[k] = len(remap)
+            for c in p['crossings']:
+                for key in ('a', 'b'):
+                    if c[key][0] == 't': c[key][1] = remap.get(c[key][1], c[key][1])
+            p['tracks'] = keep
         nt = len(out['tracks'])
         out['tracks'] += p['tracks']
         for c in p['crossings']:
@@ -142,6 +167,28 @@ def synth_part(names, types):
     return dict(page='synth', rot=False, keys=[], missing=[], x0=0.0, x1=x1, mains=mains, tracks=tracks, stations=stations,
                 bldgs=[], tts=[], texts=[], depots=[], crossings=[], plains=[], extra={})
 
+def manual_shiojiri(names):
+    """塩尻駅：配線略図では縦向きに描かれているので、横向きに描き直したもの（島式3面6線）。
+    左が東京方（中央東線・岡谷方）、右が篠ノ井線（広丘方）。中央西線（洗馬方）は東京方の、本線の上側から入る。
+    下の島式に東線の上下（本線と、もう1本の線）、中の島式は東線・西線のどちらからも、上の島式に西線。
+    東線と篠ノ井線、西線と篠ノ井線は直通でき、東線と西線の行き来は向きを変える"""
+    a, n = names[0], names[-1]
+    main = dict(pts=[[0.0, 50.0], [300.0, 50.0]], under=[], ends=['boundary', 'boundary'])
+    T = lambda pts, ends, st=None: dict(pts=pts, ends=ends, under=False, stations=st or [], use=None)
+    tracks = [
+        T([[0.0, 68.0], [190.0, 68.0], [210.0, 50.0]], ['boundary', 'open'], [n]),                                      # 東線の複線のもう1本
+        T([[30.0, 50.0], [45.0, 32.0], [190.0, 32.0], [300.0, 32.0]], ['open', 'boundary'], [n]),                       # 中の島式（篠ノ井線の複線のもう1本へ）
+        T([[35.0, -50.0], [80.0, 14.0], [190.0, 14.0], [215.0, 32.0]], ['open', 'open'], [n]),                          # 中の島式（西線から）
+        T([[20.0, -50.0], [40.0, -50.0], [70.0, -4.0], [190.0, -4.0], [200.0, -4.0], [240.0, 32.0]], ['boundary', 'open'], [n]),  # 西線
+        T([[20.0, -68.0], [45.0, -68.0], [75.0, -22.0], [190.0, -22.0], [200.0, -4.0]], ['boundary', 'open'], [n]),              # 西線
+        T([[255.0, 50.0], [270.0, 32.0]], ['open', 'open']),                                                         # 渡り線（篠ノ井線側）
+    ]
+    st = dict(name=n, x=130.0, plats=[[100.0, 53.0, 160.0, 65.0], [100.0, 17.0, 160.0, 29.0], [100.0, -19.0, 160.0, -7.0]],
+              ext=[20.0, 250.0], mainPlat=[0])
+    texts = [dict(s='中央本線 洗馬方', x=-70.0, x1=15.0, y=-56.0, size=11.0)]
+    return dict(page='manual', rot=False, keys=[], missing=[], x0=0.0, x1=300.0, mains=[main], tracks=tracks,
+                stations=[dict(name=a, x=None), st], bldgs=[], tts=[], texts=texts, depots=[], crossings=[], plains=[], extra={})
+
 def build_line(sample, line, parts, shared0=False, ring=False):
     names = names_of(sample, line)
     out = []
@@ -150,6 +197,9 @@ def build_line(sample, line, parts, shared0=False, ring=False):
         page, a, b = pt['page'], pt['from'], pt['to']
         i, j = names.index(a), names.index(b)
         seg = names[i:j + 1]
+        if page == 'manual':
+            out.append(globals()['manual_' + pt['fn']](seg))
+            continue
         if page == 'synth':
             # 前の帯に続く区間：最初の駅（接続駅）は前の帯の方にあるので、その次から
             out.append(synth_part(seg[1:], list(pt['types'])))
@@ -159,6 +209,10 @@ def build_line(sample, line, parts, shared0=False, ring=False):
         p = export_part(page, seg, n_mains=pt.get('n', 2), first_complex=first,
                         last_complex=True, seed=pt.get('seed'), prefer=pt.get('prefer', (1, -1)),
                         pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()), extra_names=pt.get('extra', ()), color=pt.get('color'))
+        if pt.get('stub0') and p['stations'][0].get('x') is None:
+            # 接続駅の図を使わない（縦向きの図など）ときは、帯の左端に接続駅を置く
+            p['stations'][0].update(x=p['x0'] - 20.0, ext=[p['x0'] - 40.0, p['x0']], plats=[], mainPlat=[])
+            p['missing'] = [m for m in p['missing'] if m != a]
         out.append(p)
     d = merge_parts(out)
     if ring and names[-1] == names[0] and d['stations'][-1]['name'] != names[-1]:
@@ -170,7 +224,19 @@ def part(page, a, b, **kw):
     d = dict(page=page, **kw); d['from'] = a; d['to'] = b
     return d
 
+SHINONOI_KEYS = ['jr_east_shinonoi__011_02.svg', 'jr_east_shinonoi__010_03.svg', 'jr_east_shinonoi__011_04.svg', 'jr_east_shinonoi__010_05.svg', 'jr_east_shinonoi__010_06.svg', 'jr_east_shinonoi__010_07.svg']
+KISO_KEYS = ['jr_tokai_chuo__020_02.svg', 'jr_tokai_chuo__020_03.svg', 'jr_tokai_chuo__020_04.svg', 'jr_tokai_chuo__020_05.svg']
+
 CONFIG = {
+    'chuo': {
+        'east': dict(parts=[part('jr/east/chuo', '東京', '中野'), part('jr/east/chuo', '中野', '三鷹', pick=[2, 3], between=('荻窪', '西荻窪', 0.5)),
+                            part('jr/east/chuo', '三鷹', '茅野', between=('武蔵境', '東小金井', 0.5))]),
+        'suwa': dict(shared0=True, parts=[part('jr/east/chuo', '茅野', 'みどり湖', n=1), part('manual', 'みどり湖', '塩尻', fn='shiojiri')]),
+        'shinonoi': dict(shared0=True, parts=[part('jr/east/shinonoi', '塩尻', '篠ノ井', n=1, keys=SHINONOI_KEYS, stub0=True),
+                                              part('jr/east/shinetsu_1', '篠ノ井', '長野', n=1, pick=[1])]),
+        'kiso': dict(shared0=True, parts=[part('jr/tokai/chuo', '塩尻', '中津川', n=1, keys=KISO_KEYS, stub0=True)]),
+        'nagoya': dict(shared0=True, parts=[part('jr/tokai/chuo', '中津川', '名古屋')]),
+    },
     'kagoshima': {
         'main': dict(parts=[part('jr/kyushu/kagoshima_1', '門司港', '吉塚'), part('jr/kyushu/kagoshima_1', '吉塚', '八代', between=('竹下', '笹原', 0.5), prefer=(-1, 1))]),
         'orange': dict(shared0=True, parts=[part('pr/hisatsu-orange', '八代', '川内', n=1)]),
