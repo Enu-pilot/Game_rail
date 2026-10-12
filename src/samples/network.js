@@ -83,6 +83,7 @@ export function buildNetwork(spec) {
   for (const L of spec.lines) {
     const D = spec.diagram && spec.diagram[L.key];
     if (D) {
+      if (L.attach && lines[L.attach.line]) lines[L.attach.line]._siblings = spec.lines.filter(o => o.attach && o.attach.line === L.attach.line);
       drawDiagramLine(L, D, { lines, tracks, objects, stationObjByName, SP, gaps, T, O, pendingDiamonds });
       continue;
     }
@@ -1504,7 +1505,12 @@ function junctionTargets(L, parent, ps) {
   // 直通（接続先の本線の終わりに続く）なら、行先の駅名が合う出口だけ。合わなければ本線の端につなぐ
   // 直通（接続先の本線の終わりに続く）なら路線名では選ばない（「西武有楽町線」と「有楽町線」のような取り違えを避ける）。
   // 行先表示のない出口があればそれ、なければ本線の端につなぐ
-  if (!out.length && !L.attach.exit && L.attach.mode !== 'end') out = cands.filter(c => c.lbl && lnKeys.some(kw => c.lbl.includes(kw)));
+  if (!out.length && !L.attach.exit) {
+    // 路線名で選ぶ。同じ駅で分かれるほかの路線の駅名が書かれた出口（「西武有楽町線 新桜台方」など）は除く
+    const sib = new Set();
+    for (const o of parent._siblings || []) if (o !== L && o.attach && o.attach.at === L.attach.at) for (const st of o.stations.slice(1, 4)) sib.add(st[0]);
+    out = cands.filter(c => c.lbl && lnKeys.some(kw => c.lbl.includes(kw)) && ![...sib].some(n => c.lbl.includes(n)));
+  }
   if (!out.length) {
     // 行先表示の無い出口：近い2本（本線の本数ぶん）
     const free = cands.filter(c => !c.lbl && !used.has(c.key));

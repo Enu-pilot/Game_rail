@@ -15,7 +15,16 @@ def merge_parts(parts):
     for p in parts[1:]:
         p = json.loads(json.dumps(p))
         # 前の帯の終点の先（本線を切り離した部分）は、次の帯の本線と重なるので除く
-        drop = {k for k, t in enumerate(out['tracks']) if t.get('tail')}
+        # 前の帯の終点の先（本線から切り離した部分）は本線に戻して、そこから次の帯へつなぐ
+        drop, to_main = set(), {}
+        for mi, m in enumerate(out['mains']):
+            e = m['pts'][-1]
+            for k, t in enumerate(out['tracks']):
+                if k in drop or not t.get('tail'): continue
+                if abs(t['pts'][0][0] - e[0]) < 0.6 and abs(t['pts'][0][1] - e[1]) < 0.6:
+                    m['pts'] = m['pts'] + t['pts'][1:]
+                    drop.add(k); to_main[k] = mi
+                    break
         parts_tail_pts = {k: out['tracks'][k]['pts'] for k in drop}
         if drop:
             remap, keep = {}, []
@@ -25,10 +34,13 @@ def merge_parts(parts):
             out['tracks'] = keep
             cr = []
             for c in out['crossings']:
-                if (c['a'][0] == 't' and c['a'][1] in drop) or (c['b'][0] == 't' and c['b'][1] in drop): continue
+                ok = True
                 for key in ('a', 'b'):
-                    if c[key][0] == 't': c[key][1] = remap[c[key][1]]
-                cr.append(c)
+                    if c[key][0] != 't': continue
+                    if c[key][1] in to_main: c[key] = ['m', to_main[c[key][1]]]
+                    elif c[key][1] in drop: ok = False
+                    else: c[key][1] = remap[c[key][1]]
+                if ok: cr.append(c)
             out['crossings'] = cr
             # 除いた線にだけつながっていた端は、場外へ続く端にする
             def near_poly(e, pts):
@@ -78,6 +90,8 @@ def merge_parts(parts):
         out['missing'] += p['missing']
         for n, e in p.get('extra', {}).items():
             out.setdefault('extra', {})[n] = dict(x=e['x'] + dx, plats=[[q[0] + dx, q[1] + dy, q[2] + dx, q[3] + dy] for q in e['plats']])
+    # つないだ部分も含めて交差を数え直す
+    out['crossings'] = compute_crossings(out['mains'], out['tracks'])
     return out
 
 def slim(d):

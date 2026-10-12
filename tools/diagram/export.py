@@ -73,6 +73,36 @@ def clip_poly(pts, x0, x1):
     if cur is not None: out.append((cur, cur_cut, False))
     return [(q, sa, sb) for q, sa, sb in out if len(q) >= 2 and plen(q) > 0.3]
 
+def compute_crossings(out_mains, tracks):
+    """接続点のない交わり：ダイヤモンドクロッシングか立体交差か（破線＝下をくぐる線）"""
+    polys = [(('m', k), m['pts'], m['under']) for k, m in enumerate(out_mains)] + \
+            [(('t', k), t['pts'], t['under']) for k, t in enumerate(tracks)]
+    crossings = []
+    def seg_x(a, b, c, d):
+        r = (b[0] - a[0], b[1] - a[1]); s_ = (d[0] - c[0], d[1] - c[1])
+        den = r[0] * s_[1] - r[1] * s_[0]
+        if abs(den) < 1e-9: return None
+        t = ((c[0] - a[0]) * s_[1] - (c[1] - a[1]) * s_[0]) / den
+        u = ((c[0] - a[0]) * r[1] - (c[1] - a[1]) * r[0]) / den
+        if 0.02 < t < 0.98 and 0.02 < u < 0.98: return (a[0] + r[0] * t, a[1] + r[1] * t)
+        return None
+    def under_at(u, x, pts):
+        if isinstance(u, bool): return u
+        return any(a <= x <= b for a, b in u)
+    for i in range(len(polys)):
+        for j in range(i + 1, len(polys)):
+            (ki, pi, ui), (kj, pj, uj) = polys[i], polys[j]
+            if max(p[0] for p in pi) < min(p[0] for p in pj) or max(p[0] for p in pj) < min(p[0] for p in pi): continue
+            for a in range(1, len(pi)):
+                for b in range(1, len(pj)):
+                    x = seg_x(pi[a - 1], pi[a], pj[b - 1], pj[b])
+                    if not x: continue
+                    if any(seglen(x, nn) < 1.0 for nn in (pi[0], pi[-1], pj[0], pj[-1])): continue
+                    ua, ub = under_at(ui, x[0], pi), under_at(uj, x[0], pj)
+                    crossings.append(dict(x=round(x[0], 2), y=round(x[1], 2), a=list(ki), b=list(kj),
+                                          grade=bool(ua or ub), aUnder=bool(ua), bUnder=bool(ub)))
+    return crossings
+
 def in_bldg(S, p, m=1.5):
     """端点が建屋（車庫）の中か縁にある：建屋の中で終わる線"""
     return any(b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m and (b[2] - b[0]) > 6 for b in S.bldgs)
@@ -417,33 +447,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
                 nt = dict(t); nt['pts'] = R(pc); nt['ends'] = [e0, e1]
                 new.append(nt)
         tracks = new
-    # 交差（接続点のない交わり）：ダイヤモンドクロッシングか立体交差か
-    polys = [(('m', k), m['pts'], m['under']) for k, m in enumerate(out_mains)] + \
-            [(('t', k), t['pts'], t['under']) for k, t in enumerate(tracks)]
-    crossings = []
-    def seg_x(a, b, c, d):
-        r = (b[0] - a[0], b[1] - a[1]); s_ = (d[0] - c[0], d[1] - c[1])
-        den = r[0] * s_[1] - r[1] * s_[0]
-        if abs(den) < 1e-9: return None
-        t = ((c[0] - a[0]) * s_[1] - (c[1] - a[1]) * s_[0]) / den
-        u = ((c[0] - a[0]) * r[1] - (c[1] - a[1]) * r[0]) / den
-        if 0.02 < t < 0.98 and 0.02 < u < 0.98: return (a[0] + r[0] * t, a[1] + r[1] * t)
-        return None
-    def under_at(u, x, pts):
-        if isinstance(u, bool): return u
-        return any(a <= x <= b for a, b in u)
-    for i in range(len(polys)):
-        for j in range(i + 1, len(polys)):
-            (ki, pi, ui), (kj, pj, uj) = polys[i], polys[j]
-            if max(p[0] for p in pi) < min(p[0] for p in pj) or max(p[0] for p in pj) < min(p[0] for p in pi): continue
-            for a in range(1, len(pi)):
-                for b in range(1, len(pj)):
-                    x = seg_x(pi[a - 1], pi[a], pj[b - 1], pj[b])
-                    if not x: continue
-                    if any(seglen(x, nn) < 1.0 for nn in (pi[0], pi[-1], pj[0], pj[-1])): continue
-                    ua, ub = under_at(ui, x[0], pi), under_at(uj, x[0], pj)
-                    crossings.append(dict(x=round(x[0], 2), y=round(x[1], 2), a=list(ki), b=list(kj),
-                                          grade=bool(ua or ub), aUnder=bool(ua), bUnder=bool(ub)))
+    crossings = compute_crossings(out_mains, tracks)
     # 車両基地の名前（ラベル）
     DEPOT = re.compile(r'(検車区|車両基地|車両センター|電車区|車両所|工場|検修区|車庫|運転所|車両区|基地|留置線|検修庫|研究所)')
     depots = [dict(s=t['s'], x=t['x'], x1=t['x1'], y=t['y']) for t in texts if DEPOT.search(t['s'])]
