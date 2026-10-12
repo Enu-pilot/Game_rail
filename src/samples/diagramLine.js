@@ -123,7 +123,8 @@ export function stripMapping(D, specStations, SP, opts = {}) {
   for (let i = 0; i < n - 1; i++) {
     const [r, l] = seps[i];
     u += (r - x) * kx; x = r; push(x, u);
-    const real = Math.abs(specStations[i + 1].km - specStations[i].km) * 1000;
+    // 接続駅から起点までのぶん（opts.lead）は最初の駅間から差し引く
+    const real = Math.max(30, Math.abs(specStations[i + 1].km - specStations[i].km) * 1000 - (i === 0 ? (opts.lead || 0) : 0));
     const fixed = ((r - cx[i]) + (cx[i + 1] - l)) * kx;
     const target = Math.min(real, Math.max(SP, fixed + 120));
     const gapU = Math.max(20, Math.min(real - fixed - 5, target - fixed));

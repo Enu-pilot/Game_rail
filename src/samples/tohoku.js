@@ -92,8 +92,8 @@ export default {
     {
       // 田沢湖線（盛岡〜大曲）と奥羽本線（大曲〜秋田）。全線単線、大曲で向きを変える
       key: 'akita', name: '秋田新幹線（田沢湖線・奥羽本線）', color: '#d7003a', op: 'jre', vmax: 130, double: false,
-      safety: ['ats_p'], maxCars: 7, heading: 250,
-      attach: { line: 'tohoku', at: '盛岡', mode: 'branch', offset: 260, ownStation: true },
+      safety: ['ats_p'], maxCars: 7, heading: 190,
+      attach: { line: 'tohoku', at: '盛岡', mode: 'branch' },
       turns: { '大釜': 230, '羽後長野': 105, '大曲': { h: 250, at: 0 }, '峰吉川': 225 },
       stations: [
         S('盛岡', 0.0, 's', 3), S('大釜', 6.0, 'pd', 0.3), S('小岩井', 10.5, 'pd', 0.2), S('雫石', 16.0, 'p', 1),
@@ -108,7 +108,7 @@ export default {
       // 奥羽本線（福島〜新庄）。福島〜米沢は複線、米沢から先は単線
       key: 'yamagata', name: '山形新幹線（奥羽本線）', color: '#c9a800', op: 'jre', vmax: 130,
       safety: ['ats_p'], maxCars: 7, heading: 230,
-      attach: { line: 'tohoku', at: '福島', mode: 'branch', offset: 260, ownStation: true },
+      attach: { line: 'tohoku', at: '福島', mode: 'branch' },
       turns: { '米沢': 245 },
       singles: [['米沢', '新庄']],
       stations: [

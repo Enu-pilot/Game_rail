@@ -53,7 +53,8 @@ export default {
     {
       key: 'koya', name: '高野線', color: '#1a9e6f', op: 'nankai', vmax: 110,
       safety: ['ats_sn'], maxCars: 8, heading: 75,
-      attach: { line: 'honsen', at: '難波', mode: 'branch', offset: 230, ownStation: true },
+      attach: { line: 'honsen', at: '岸里玉出', mode: 'branch', exit: '帝塚山' },
+      prefix: 5,   // 難波〜天下茶屋は南海本線の配線図の中（本線と並ぶ高野線の線路）
       turns: { '岸里玉出': 80, '中百舌鳥': 95, '河内長野': 115, '橋本': 90 },
       singles: [['橋本', '極楽橋']],
       stations: [

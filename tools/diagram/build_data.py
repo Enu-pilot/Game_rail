@@ -50,16 +50,57 @@ def merge_parts(parts):
         out['plains'] += [[a + dx, b + dx] for a, b in p['plains']]
         out['x1'] = p['x1'] + dx
         out['missing'] += p['missing']
+        for n, e in p.get('extra', {}).items():
+            out.setdefault('extra', {})[n] = dict(x=e['x'] + dx, plats=[[q[0] + dx, q[1] + dy, q[2] + dx, q[3] + dy] for q in e['plats']])
     return out
 
 def slim(d):
-    keep = ('x0', 'x1', 'mains', 'tracks', 'stations', 'bldgs', 'tts', 'texts', 'depots', 'crossings')
+    keep = ('x0', 'x1', 'mains', 'tracks', 'stations', 'bldgs', 'tts', 'texts', 'depots', 'crossings', 'extra')
     d = {k: d[k] for k in keep}
     d['texts'] = [t for t in d['texts'] if t['s'].endswith('方')]
     for t in d['tracks']:
         t.pop('reach', None)
         if not t.get('foreign'): t.pop('foreign', None)
     return d
+
+
+def synth_part(names, types):
+    """配線図のない区間（計画中の延伸区間など）を、標準的な駅配線で作る。
+    types: 駅ごとの 's'（相対式2面2線）/ 'p'（2面4線・通過線つき）/ 't'（終端・島式2面4線）"""
+    Y0, Y1 = 50.0, 68.0          # 下り・上り本線
+    x = 0.0
+    mains = [dict(pts=[[0.0, Y0]], under=[], ends=['boundary', 'boundary']), dict(pts=[[0.0, Y1]], under=[], ends=['boundary', 'boundary'])]
+    tracks, stations = [], []
+    for n, ty in zip(names, types):
+        x += 120.0
+        cx = x + 40.0
+        st = dict(name=n, x=cx, plats=[], ext=[x, x + 80.0], mainPlat=[])
+        if ty == 't':
+            # 終端：本線がそのまま島式ホームの番線になり、外側にもう1線ずつ
+            for m in mains: m['pts'].append([x + 70.0, m['pts'][-1][1]]); m['ends'][1] = 'buffer'
+            st['plats'] = [[x + 20, Y0 + 3, x + 70, Y1 - 3]]
+            st['mainPlat'] = [0, 1]
+            for yy, ym, use in ((Y0 - 12, Y0, 'down'), (Y1 + 12, Y1, 'up')):
+                tracks.append(dict(pts=[[x, ym], [x + 8, yy], [x + 70, yy]], ends=['open', 'buffer'], under=False, stations=[n], use=use))
+                st['plats'].append([x + 20, min(yy, ym) + 3 if yy > ym else yy + 3, x + 70, max(yy, ym) - 3 if yy > ym else ym - 3])
+            stations.append(st)
+            x += 80
+            break
+        if ty == 'p':
+            # 2面4線：外側の副本線にホーム、本線は通過線
+            for yy, ym, use in ((Y0 - 12, Y0, 'down'), (Y1 + 12, Y1, 'up')):
+                tracks.append(dict(pts=[[x, ym], [x + 10, yy], [x + 70, yy], [x + 80, ym]], ends=['open', 'open'], under=False, stations=[n], use=use))
+            st['plats'] = [[x + 15, Y0 - 21, x + 65, Y0 - 15], [x + 15, Y1 + 15, x + 65, Y1 + 21]]
+        else:
+            st['plats'] = [[x + 15, Y0 - 9, x + 65, Y0 - 3], [x + 15, Y1 + 3, x + 65, Y1 + 9]]
+            st['mainPlat'] = [0, 1]
+        stations.append(st)
+        x += 80.0
+    for m in mains:
+        if m['ends'][1] != 'buffer': m['pts'].append([x + 40.0, m['pts'][-1][1]])
+    x1 = max(m['pts'][-1][0] for m in mains)
+    return dict(page='synth', rot=False, keys=[], missing=[], x0=0.0, x1=x1, mains=mains, tracks=tracks, stations=stations,
+                bldgs=[], tts=[], texts=[], depots=[], crossings=[], plains=[], extra={})
 
 def build_line(sample, line, parts, shared0=False, ring=False):
     names = names_of(sample, line)
@@ -69,10 +110,15 @@ def build_line(sample, line, parts, shared0=False, ring=False):
         page, a, b = pt['page'], pt['from'], pt['to']
         i, j = names.index(a), names.index(b)
         seg = names[i:j + 1]
+        if page == 'synth':
+            # 前の帯に続く区間：最初の駅（接続駅）は前の帯の方にあるので、その次から
+            out.append(synth_part(seg[1:], list(pt['types'])))
+            out[-1]['stations'] = [dict(name=a, x=None)] + out[-1]['stations']
+            continue
         first = (not shared0) if k == 0 else False
         p = export_part(page, seg, n_mains=pt.get('n', 2), first_complex=first,
                         last_complex=True, seed=pt.get('seed'), prefer=pt.get('prefer', (1, -1)),
-                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()))
+                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()), extra_names=pt.get('extra', ()), color=pt.get('color'))
         out.append(p)
     d = merge_parts(out)
     if ring and names[-1] == names[0] and d['stations'][-1]['name'] != names[-1]:
@@ -126,8 +172,9 @@ CONFIG = {
         'joetsu': dict(shared0=True, parts=[part('jr/shinkansen/joetsu', '大宮', '新潟')]),
         'hokurikuE': dict(shared0=True, parts=[part('jr/shinkansen/hokuriku', '高崎', '上越妙高')]),
         'hokurikuW': dict(shared0=True, parts=[part('jr/shinkansen/hokuriku', '上越妙高', '敦賀')]),
-        'akita': dict(parts=[part('jr/east/tazawako', '盛岡', '大曲', n=1), part('jr/east/ou_1', '大曲', '秋田', n=1)]),
-        'yamagata': dict(parts=[part('jr/east/ou_1', '福島', '新庄', n=1)]),
+        'akita': dict(shared0=True, parts=[part('jr/east/tazawako', '盛岡', '大曲', n=1), part('jr/east/ou_1', '大曲', '秋田', n=1, color='#0070c0')]),
+        'yamagata': dict(shared0=True, parts=[part('jr/east/ou_1', '福島', '新庄', n=1)]),
+        'hokkaido': dict(shared0=True, parts=[part('jr/shinkansen/hokkaido', '新青森', '新函館北斗'), part('synth', '新函館北斗', '札幌', types='ppppt')]),
     },
     'tobu': {
         'isesaki': dict(parts=[part('pr/tobu/isesaki', '浅草', '東武動物公園')]),
@@ -135,9 +182,9 @@ CONFIG = {
         'kinugawa': dict(shared0=True, parts=[part('pr/tobu/kinugawa', '下今市', '新藤原', n=1)]),
     },
     'nankai': {
-        'honsen': dict(parts=[part('pr/nankai/main', '難波', '和歌山市')]),
+        'honsen': dict(parts=[part('pr/nankai/main', '難波', '和歌山市', extra=('今宮戎', '萩ノ茶屋'))]),
         'kuko': dict(shared0=True, parts=[part('pr/nankai/airport', '泉佐野', '関西空港')]),
-        'koya': dict(parts=[part('pr/nankai/koya', '難波', '極楽橋')]),
+        'koya': dict(shared0=True, parts=[part('pr/nankai/koya', '岸里玉出', '極楽橋')]),
     },
     'asakusa': {
         'asakusa': dict(parts=[part('metro/tokyotoei/asakusa', '西馬込', '押上')]),

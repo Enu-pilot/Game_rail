@@ -77,7 +77,7 @@ def in_bldg(S, p, m=1.5):
     """端点が建屋（車庫）の中か縁にある：建屋の中で終わる線"""
     return any(b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m and (b[2] - b[0]) > 6 for b in S.bldgs)
 
-def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=()):
+def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=(), extra_names=(), color=None):
     keys = keys or images_for(page, names)
     if not keys: raise RuntimeError(f'{page}: {names[0]}〜{names[-1]} の画像がありません')
     S0 = Strip(*assemble(keys, flip=flip))
@@ -104,8 +104,10 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
         xa, xb = lab[a][0][0], lab[b][0][0]
         tries.insert(0, xa + (xb - xa) * f)
     ce = None
+    _strip.TRACE_COLOR['c'] = color.lower() if color else None
     for x in tries:
         c = crossing_edges(S, x)
+        if color: c = [ye for ye in c if S.edges[ye[1]]['color'].lower() == color.lower()]
         if pick is not None:
             if len(c) > max(pick): ce = [c[i] for i in pick]; break
         elif len(c) == n_mains: ce = c; break
@@ -355,6 +357,22 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
     inr = lambda b: b[2] >= cx0 and b[0] <= cx1
     texts = [dict(s=t['s'], x=round(t['x'], 1), x1=round(t['x1'], 1), y=round(t['y'], 1), size=round(t['size'], 1)) for t in S.texts
              if cx0 <= t['x'] <= cx1 and not is_station_label(t)]
+    # この路線にない駅（並行する他線だけが止まる駅）：位置とホーム、ホームに面した線
+    extra = {}
+    if extra_names:
+        elab = station_labels(S, list(extra_names))
+        for n in extra_names:
+            if n not in elab: continue
+            x = elab[n][0][0]
+            if not (cx0 <= x <= cx1): continue
+            bs = [b for b in S.plats if alll and min((abs(xx - (b[0] + b[2]) / 2), nm) for xx, nm in alll)[1] == norm_name(n)
+                  and abs((b[0] + b[2]) / 2 - x) < 120]
+            extra[n] = dict(x=round(x, 2), plats=[[round(v, 2) for v in b] for b in bs])
+            for t in tracks:
+                for b in bs:
+                    if any(side_dist(t['pts'], b, sd) is not None and side_dist(t['pts'], b, sd) < 8 for sd in (-1, 1)):
+                        if n not in t['stations']: t['stations'].append(n)
+                        break
     # 転車台：重なって描かれた同じものを1つにし、台を通り抜ける線は台の縁で切る（台に放射状に集まる線にする）
     tts = []
     for t in S.tts:
@@ -433,7 +451,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
                 mains=out_mains, tracks=tracks, stations=stations,
                 bldgs=[[round(v, 2) for v in b] for b in S.bldgs if inr(b)],
                 tts=[dict(x=round(t['x'], 2), y=round(t['y'], 2), r=round(t['r'], 2)) for t in tts],
-                texts=texts, depots=depots, crossings=crossings,
+                texts=texts, depots=depots, crossings=crossings, extra=extra,
                 plains=[[round(a, 1), round(b, 1)] for a, b in plains if b >= cx0 and a <= cx1])
 
 if __name__ == '__main__':

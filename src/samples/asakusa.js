@@ -108,7 +108,7 @@ export default {
     {
       key: 'access', name: '成田スカイアクセス線', color: '#ff8c00', op: 'keisei', vmax: 160,
       safety: ['c_ats'], maxCars: 8, heading: 345,
-      attach: { line: 'keisei', at: '京成高砂', mode: 'branch', offset: 250 },
+      attach: { line: 'keisei', at: '京成高砂', mode: 'branch', exit: '新柴又' },
       turns: { '東松戸': 355, '千葉ニュータウン中央': 10 },
       singles: [['成田湯川', '成田空港（アクセス線）']],
       stations: [

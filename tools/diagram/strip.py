@@ -195,7 +195,8 @@ def assemble(keys, rot=False, flip=()):
         if not raw.tracks:
             continue
         if is_inset(raw):
-            insets.append(raw)
+            # 補足の図は、ほかの画像と重ならない遠くに置いておき、あとで記号の相手の脇へ移す
+            insets.append(Img(key, dx=0.0, dy=-100000.0 * (len(insets) + 1), rot=rot != (key in flip)))
             continue
         bx0, by0, bx1, by1 = raw.bounds()
         if prev is None:
@@ -603,11 +604,40 @@ def station_labels(S, names):
         base = re.sub(r'[（(].*?[）)]$', '', n)
         if base != n: want.setdefault(norm_name(base), n)
     out = defaultdict(list)
-    for t in S.texts:
-        if not is_station_label(t): continue
+    labs = [t for t in S.texts if is_station_label(t)]
+    for t in labs:
         k = norm_name(t['s'])
         if k in want:
             out[want[k]].append(((t['x'] + t['x1']) / 2, t['y']))
+            continue
+        # 1文字ずつ別に書いた駅名（横に並ぶ・縦に並ぶ）
+        if len(t['s'].strip()) == 1:
+            singles = [u for u in S.texts if len(u['s'].strip()) == 1 and u['size'] >= 13]
+            for horiz in (True, False):
+                seq = [t]
+                while True:
+                    p = seq[-1]
+                    if horiz:
+                        nx = [u for u in singles if u not in seq and abs(u['y'] - p['y']) < 2 and 0 <= u['x'] - p['x'] <= p['size'] * 1.3]
+                        nx.sort(key=lambda u: u['x'])
+                    else:
+                        nx = [u for u in singles if u not in seq and abs(u['x'] - p['x']) < 3 and 0 < u['y'] - p['y'] <= p['size'] * 1.6]
+                        nx.sort(key=lambda u: u['y'])
+                    if not nx: break
+                    seq.append(nx[0])
+                if len(seq) < 2: continue
+                k2 = norm_name(''.join(u['s'].strip() for u in seq))
+                if k2 in want:
+                    xs = [u['x'] for u in seq] + [u['x1'] for u in seq]
+                    out[want[k2]].append(((min(xs) + max(xs)) / 2, seq[-1]['y']))
+            continue
+        # 2行に分けて書いた駅名（「羽田空港」＋「第3ターミナル」）
+        for u in labs:
+            if u is t or not (8 <= u['y'] - t['y'] <= 26): continue
+            if min(t['x1'], u['x1']) - max(t['x'], u['x']) < -4: continue
+            k2 = norm_name(t['s'] + u['s'])
+            if k2 in want:
+                out[want[k2]].append(((t['x'] + t['x1'] + u['x'] + u['x1']) / 4, t['y']))
     return out
 
 def crossing_edges(S, x):
@@ -633,7 +663,10 @@ def forward_cands(S, eid, n):
         d = abs(math.atan2(math.sin(h - hin), math.cos(h - hin)))
         # 記号（A など）どうしを結んだ線のつなぎ目は、1本しか続かなければ大きく曲がっていてもよい
         lim = 150 if len(others) == 1 and (S.edges[eid].get('link') or S.edges[x].get('link')) else 80
-        if d < math.radians(lim): out.append((d, x, math.sin(h)))
+        if d < math.radians(lim):
+            # 色（軌間・電化方式）を指定してたどるときは、違う色の線を後回しに
+            if TRACE_COLOR['c'] and S.edges[x]['color'].lower() != TRACE_COLOR['c'] and not S.edges[x].get('link'): d += 1.0
+            out.append((d, x, math.sin(h)))
     return sorted(out)
 
 def greedy_reach(S, eid, n, sign, steps=300):
@@ -651,6 +684,7 @@ def greedy_reach(S, eid, n, sign, steps=300):
     return best
 
 TRACE_TARGET = {'lo': None, 'hi': None}     # 路線の端の駅の x（先読みで「そこまで届けば十分」とする）
+TRACE_COLOR = {'c': None}           # たどる線の色（指定があれば）
 
 def trace(S, eid, start_node, prefer=0):
     """辺 eid から start_node と反対の向きへ、まっすぐ進めるところまでたどる。
