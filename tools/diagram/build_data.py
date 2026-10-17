@@ -1,3 +1,4 @@
+import math
 # サンプルごとの配線データ（src/samples/data/<sample>.js）を書き出す
 import sys, json
 sys.path.insert(0, '/tmp/claude-0/hs')
@@ -67,10 +68,23 @@ def merge_parts(parts):
                 s['plats'] = [[b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] for b in s['plats']]
         # 本線どうしをつなぐ（数が同じなら順に、違えば近いものへ）
         A = out['mains']; B = p['mains']
-        # 数が同じなら高さの順に組にする（帯の中で上下が入れ替わっていることがある）
-        Aord = sorted(A, key=lambda a: a['pts'][-1][1]); Bord = sorted(B, key=lambda b: b['pts'][0][1])
+        # 数が同じなら、つなぐ線どうしが交わらず短い組み合わせにする（帯の中で上下が入れ替わっていることがある）
+        pairing = list(range(len(B)))
+        if len(A) == len(B) == 2:
+            def segx(p1, p2, p3, p4):
+                d = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0])
+                if abs(d) < 1e-9: return False
+                t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / d
+                u = ((p3[0] - p1[0]) * (p2[1] - p1[1]) - (p3[1] - p1[1]) * (p2[0] - p1[0])) / d
+                return 0 < t < 1 and 0 < u < 1
+            best = None
+            for perm in ([0, 1], [1, 0]):
+                ls = [(A[perm[k]]['pts'][-1], B[k]['pts'][0]) for k in range(2)]
+                cost = sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in ls) + (1e6 if segx(ls[0][0], ls[0][1], ls[1][0], ls[1][1]) else 0)
+                if best is None or cost < best[0]: best = (cost, perm)
+            pairing = best[1]
         for k, m in enumerate(B):
-            src = Aord[Bord.index(m)] if len(A) == len(B) else min(A, key=lambda a: abs(a['pts'][-1][1] - m['pts'][0][1]))
+            src = A[pairing[k]] if len(A) == len(B) else min(A, key=lambda a: abs(a['pts'][-1][1] - m['pts'][0][1]))
             src['pts'] = src['pts'] + m['pts']
             src['under'] += m['under']
             src['ends'][1] = m['ends'][1]
@@ -208,7 +222,7 @@ def build_line(sample, line, parts, shared0=False, ring=False):
         first = (not shared0) if k == 0 else False
         p = export_part(page, seg, n_mains=pt.get('n', 2), first_complex=first,
                         last_complex=True, seed=pt.get('seed'), prefer=pt.get('prefer', (1, -1)),
-                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()), extra_names=pt.get('extra', ()), color=pt.get('color'))
+                        pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()), extra_names=pt.get('extra', ()), color=pt.get('color'), retrace=pt.get('retrace', True))
         if pt.get('stub0') and p['stations'][0].get('x') is None:
             # 接続駅の図を使わない（縦向きの図など）ときは、帯の左端に接続駅を置く
             p['stations'][0].update(x=p['x0'] - 20.0, ext=[p['x0'] - 40.0, p['x0']], plats=[], mainPlat=[])
@@ -228,6 +242,28 @@ SHINONOI_KEYS = ['jr_east_shinonoi__011_02.svg', 'jr_east_shinonoi__010_03.svg',
 KISO_KEYS = ['jr_tokai_chuo__020_02.svg', 'jr_tokai_chuo__020_03.svg', 'jr_tokai_chuo__020_04.svg', 'jr_tokai_chuo__020_05.svg']
 
 CONFIG = {
+    'meitetsu': {
+        'main': dict(parts=[part('pr/nagoya/nagoya', '豊橋', '名鉄岐阜')]),
+        'tokoname': dict(shared0=True, parts=[part('pr/nagoya/tokoname', '神宮前', '常滑')]),
+        'airport': dict(shared0=True, parts=[part('pr/nagoya/airport', '常滑', '中部国際空港')]),
+        'kowa': dict(shared0=True, parts=[part('pr/nagoya/kowa', '太田川', '富貴')]),
+        'kowaS': dict(shared0=True, parts=[part('pr/nagoya/kowa', '富貴', '河和', n=1)]),
+        'chita': dict(shared0=True, parts=[part('pr/nagoya/chita', '富貴', '内海', n=1)]),
+        'inuyama': dict(shared0=True, parts=[part('pr/nagoya/inuyama', '東枇杷島', '新鵜沼', keys=['pr_nagoya_inuyama__010_02.svg', 'pr_nagoya_inuyama__010_03.svg', 'pr_nagoya_inuyama__010_04.svg', 'pr_nagoya_inuyama__010_05.svg'], stub0=True)]),
+        'kakamigahara': dict(shared0=True, parts=[part('pr/nagoya/kakamigahara', '新鵜沼', '名鉄岐阜（各務原線）')]),
+        'hiromi': dict(shared0=True, parts=[part('pr/nagoya/hiromi', '犬山', '新可児')]),
+        'komaki': dict(shared0=True, parts=[part('pr/nagoya/komaki', '犬山', '上飯田', n=1)]),
+        'tsushima': dict(shared0=True, parts=[part('pr/nagoya/tsushima', '須ヶ口', '津島', keys=['pr_nagoya_tsushima__010_02.svg', 'pr_nagoya_tsushima__010_03.svg'], stub0=True)]),
+        'bisai': dict(shared0=True, parts=[part('pr/nagoya/bisai', '津島', '名鉄一宮（尾西線）', n=1)]),
+        'bisaiS': dict(shared0=True, parts=[part('pr/nagoya/bisai', '津島', '弥富', n=1)]),
+        'takehana': dict(shared0=True, parts=[part('pr/nagoya/takehana', '笠松', '江吉良', n=1)]),
+        'hashima': dict(shared0=True, parts=[part('pr/nagoya/hashima', '江吉良', '新羽島', n=1)]),
+        'mikawaY': dict(shared0=True, parts=[part('pr/nagoya/mikawa', '知立', '猿投', n=1)]),
+        'mikawaU': dict(shared0=True, parts=[part('pr/nagoya/mikawa', '知立', '碧南', n=1)]),
+        'nishio': dict(shared0=True, parts=[part('pr/nagoya/nishio', '新安城', '吉良吉田', n=1)]),
+        'gamagori': dict(shared0=True, parts=[part('pr/nagoya/gamagori', '吉良吉田', '蒲郡', n=1)]),
+        'toyokawa': dict(shared0=True, parts=[part('metro/nagoya/toyokawa', '国府', '豊川稲荷', n=1)]),
+    },
     'chuo': {
         'east': dict(parts=[part('jr/east/chuo', '東京', '中野'), part('jr/east/chuo', '中野', '三鷹', pick=[2, 3], between=('荻窪', '西荻窪', 0.5)),
                             part('jr/east/chuo', '三鷹', '茅野', between=('武蔵境', '東小金井', 0.5))]),
@@ -251,7 +287,7 @@ CONFIG = {
                                                  part('metro/tokyometro/yurakucho', '池袋', '小竹向原', pick=[0, 1], between=('池袋', '要町', 0.5))]),
         'yurakucho': dict(shared0=True, parts=[part('metro/tokyometro/yurakucho', '小竹向原', '和光市')]),
         'tojo': dict(shared0=True, parts=[part('pr/tobu/tojo', '和光市', '森林公園', pick=[1, 2], between=('朝霞', '朝霞台', 0.5))]),
-        'seibu': dict(shared0=True, parts=[part('pr/seibu/yurakucho', '小竹向原', '練馬'),
+        'seibu': dict(shared0=True, parts=[part('pr/seibu/yurakucho', '小竹向原', '練馬', retrace=False),
                                             part('pr/seibu/ikebukuro', '練馬', '小手指')]),
         'minatomirai': dict(shared0=True, parts=[part('pr/yokohamakosoku/minatomirai', '横浜', '元町・中華街')]),
         'shinyoko': dict(shared0=True, parts=[part('pr/tokyu/shinyokohama', '日吉', '新横浜')]),

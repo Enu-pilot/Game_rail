@@ -111,7 +111,14 @@ export function buildNetwork(spec) {
       const parent = lines[L.attach.line];
       const ps = parent.stations.find(x => x.name === L.attach.at);
       if (!parent || !ps) throw new Error(`${L.name}: 接続先 ${L.attach.line}/${L.attach.at} がありません`);
-      if (L.attach.mode === 'branch') {
+      const ex = parent.diagram && ps.diag ? junctionTargets(L, parent, ps) : [];
+      if (ex.length) {
+        // 接続先の配線図に出口があれば、その先から延ばす（はじめは出口の向き、最初の駅間で路線の向きへ）
+        const hx = ex.reduce((a, e) => a + Math.cos(e.dir), 0), hy = ex.reduce((a, e) => a + Math.sin(e.dir), 0);
+        const h = Math.atan2(hy, hx);
+        const c = { x: ex.reduce((a, e) => a + e.p.x, 0) / ex.length, y: ex.reduce((a, e) => a + e.p.y, 0) / ex.length };
+        P0 = { x: c.x + Math.cos(h) * 60, y: c.y + Math.sin(h) * 60 };
+      } else if (L.attach.mode === 'branch') {
         P0 = parent.path.at(ps.s + (L.attach.offset ?? 220));
       } else {
         // 端に接続：接続駅に近い方の本線端から延ばす
@@ -1190,7 +1197,7 @@ function drawDiagramLine(L, D, ctx) {
       heading = conn.heading;
     }
   }
-  const map = stripMapping(D, st, SP, { shared0, lead });
+  const map = stripMapping(D, st, L.spacing || SP, { shared0, lead });
   const base = baseline(D, map.seps);
   // 曲がり角は、その駅の先の駅間（分岐のない区間）の中ほど
   const turns = [];

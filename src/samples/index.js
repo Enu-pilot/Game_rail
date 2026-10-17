@@ -16,6 +16,7 @@ import chichibu from './chichibu.js';
 import oigawa from './oigawa.js';
 import kagoshima from './kagoshima.js';
 import chuo from './chuo.js';
+import meitetsu from './meitetsu.js';
 
 // 路線網のサンプルは組み立てのときに行き違い・待避まで入れてある（dispatched）
 const net = spec => ({ no: spec.no, id: spec.id, name: spec.title, spec, dispatched: true, build: () => buildNetwork(spec) });
@@ -36,6 +37,7 @@ export const SAMPLES = [
   net(oigawa),
   net(kagoshima),
   net(chuo),
+  net(meitetsu),
 ];
 
 export const sampleById = id => SAMPLES.find(s => s.id === id) || SAMPLES[0];

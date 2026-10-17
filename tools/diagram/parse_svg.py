@@ -194,6 +194,12 @@ def parse(path):
             for pl in polys:
                 pts = [ap(m2, x, y) for x, y in pl]
                 if stroke in ('none', None) or sw == 0:
+                    # 塗りだけの小さな三角：一線スルーなどの矢印
+                    if fill and fill.lower() not in ('none', '#fff', '#ffffff', 'white', '#bfbfbf') and 3 <= len(pts) <= 5:
+                        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                        if max(xs) - min(xs) < 12 and max(ys) - min(ys) < 12:
+                            out.setdefault('arrows', []).append([round(sum(xs) / len(xs), 2), round(sum(ys) / len(ys), 2)])
+                            continue
                     # 塗りだけのパス：転車台（灰色の円）など
                     if fill and fill.lower() in ('#bfbfbf',):
                         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]

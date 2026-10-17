@@ -137,7 +137,7 @@ def paths_cross(S, pa, pb):
             if inter(s, t): return True
     return False
 
-def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=(), extra_names=(), color=None):
+def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, seed=None, prefer=(1, -1), pick=None, seed_between=None, keys=None, flip=(), extra_names=(), color=None, retrace=True):
     keys = keys or images_for(page, names)
     if not keys: raise RuntimeError(f'{page}: {names[0]}〜{names[-1]} の画像がありません')
     S0 = Strip(*assemble(keys, flip=flip))
@@ -190,7 +190,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
             while b < len(p) - 1 and p[b + 1] not in used: b += 1
             return p[a:b + 1]
         span = lambda p: max(q[0] for x in p for q in S.edges[x]['pts']) - min(q[0] for x in p for q in S.edges[x]['pts'])
-        if any(e in used for e in path):
+        if retrace and any(e in used for e in path):
             # ほかの本線の線を避けてたどり直し（渡り線で隣の線へ移らずに続く線）、長く続くほうを使う
             p2, l2, r2 = trace_both(S, eid, pref, frozenset(used))
             if os.environ.get('DEBUG_TRACE'):
@@ -204,6 +204,8 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
             p2 = cut(p2)
             # たどり直した線が、ほかの本線と交差する（立体交差・平面交差で向こう側へ渡る）なら使わない
             if span(p2) > span(path) and not any(paths_cross(S, p2, q) for q in paths): path = p2
+        elif any(e in used for e in path):
+            path = cut(path)
         if os.environ.get('DEBUG_TRACE'):
             for nn in (l, r):
                 print('  main', k, 'end node', nn, S.nodes[nn], 'adj', [(x, [round(v,1) for v in S.edges[x]['pts'][0]], [round(v,1) for v in S.edges[x]['pts'][-1]]) for x in S.adj[nn]])
@@ -212,7 +214,7 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
         paths.append(path)
     # 2本の本線が途中で同じ線に入ってしまうとき（先にたどった本線が渡り線で隣の線へ移ったとき）は、
     # 互いに相手の線を避けてたどり直し、両方が長く続く組み合わせにする
-    if len(paths) == 2:
+    if len(paths) == 2 and retrace:
         def cut2(p, eid, used):
             if eid not in p or eid in used: return p
             i0 = p.index(eid); a = i0
@@ -506,6 +508,11 @@ def export_part(page, names, n_mains=2, first_complex=True, last_complex=True, s
     tts = []
     for t in S.tts:
         if cx0 <= t['x'] <= cx1 and t['r'] > 2 and not any(seglen((t['x'], t['y']), (u['x'], u['y'])) < 1 for u in tts): tts.append(t)
+    # 線が1本通り抜けるだけの小さな丸は転車台ではない（線上の記号）
+    def tt_tracks(t):
+        c = (t['x'], t['y'])
+        return sum(1 for u in tracks if any(dist_seg(c, u['pts'][k - 1], u['pts'][k])[0] < t['r'] + 1.5 for k in range(1, len(u['pts']))))
+    tts = [t for t in tts if t['r'] >= 5 or tt_tracks(t) >= 2]
     def cut_circle(pts, c, r):
         def inside(p): return seglen(p, c) < r - 1e-6
         pieces, cur = [], []

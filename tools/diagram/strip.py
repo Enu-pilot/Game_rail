@@ -7,7 +7,7 @@ FIGS = [l.split('\t') for l in open('/tmp/claude-0/hs/figs.tsv').read().strip().
 TOL = 0.9
 
 def norm_name(s):
-    s = s.replace('ヶ', 'ケ').replace('ｹ', 'ケ').replace('箪', '簞').replace('（', '(').replace('）', ')')
+    s = s.replace('ッ', 'ツ').replace('ヶ', 'ケ').replace('ｹ', 'ケ').replace('箪', '簞').replace('（', '(').replace('）', ')')
     return re.sub(r'\s', '', s)
 
 def page_images(page):
@@ -50,6 +50,7 @@ class Img:
         self.plats = [tb(p['box']) for p in d['plats']]
         self.bldgs = [tb(b['box']) + list(b.get('rot', [])) for b in d['bldgs']]   # 斜めの建屋は [x0, y0, x1, y1, 向き, 幅, 奥行き]
         self.tts = [dict(x=tf(t['x'], t['y'])[0], y=tf(t['x'], t['y'])[1], r=t['r']) for t in d['tts']]
+        self.arrows = [list(tf(*a)) for a in d.get('arrows', [])]
         self.texts = []
         for t in d['texts']:
             x0, y0 = tf(t['x'], t['y']); x1, _ = tf(t['x1'], t['y'])
@@ -57,6 +58,7 @@ class Img:
         self.drop_legend_boxes()
         self.fix_platform_outlines()
         self.merge_platforms()
+        self.heal_arrow_gaps()
         # 線路の続きを示す記号（A, B …）
         self.letters = [t for t in self.texts if re.fullmatch(r'[A-Z]', t['s'].strip())]
 
@@ -80,6 +82,36 @@ class Img:
                     # 枠の中の線（凡例の線の見本）も除く
                     drop.update(id(t) for t in self.tracks if all(ax0 - 1 <= p[0] <= ax1 + 1 and ya - 1 <= p[1] <= yb + 1 for p in t['pts']))
         if drop: self.tracks = [t for t in self.tracks if id(t) not in drop]
+
+    def heal_arrow_gaps(self):
+        """一線スルーの矢印などで、線の端が分岐の手前で少し途切れているのをつなぐ（進む向きの先 7.5 以内）"""
+        if not self.tracks or not self.arrows: return
+        for d in dangling(self):
+            t = self.tracks[d['i']]
+            p = t['pts'][d['w']]
+            # 矢印の近くで途切れている端だけ
+            if not any(math.hypot(a[0] - p[0], a[1] - p[1]) < 9 for a in self.arrows): continue
+            ux, uy = math.cos(d['dir']), math.sin(d['dir'])
+            best = None
+            for k, o in enumerate(self.tracks):
+                if k == d['i']: continue
+                for q in (o['pts'][0], o['pts'][-1]):
+                    vx, vy = q[0] - p[0], q[1] - p[1]
+                    s_ = vx * ux + vy * uy
+                    if 0.3 < s_ <= 7.5 and abs(vx * uy - vy * ux) <= max(0.8, s_ * 0.5):
+                        if best is None or s_ < best[0]: best = (s_, [q[0], q[1]])
+                for a, b in zip(o['pts'], o['pts'][1:]):
+                    ex, ey = b[0] - a[0], b[1] - a[1]
+                    den = ux * ey - uy * ex
+                    if abs(den) < 1e-9: continue
+                    s_ = ((a[0] - p[0]) * ey - (a[1] - p[1]) * ex) / den
+                    u = ((a[0] - p[0]) * uy - (a[1] - p[1]) * ux) / den
+                    if 0.3 < s_ <= 7.5 and 0.0 <= u <= 1.0:
+                        if best is None or s_ < best[0]: best = (s_, [p[0] + ux * s_, p[1] + uy * s_])
+            if best:
+                pts = list(t['pts'])
+                pts[d['w']] = best[1]
+                t['pts'] = pts
 
     def merge_platforms(self):
         """仕切り線で2つに分けて描いたホーム（同じ高さで接している四角）で、両側に面する線が同じものは1つのホームにする
@@ -211,6 +243,9 @@ def edge_stubs(img):
     dg = dangling(img)
     near = set()
     for lt in img.letters:
+        # 画像の左右の端に書いた記号（A・B）は、となりの画像へ続く印なので、継ぎ目の線から外さない
+        cx = (lt['x'] + lt['x1']) / 2
+        if cx - x0 < 30 or x1 - cx < 30: continue
         for d in letter_ends(img, lt, dg): near.add((d['i'], d['w']))
     dg = [d for d in dg if (d['i'], d['w']) not in near]
     # 行先表示（「〜方」）の近くで切れている線は、他線への出口なので画像どうしの継ぎ目にしない
@@ -297,8 +332,7 @@ def assemble(keys, rot=False, flip=()):
         if ia is ib:
             moves.append((ia, ea, eb))
         else:
-            for a_, b_ in pair_ends(ea, eb):
-                links.append([a_['p'], b_['p']])
+            links += letter_links(pair_ends(ea, eb))
     for im, ea, eb in moves:
         if not relocate_block(im, ea, eb, links):
             for a_, b_ in pair_ends(ea, eb):
@@ -348,6 +382,33 @@ def place_inset(ins, imgs, links):
         im.texts += [t for t in ins.texts if bx0 <= t['x'] <= bx1 and by0 <= t['y'] <= by1 and not re.fullmatch(r'[A-Z]', t['s'].strip()) and t['s'].strip()[:1] not in '（('] 
         eb2 = [dict(e, i=idx[e['i']]) for e in eb if e['i'] in idx]
         relocate_block(im, ea, eb2, links, force=True)
+
+def letter_links(pairs):
+    """記号どうしを結ぶ線。まっすぐ結ぶと交わるときは、遠い方の組を外側（上か下）へ回して交わらないようにする"""
+    out = [[a['p'], b['p']] for a, b in pairs]
+    if len(out) != 2: return out
+    def cross(p, q):
+        for i in range(1, len(p)):
+            for j in range(1, len(q)):
+                (x1, y1), (x2, y2), (x3, y3), (x4, y4) = p[i - 1], p[i], q[j - 1], q[j]
+                d = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
+                if abs(d) < 1e-9: continue
+                t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / d
+                u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / d
+                if 0.01 < t < 0.99 and 0.01 < u < 0.99: return True
+        return False
+    if not cross(out[0], out[1]): return out
+    k = 0 if abs(out[0][1][0] - out[0][0][0]) >= abs(out[1][1][0] - out[1][0][0]) else 1
+    a, b = out[k]; o = out[1 - k]
+    for sgn in (-1, 1):
+        ys = [p[1] for lk in out for p in lk]
+        yd = (min(ys) - 8) if sgn < 0 else (max(ys) + 8)
+        xa = a[0] + (6 if b[0] > a[0] else -6)
+        cand = [a, [xa, yd], [b[0], yd], b]
+        if not cross(cand, o):
+            out[k] = cand
+            break
+    return out
 
 def pair_ends(ea, eb):
     """2組の端を、外向きの向きに直交する並びの順に組にする"""
@@ -457,8 +518,8 @@ class Strip:
         self.imgs = imgs
         self.tracks = []
         for im in imgs: self.tracks += im.tracks
-        for a, b in links:
-            self.tracks.append({'pts': [a, b], 'dashed': False, 'color': '#000', 'img': 'link'})
+        for lk in links:
+            self.tracks.append({'pts': list(lk), 'dashed': False, 'color': '#000', 'img': 'link'})
         self.thin = [t for im in imgs for t in im.thin]
         self.plats = [p for im in imgs for p in im.plats]
         self.bldgs = [b for im in imgs for b in im.bldgs]
