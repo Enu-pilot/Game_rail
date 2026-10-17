@@ -1356,7 +1356,16 @@ function drawDiagramLine(L, D, ctx) {
       const b = pr ? pr[1].p : t.points[0];
       if (pr) { pr[1].t.ends[pr[1].which] = 'open'; pr[1].t.kind = 'main'; pr[1].t.name = `${t.name}（${st[0].name}方）`; }
       t.ends.b = 'open';
-      if (Math.hypot(a.x - b.x, a.y - b.y) > 1) tracks.push(T(`${t.name}（継目）`, 'main', [a, b], {}, { maxSpeedKmh: L.vmax ?? null }));
+      if (Math.hypot(a.x - b.x, a.y - b.y) <= 1) continue;
+      const seam = T(`${t.name}（継目）`, 'main', [a, b], {}, { maxSpeedKmh: L.vmax ?? null });
+      // 図の端どうしを結ぶ線なので、途中でほかの線と交わるなら立体交差で越える
+      const crosses = tracks.some(o => o !== t && o !== pr?.[1].t && o.points.some((q, k) => {
+        if (k === 0) return false;
+        const x = segIntersect(a, b, o.points[k - 1], q);
+        return x && Math.hypot(x.x - a.x, x.y - a.y) > 2 && Math.hypot(x.x - b.x, x.y - b.y) > 2;
+      }));
+      if (crosses) seam.level = 1;
+      tracks.push(seam);
     }
   }
 

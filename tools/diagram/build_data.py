@@ -223,6 +223,13 @@ def build_line(sample, line, parts, shared0=False, ring=False):
         p = export_part(page, seg, n_mains=pt.get('n', 2), first_complex=first,
                         last_complex=True, seed=pt.get('seed'), prefer=pt.get('prefer', (1, -1)),
                         pick=pt.get('pick'), seed_between=pt.get('between'), keys=pt.get('keys'), flip=pt.get('flip', ()), extra_names=pt.get('extra', ()), color=pt.get('color'), retrace=pt.get('retrace', True))
+        if pt.get('fix'):
+            # 図の読み取りで絡まった部分を直す：(始点, 終点, 新しい点列) — 始点・終点の合う線を置き換える
+            near = lambda a, b: abs(a[0] - b[0]) < 0.5 and abs(a[1] - b[1]) < 0.5
+            for a, b, pts in pt['fix']:
+                for t in p['tracks']:
+                    if near(t['pts'][0], a) and near(t['pts'][-1], b): t['pts'] = pts
+            p['crossings'] = compute_crossings(p['mains'], p['tracks'])
         if pt.get('stub0') and p['stations'][0].get('x') is None:
             # 接続駅の図を使わない（縦向きの図など）ときは、帯の左端に接続駅を置く
             p['stations'][0].update(x=p['x0'] - 20.0, ext=[p['x0'] - 40.0, p['x0']], plats=[], mainPlat=[])
@@ -243,7 +250,9 @@ KISO_KEYS = ['jr_tokai_chuo__020_02.svg', 'jr_tokai_chuo__020_03.svg', 'jr_tokai
 
 CONFIG = {
     'meitetsu': {
-        'main': dict(parts=[part('pr/nagoya/nagoya', '豊橋', '名鉄岐阜')]),
+        'main': dict(parts=[part('pr/nagoya/nagoya', '豊橋', '名鉄岐阜',
+                                     # 新川検車区の端：シーサスと渡り線が重なって描かれた部分は、渡り線の片方を除いて単純にする
+                                     fix=[([6210.8, 137.1], [6257.5, 141.7], [[6210.8, 137.1], [6255.1, 137.0]])])]),
         'tokoname': dict(shared0=True, parts=[part('pr/nagoya/tokoname', '神宮前', '常滑')]),
         'airport': dict(shared0=True, parts=[part('pr/nagoya/airport', '常滑', '中部国際空港')]),
         'kowa': dict(shared0=True, parts=[part('pr/nagoya/kowa', '太田川', '富貴')]),

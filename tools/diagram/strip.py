@@ -57,6 +57,7 @@ class Img:
             self.texts.append(dict(s=t['s'], x=min(x0, x1), x1=max(x0, x1), y=y0, size=t['size']))
         self.drop_legend_boxes()
         self.fix_platform_outlines()
+        self.drop_gauge_doubles()
         self.merge_platforms()
         self.heal_arrow_gaps()
         # 線路の続きを示す記号（A, B …）
@@ -82,6 +83,34 @@ class Img:
                     # 枠の中の線（凡例の線の見本）も除く
                     drop.update(id(t) for t in self.tracks if all(ax0 - 1 <= p[0] <= ax1 + 1 and ya - 1 <= p[1] <= yb + 1 for p in t['pts']))
         if drop: self.tracks = [t for t in self.tracks if id(t) not in drop]
+
+    def drop_gauge_doubles(self):
+        """軌間の違う線が同じ線路を走るところ（三線軌条など）は、色違いの線を2本並べて描いてあるので1本にする。
+        数の多い色（その図の主な線）を残し、同数なら灰色系を残す"""
+        from collections import Counter
+        cnt = Counter(t['color'] for t in self.tracks)
+        def rank(c):
+            gray = len(c) == 7 and c[1:3] == c[3:5] == c[5:7] or c in ('#000', '#fff')
+            return (cnt[c], 1 if gray else 0)
+        def samples(pts):
+            out = []
+            for a, b in zip(pts, pts[1:]):
+                n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1])))
+                out += [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(n)]
+            return out + [tuple(pts[-1])]
+        def dist(p, pts):
+            return min(dist_seg(p, a, b)[0] for a, b in zip(pts, pts[1:]))
+        drop = set()
+        order = sorted(range(len(self.tracks)), key=lambda i: rank(self.tracks[i]['color']))
+        for i in order:
+            A = self.tracks[i]
+            sa = samples(A['pts'])
+            if len(sa) < 4: continue
+            for j, B in enumerate(self.tracks):
+                if j == i or j in drop or B['color'] == A['color'] or rank(B['color']) < rank(A['color']): continue
+                if sum(1 for p in sa if dist(p, B['pts']) < 2.6) >= 0.7 * len(sa):
+                    drop.add(i); break
+        if drop: self.tracks = [t for k, t in enumerate(self.tracks) if k not in drop]
 
     def heal_arrow_gaps(self):
         """一線スルーの矢印などで、線の端が分岐の手前で少し途切れているのをつなぐ（進む向きの先 7.5 以内）"""
@@ -155,8 +184,8 @@ class Img:
                 z0, z1 = sorted([a2[1], b2[1]])
                 if abs(z0 - y0) > 0.6 or abs(z1 - y1) > 0.6: continue
                 cands.append((a2[0], i2))
-            for x2, i2 in sorted(cands):
-                # 両端の縦線をつなぐ横線（上か下）が全長の6割以上あるもののうち、いちばん近い組
+            for x2, i2 in sorted(cands)[:1]:
+                # 両端の縦線をつなぐ横線（上か下）が全長の6割以上ある、いちばん近い組（その先の縦線と組むと、間のホームの外まで含んでしまう）
                 hz = [(i, a, b) for i, a, b in segs if abs(a[1] - b[1]) < 0.3 and (abs(a[1] - y0) < 0.6 or abs(a[1] - y1) < 0.6)
                       and min(a[0], b[0]) >= x - 0.6 and max(a[0], b[0]) <= x2 + 0.6 and max(a[0], b[0]) - min(a[0], b[0]) > 3]
                 cover = sum(abs(b[0] - a[0]) for i, a, b in hz)
